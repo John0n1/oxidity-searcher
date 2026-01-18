@@ -1,0 +1,24 @@
+{
+  "name": "oxidized-mev-builder-dashboard",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "lucide-react": "^0.562.0",
+    "react-dom": "^19.2.3",
+    "@google/genai": "^1.37.0",
+    "recharts": "^3.6.0",
+    "react": "^19.2.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.9",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.1"
+  }
+}

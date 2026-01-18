@@ -1,0 +1,10 @@
+/target
+.env
+.venv/
+Cargo.lock
+node_modules
+.DS_Store
+.vscode/
+*.db-shm
+*.db-wal
+package-lock.json

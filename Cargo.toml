@@ -1,0 +1,57 @@
+[package]
+name = "oxidized-builder"
+version = "0.1.1-delta"
+edition = "2024"
+authors = ["John0n1 <john@on1.no>"]
+description = "Oxidized Builder - Ethereum block and transactions framework"
+homepage = "https://github.com/John0n1/oxidized-builder"
+repository = "https://github.com/John0n1/oxidized-builder"
+license = "MIT"
+
+[dependencies]
+# Async Runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Serialization (PINNED to fix build error)
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+config = "0.15.19"
+dotenvy = "0.15"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error Handling
+thiserror = "2.0.17"
+anyhow = "1.0"
+
+# --- ETHEREUM (ALLOY STABLE) ---
+# We use 0.9.2 for stability.
+alloy = { version = "1.4.3", features = ["full", "node-bindings", "serde"] }
+alloy-consensus = { version = "1.4.3", features = ["serde"] } 
+alloy-primitives = { version = "1.5.2", features = ["serde"] } 
+alloy-json-abi = "1.5.2" 
+alloy-sol-types = { version = "1.5.2"}
+
+# --- DATA ---
+sqlx = { version = "0.8.6", features = ["runtime-tokio-native-tls", "sqlite", "macros", "chrono"] }
+chrono = { version = "0.4.43", features = ["serde"] }
+
+# --- PHASE 4 DEPENDENCIES ---
+# Concurrency & Streams
+dashmap = "6.1.0" # Concurrent HashMap
+futures = "0.3" 
+
+# Network
+reqwest = { version = "0.13.1", features = ["json", "stream"] }
+async-trait = "0.1"
+
+# Utils
+lazy_static = "1.4"
+url = "2.5"
+hex = "0.4"
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+crypto-common = "0.1.7"

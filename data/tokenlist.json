@@ -1,0 +1,269 @@
+[
+  {
+    "symbol": "ETH",
+    "name": "ETH",
+    "addresses": {
+      "1": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "decimals": 18,
+    "coingecko_id": "ethereum",
+    "tags": [
+      "native",
+      "tier1",
+      "core",
+      "prefetch",
+      "eth"
+    ],
+    "wrapped_symbol": "WETH"
+  },
+  {
+    "symbol": "WETH",
+    "name": "Wrapped Ether",
+    "addresses": {
+      "1": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "137": "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619"
+    },
+    "decimals": 18,
+    "coingecko_id": "ethereum",
+    "tags": [
+      "wrapped",
+      "tier1",
+      "core",
+      "prefetch",
+      "eth"
+    ],
+    "oracle_symbol": "ETH"
+  },
+  {
+    "symbol": "WBTC",
+    "name": "Wrapped BTC",
+    "addresses": {
+      "1": "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+    },
+    "decimals": 8,
+    "coingecko_id": "bitcoin",
+    "tags": [
+      "wrapped",
+      "tier1",
+      "core",
+      "prefetch",
+      "btc"
+    ]
+  },
+  {
+    "symbol": "USDC",
+    "name": "USDC",
+    "addresses": {
+      "1": "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+      "137": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+    },
+    "decimals": 6,
+    "coingecko_id": "usd-coin",
+    "tags": [
+      "stablecoin",
+      "core",
+      "prefetch",
+      "primary_stable"
+    ]
+  },
+  {
+    "symbol": "USDT",
+    "name": "Tether USD",
+    "addresses": {
+      "1": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+      "137": "0xc2132D05D31c914a87C6611C10748AEb04B58e8F"
+    },
+    "decimals": 6,
+    "coingecko_id": "tether",
+    "tags": [
+      "stablecoin",
+      "core",
+      "prefetch",
+      "binance_quote"
+    ]
+  },
+  {
+    "symbol": "DAI",
+    "name": "Dai Stablecoin",
+    "addresses": {
+      "1": "0x6b175474e89094c44da98b954eedeac495271d0f",
+      "137": "0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063"
+    },
+    "decimals": 18,
+    "coingecko_id": "dai",
+    "tags": [
+      "stablecoin",
+      "core"
+    ]
+  },
+  {
+    "symbol": "BNB",
+    "name": "BNB",
+    "addresses": {
+      "1": "0xb8c77482e45f1f44de1745f52c74426c631bdd52"
+    },
+    "decimals": 18,
+    "coingecko_id": "binancecoin",
+    "tags": [
+      "tier1"
+    ]
+  },
+  {
+    "symbol": "MATIC",
+    "name": "Matic Token",
+    "addresses": {
+      "1": "0x7d1afa7b718fb893db30a3abc0cfc608aacfebb0"
+    },
+    "decimals": 18,
+    "coingecko_id": "matic-network",
+    "tags": [
+      "tier2"
+    ]
+  },
+  {
+    "symbol": "LINK",
+    "name": "ChainLink Token",
+    "addresses": {
+      "1": "0x514910771af9ca656af840dff83e8264ecf986ca"
+    },
+    "decimals": 18,
+    "coingecko_id": "chainlink",
+    "tags": [
+      "tier2"
+    ]
+  },
+  {
+    "symbol": "UNI",
+    "name": "Uniswap",
+    "addresses": {
+      "1": "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984"
+    },
+    "decimals": 18,
+    "coingecko_id": "uniswap",
+    "tags": [
+      "tier2"
+    ]
+  },
+  {
+    "symbol": "AAVE",
+    "name": "Aave Token",
+    "addresses": {
+      "1": "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9"
+    },
+    "decimals": 18,
+    "coingecko_id": "aave",
+    "tags": [
+      "tier2"
+    ]
+  },
+  {
+    "symbol": "MKR",
+    "name": "Maker",
+    "addresses": {
+      "1": "0x9f8f72aa9304c8b593d555f12ef6589cc3a579a2"
+    },
+    "decimals": 18,
+    "coingecko_id": "maker",
+    "tags": [
+      "tier2"
+    ]
+  },
+  {
+    "symbol": "COMP",
+    "name": "Compound",
+    "addresses": {
+      "1": "0xc00e94cb662c3520282e6f5717214004a7f26888"
+    },
+    "decimals": 18,
+    "coingecko_id": "compound-governance-token",
+    "tags": [
+      "tier2"
+    ]
+  },
+  {
+    "symbol": "CRV",
+    "name": "Curve DAO Token",
+    "addresses": {
+      "1": "0xd533a949740bb3306d119cc777fa900ba034cd52"
+    },
+    "decimals": 18,
+    "coingecko_id": "curve-dao-token",
+    "tags": [
+      "tier2"
+    ]
+  },
+  {
+    "symbol": "SUSHI",
+    "name": "SushiToken",
+    "addresses": {
+      "1": "0x6b3595068778dd592e39a122f4f5a5cf09c90fe2"
+    },
+    "decimals": 18,
+    "coingecko_id": "sushi",
+    "tags": [
+      "tier2"
+    ]
+  },
+  {
+    "symbol": "BTC",
+    "name": "Bitcoin",
+    "addresses": {},
+    "decimals": 8,
+    "coingecko_id": "bitcoin",
+    "tags": [
+      "btc",
+      "tier1",
+      "core",
+      "prefetch"
+    ]
+  },
+  {
+    "symbol": "SNX",
+    "name": "Synthetix Network Token",
+    "addresses": {
+      "1": "0xC011A72400E58ecD99Ee497CF89E3775d4bd732F"
+    },
+    "decimals": 18,
+    "coingecko_id": "synthetix-network-token",
+    "tags": [
+      "tier2"
+    ]
+  },
+  {
+    "symbol": "STETH",
+    "name": "Staked Ether",
+    "addresses": {
+      "1": "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
+    },
+    "decimals": 18,
+    "coingecko_id": "staked-ether",
+    "tags": [
+      "tier2",
+      "eth"
+    ]
+  },
+  {
+    "symbol": "OP",
+    "name": "Optimism",
+    "addresses": {
+      "10": "0x4200000000000000000000000000000000000042"
+    },
+    "decimals": 18,
+    "coingecko_id": "optimism",
+    "tags": [
+      "tier2"
+    ]
+  },
+  {
+    "symbol": "ARB",
+    "name": "Arbitrum",
+    "addresses": {
+      "42161": "0x912CE59144191C1204E64559FE8253a0e49E6548"
+    },
+    "decimals": 18,
+    "coingecko_id": "arbitrum",
+    "tags": [
+      "tier2"
+    ]
+  }
+]
