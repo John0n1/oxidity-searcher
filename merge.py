@@ -25,8 +25,8 @@ from pathlib import Path
 from typing import Iterable, List, Set, Tuple
 
 
-SRC_DIR = Path("/home/john/oxidized-builder/src")
-OUT_FILE = Path("/home/john/oxidized-builder/merged.rs")
+SRC_DIR = Path("/home/john/oxidity.builder/src")
+OUT_FILE = Path("/home/john/oxidity.builder/merged.rs")
 
 # Skip these directories anywhere under SRC_DIR
 SKIP_DIR_NAMES = {

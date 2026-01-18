@@ -4,14 +4,13 @@
 use crate::common::error::AppError;
 use crate::network::provider::HttpProvider;
 use crate::data::flashloan_abi::OxidizedFlashExecutor;
-use alloy::dyn_abi::DynSolError;
 use alloy::providers::Provider;
 use alloy::rpc::types::eth::simulate::{SimBlock, SimulatePayload};
 use alloy::rpc::types::eth::state::StateOverride;
 use alloy::rpc::types::eth::Transaction;
 use alloy::rpc::types::eth::TransactionRequest;
 use alloy::sol_types::SolInterface;
-use alloy::sol_types::errors::abi::NormalError;
+use alloy_sol_types::{Revert, SolError};
 
 #[derive(Debug, Clone)]
 pub struct SimulationOutcome {
@@ -197,8 +196,8 @@ pub fn decode_flashloan_revert(revert_data: &[u8]) -> String {
     }
 
     // Try decoding standard Error(string)
-    if let Ok(msg) = NormalError::abi_decode(revert_data) {
-        return format!("Standard Revert: {:?}", msg);
+    if let Ok(msg) = Revert::abi_decode(revert_data) {
+        return format!("Standard Revert: {}", msg.reason());
     }
 
     // Unknown binary data

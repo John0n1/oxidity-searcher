@@ -24,4 +24,11 @@ sol! {
         error ETHTransferFailed();
         error ApprovalFailed();
     }
+
+    // Matches abi.decode(userData, (address[], uint256[], bytes[])) in receiveFlashLoan
+    struct FlashCallbackData {
+        address[] targets;
+        uint256[] values;
+        bytes[] payloads;
+    }
 }

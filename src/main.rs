@@ -5,18 +5,19 @@ use alloy::signers::local::PrivateKeySigner;
 use clap::Parser;
 use std::collections::HashSet;
 use alloy::primitives::Address;
-use oxidized_builder::common::error::AppError;
-use oxidized_builder::common::logger::setup_logging;
-use oxidized_builder::config::GlobalSettings;
-use oxidized_builder::core::engine::Engine;
-use oxidized_builder::core::nonce::NonceManager;
-use oxidized_builder::core::portfolio::PortfolioManager;
-use oxidized_builder::core::safety::SafetyGuard;
-use oxidized_builder::core::simulation::Simulator;
-use oxidized_builder::data::db::Database;
-use oxidized_builder::network::gas::GasOracle;
-use oxidized_builder::network::price_feed::PriceFeed;
-use oxidized_builder::network::provider::ConnectionFactory;
+use oxidized_builder::domain::error::AppError;
+use oxidized_builder::app::logging::setup_logging;
+use oxidized_builder::app::config::GlobalSettings;
+use oxidized_builder::services::strategy::engine::Engine;
+use oxidized_builder::services::strategy::nonce::NonceManager;
+use oxidized_builder::services::strategy::portfolio::PortfolioManager;
+use oxidized_builder::services::strategy::safety::SafetyGuard;
+use oxidized_builder::services::strategy::simulation::Simulator;
+use oxidized_builder::infrastructure::data::db::Database;
+use oxidized_builder::infrastructure::data::token_manager::TokenManager;
+use oxidized_builder::infrastructure::network::gas::GasOracle;
+use oxidized_builder::infrastructure::network::price_feed::PriceFeed;
+use oxidized_builder::infrastructure::network::provider::ConnectionFactory;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -75,6 +76,18 @@ async fn main() -> Result<(), AppError> {
     let wrapped_native = oxidized_builder::common::constants::wrapped_native_for_chain(chain_id);
     let price_feed = PriceFeed::new(http_provider.clone(), chainlink_feeds);
     let simulator = Simulator::new(http_provider.clone());
+    let tokenlist_path =
+        std::env::var("TOKENLIST_PATH").unwrap_or_else(|_| "data/tokenlist.json".to_string());
+    let token_manager = Arc::new(
+        TokenManager::load_from_file(&tokenlist_path).unwrap_or_else(|e| {
+            tracing::warn!(
+                "TokenManager: failed to load {}; defaulting to empty list: {}",
+                tokenlist_path,
+                e
+            );
+            TokenManager::default()
+        }),
+    );
 
     let relay_url = settings.flashbots_relay_url();
     let bundle_signer = PrivateKeySigner::from_str(&settings.bundle_signer_key())
@@ -111,10 +124,16 @@ async fn main() -> Result<(), AppError> {
         chain_id,
         relay_url,
         bundle_signer,
+        settings.bundle_executor_address,
+        settings.bundle_bribe_bps,
+        settings.bundle_bribe_recipient,
+        settings.flashloan_executor_address,
+        settings.flashloan_enabled,
         settings
             .gas_cap_for_chain(chain_id)
             .unwrap_or(settings.max_gas_price_gwei),
         simulator,
+        token_manager,
         metrics_port,
         strategy_enabled,
         slippage_bps,

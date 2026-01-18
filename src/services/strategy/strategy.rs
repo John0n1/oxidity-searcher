@@ -11,6 +11,9 @@ use crate::core::portfolio::PortfolioManager;
 use crate::core::safety::SafetyGuard;
 use crate::core::simulation::Simulator;
 use crate::data::db::Database;
+use crate::data::bundle_executor::MEVBundleExecutor;
+use crate::data::flashloan_abi::{OxidizedFlashExecutor, FlashCallbackData};
+use crate::infrastructure::data::token_manager::TokenManager;
 use crate::network::gas::{GasFees, GasOracle};
 use crate::network::price_feed::PriceFeed;
 use crate::network::provider::HttpProvider;
@@ -29,6 +32,7 @@ use alloy::rpc::types::Header;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use alloy::sol_types::SolCall;
+use alloy_sol_types::SolValue;
 use alloy_consensus::TxEnvelope;
 use dashmap::DashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,8 +41,7 @@ use std::sync::Mutex;
 use std::collections::HashSet;
 use tokio::sync::{broadcast::Receiver, mpsc::UnboundedReceiver};
 use crate::common::retry::retry_async;
-use std::time::Duration;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::ops::Neg;
 
 #[derive(Debug)]
@@ -146,6 +149,7 @@ pub struct StrategyExecutor {
     stats: Arc<StrategyStats>,
     max_gas_price_gwei: u64,
     simulator: Simulator,
+    token_manager: Arc<TokenManager>,
     signer: PrivateKeySigner,
     nonce_manager: NonceManager,
     slippage_bps: u64,
@@ -156,6 +160,11 @@ pub struct StrategyExecutor {
     inventory_tokens: DashSet<Address>,
     last_rebalance: Mutex<Instant>,
     toxic_tokens: DashSet<Address>,
+    bundle_executor: Option<Address>,
+    bundle_executor_bribe_bps: u64,
+    bundle_executor_bribe_recipient: Option<Address>,
+    flashloan_executor: Option<Address>,
+    flashloan_enabled: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -183,6 +192,8 @@ struct BackrunTx {
     value: U256,
     request: TransactionRequest,
     expected_out: U256,
+    uses_flashloan: bool,
+    router_kind: RouterKind,
 }
 
 struct FrontRunTx {
@@ -228,6 +239,14 @@ impl StrategyExecutor {
         }
     }
 
+    fn amount_to_display(&self, amount: U256, token: Address) -> f64 {
+        let decimals = self
+            .token_manager
+            .decimals(self.chain_id, token)
+            .unwrap_or(18);
+        units_to_float(amount, decimals)
+    }
+
     pub fn new(
         tx_rx: UnboundedReceiver<StrategyWork>,
         block_rx: Receiver<Header>,
@@ -240,6 +259,7 @@ impl StrategyExecutor {
         chain_id: u64,
         max_gas_price_gwei: u64,
         simulator: Simulator,
+        token_manager: Arc<TokenManager>,
         stats: Arc<StrategyStats>,
         signer: PrivateKeySigner,
         nonce_manager: NonceManager,
@@ -248,6 +268,11 @@ impl StrategyExecutor {
         dry_run: bool,
         router_allowlist: HashSet<Address>,
         wrapped_native: Address,
+        bundle_executor: Option<Address>,
+        bundle_executor_bribe_bps: u64,
+        bundle_executor_bribe_recipient: Option<Address>,
+        flashloan_executor: Option<Address>,
+        flashloan_enabled: bool,
     ) -> Self {
         Self {
             tx_rx,
@@ -262,6 +287,7 @@ impl StrategyExecutor {
             stats,
             max_gas_price_gwei,
             simulator,
+            token_manager,
             signer,
             nonce_manager,
             slippage_bps,
@@ -272,6 +298,11 @@ impl StrategyExecutor {
             inventory_tokens: DashSet::new(),
             last_rebalance: Mutex::new(Instant::now()),
             toxic_tokens: DashSet::new(),
+            bundle_executor,
+            bundle_executor_bribe_bps,
+            bundle_executor_bribe_recipient,
+            flashloan_executor,
+            flashloan_enabled,
         }
     }
 
@@ -427,6 +458,8 @@ impl StrategyExecutor {
         let mut attack_value_eth = U256::ZERO;
         let mut bundle_requests: Vec<TransactionRequest> = Vec::new();
         let mut raw_bundle: Vec<Vec<u8>> = Vec::new();
+        let executor_tx: Option<(Vec<u8>, TransactionRequest, B256)>;
+        let executor_hash: Option<B256>;
 
         let mut front_run: Option<FrontRunTx> = None;
         let mut approval: Option<ApproveTx> = None;
@@ -476,6 +509,12 @@ impl StrategyExecutor {
             }
         }
 
+        let use_flashloan = self.should_use_flashloan(
+            observed_swap.amount_in,
+            wallet_chain_balance,
+            &gas_fees,
+        ) && front_run.is_none();
+
         let nonce_backrun = self.nonce_manager.get_next_nonce().await?;
 
         let backrun = match self
@@ -486,6 +525,8 @@ impl StrategyExecutor {
                 wallet_chain_balance,
                 tx.gas_limit(),
                 front_run.as_ref().map(|f| f.expected_tokens),
+                use_flashloan,
+                self.flashloan_executor,
                 nonce_backrun,
             )
             .await
@@ -508,23 +549,41 @@ impl StrategyExecutor {
             .with_nonce(self.signer.address(), sim_nonce)
             .build();
 
-        if let Some(app) = &approval {
-            bundle_requests.push(app.request.clone());
+        // Build optional executor wrapper for approval + backrun legs.
+        executor_tx = self
+            .build_executor_wrapper(approval.as_ref(), &backrun, &gas_fees, tx.gas_limit(), nonce_backrun)?;
+        executor_hash = executor_tx.as_ref().map(|(_, _, h)| *h);
+
+        if let Some(f) = &front_run {
+            bundle_requests.push(f.request.clone());
+            raw_bundle.push(f.raw.clone());
         }
         bundle_requests.push(tx.clone().into_request());
-        bundle_requests.push(backrun.request.clone());
-
-        if let Some(app) = &approval {
-            raw_bundle.push(app.raw.clone());
-        }
         raw_bundle.push(tx.inner.encoded_2718());
-        raw_bundle.push(backrun_raw.clone());
+
+        if let Some((raw, req, _)) = &executor_tx {
+            bundle_requests.push(req.clone());
+            raw_bundle.push(raw.clone());
+        } else {
+            if let Some(app) = &approval {
+                bundle_requests.push(app.request.clone());
+                raw_bundle.push(app.raw.clone());
+            }
+            bundle_requests.push(backrun.request.clone());
+            raw_bundle.push(backrun_raw.clone());
+        }
+        let bundle_reqs_for_sim = bundle_requests.clone();
+        let overrides_for_sim = overrides.clone();
         let bundle_sims = retry_async(
             move |_| {
                 let simulator = self.simulator.clone();
-                let reqs = bundle_requests.clone();
-                let overrides = overrides.clone();
-                async move { simulator.simulate_bundle_requests(&reqs, Some(overrides)).await }
+                let overrides = overrides_for_sim.clone();
+                let reqs = bundle_reqs_for_sim.clone();
+                async move {
+                    simulator
+                        .simulate_bundle_requests(&reqs, Some(overrides))
+                        .await
+                }
             },
             2,
             Duration::from_millis(100),
@@ -544,7 +603,11 @@ impl StrategyExecutor {
             U256::from(bundle_gas_limit) * U256::from(gas_fees.max_fee_per_gas);
 
         if !self.dry_run {
-            let spend = backrun.value.saturating_add(attack_value_eth);
+            let spend = if backrun.uses_flashloan {
+                U256::ZERO
+            } else {
+                backrun.value.saturating_add(attack_value_eth)
+            };
             self.portfolio
                 .ensure_funding(self.chain_id, spend + gas_cost_wei)?;
         }
@@ -573,9 +636,9 @@ impl StrategyExecutor {
 
         // --- Logging/Persistence (Safe to use f64 here for display) ---
         let eth_quote = self.price_feed.get_price("ETHUSD").await?;
-        let profit_eth_f64 = wei_to_eth_f64(gross_profit_wei);
-        let gas_cost_eth_f64 = wei_to_eth_f64(gas_cost_wei);
-        let net_profit_eth_f64 = wei_to_eth_f64(net_profit_wei);
+        let profit_eth_f64 = self.amount_to_display(gross_profit_wei, self.wrapped_native);
+        let gas_cost_eth_f64 = self.amount_to_display(gas_cost_wei, self.wrapped_native);
+        let net_profit_eth_f64 = self.amount_to_display(net_profit_wei, self.wrapped_native);
 
         tracing::info!(
             target: "strategy",
@@ -584,7 +647,7 @@ impl StrategyExecutor {
             gas_cost_wei = %gas_cost_wei,
             net_profit_wei = %net_profit_wei,
             net_profit_eth = net_profit_eth_f64,
-            wallet_eth = wei_to_eth_f64(wallet_chain_balance),
+            wallet_eth = self.amount_to_display(wallet_chain_balance, self.wrapped_native),
             price_source = %eth_quote.source,
             price = eth_quote.price,
             victim_min_out = ?observed_swap.min_out,
@@ -606,7 +669,7 @@ impl StrategyExecutor {
                 net_profit_eth = net_profit_eth_f64,
                 gross_profit_eth = profit_eth_f64,
                 gas_cost_eth = gas_cost_eth_f64,
-                front_run_value_eth = wei_to_eth_f64(attack_value_eth),
+                front_run_value_eth = self.amount_to_display(attack_value_eth, self.wrapped_native),
                 sandwich = front_run.is_some(),
                 "Dry-run only: simulated profitable bundle (not sent)"
             );
@@ -637,14 +700,25 @@ impl StrategyExecutor {
                 Some("strategy_v1"),
             )
             .await?;
-
+        let recorded_hash = executor_hash.unwrap_or(backrun.hash);
+        let recorded_to = executor_tx
+            .as_ref()
+            .and_then(|(_, req, _)| req.to)
+            .or_else(|| Some(TxKind::Call(backrun.to)));
+        let recorded_value = executor_tx
+            .as_ref()
+            .and_then(|(_, req, _)| req.value)
+            .unwrap_or(backrun.value);
         self.db
             .save_transaction(
-                &format!("{:#x}", backrun.hash),
+                &format!("{:#x}", recorded_hash),
                 self.chain_id,
                 &format!("{:#x}", self.signer.address()),
-                Some(format!("{:#x}", backrun.to)).as_deref(),
-                backrun.value.to_string().as_str(),
+                recorded_to
+                    .as_ref()
+                    .and_then(|k| match k { TxKind::Call(a) => Some(format!("{:#x}", a)), _ => None })
+                    .as_deref(),
+                recorded_value.to_string().as_str(),
                 Some("strategy_backrun"),
             )
             .await?;
@@ -680,7 +754,8 @@ impl StrategyExecutor {
             .save_market_price(self.chain_id, "ETHUSD", eth_quote.price, &eth_quote.source)
             .await;
 
-        let _ = self.await_receipt(&backrun.hash).await;
+        let receipt_target = executor_hash.unwrap_or(backrun.hash);
+        let _ = self.await_receipt(&receipt_target).await;
 
         Ok(Some(format!("{tx_hash:#x}")))
     }
@@ -771,6 +846,9 @@ impl StrategyExecutor {
         let mut attack_value_eth = U256::ZERO;
         let mut bundle_requests: Vec<TransactionRequest> = Vec::new();
         let mut bundle_body: Vec<BundleItem> = Vec::new();
+        let mut executor_tx_raw: Option<Vec<u8>> = None;
+        let mut executor_request: Option<TransactionRequest> = None;
+        let mut executor_hash: Option<B256> = None;
 
         let mut front_run: Option<FrontRunTx> = None;
         let mut approval: Option<ApproveTx> = None;
@@ -820,6 +898,11 @@ impl StrategyExecutor {
         }
 
         let nonce_backrun = self.nonce_manager.get_next_nonce().await?;
+        let use_flashloan = self.should_use_flashloan(
+            observed_swap.amount_in,
+            wallet_chain_balance,
+            &gas_fees,
+        ) && front_run.is_none();
         let backrun = match self
             .build_backrun_tx(
                 &observed_swap,
@@ -828,6 +911,8 @@ impl StrategyExecutor {
                 wallet_chain_balance,
                 gas_limit_hint,
                 front_run.as_ref().map(|f| f.expected_tokens),
+                use_flashloan,
+                self.flashloan_executor,
                 nonce_backrun,
             )
             .await
@@ -873,31 +958,131 @@ impl StrategyExecutor {
         }
         bundle_requests.push(victim_request);
         bundle_requests.push(backrun.request.clone());
-        if let Some(f) = &front_run {
-            bundle_body.push(BundleItem::Tx {
-                tx: format!("0x{}", hex::encode(&f.raw)),
-                can_revert: false,
-            });
+
+        // If we can avoid a front-run, wrap our legs in the on-chain executor for atomicity.
+        if self.bundle_executor.is_some() && front_run.is_none() {
+            if let Some(exec_addr) = self.bundle_executor {
+                let mut targets = Vec::new();
+                let mut payloads = Vec::new();
+                let mut values = Vec::new();
+
+                if let Some(app) = &approval {
+                    if let Some(TxKind::Call(addr)) = app.request.to {
+                        targets.push(addr);
+                        let bytes = app
+                            .request
+                            .input
+                            .clone()
+                            .into_input()
+                            .unwrap_or_default();
+                        payloads.push(bytes);
+                        values.push(U256::ZERO);
+                    }
+                }
+                if let Some(TxKind::Call(addr)) = backrun.request.to {
+                    targets.push(addr);
+                        let bytes = backrun
+                            .request
+                            .input
+                            .clone()
+                            .into_input()
+                            .unwrap_or_default();
+                    payloads.push(bytes);
+                    values.push(backrun.value);
+                }
+
+                if !targets.is_empty() {
+                    let total_value = values
+                        .iter()
+                        .copied()
+                        .fold(U256::ZERO, |acc, v| acc.saturating_add(v));
+                    let exec_call = MEVBundleExecutor::executeCall {
+                        targets,
+                        payloads,
+                        values,
+                        bribeRecipient: Address::ZERO,
+                        bribeAmount: U256::ZERO,
+                    };
+                    let calldata = exec_call.abi_encode();
+                    let gas_limit = backrun
+                        .request
+                        .gas
+                        .unwrap_or(gas_limit_hint)
+                        .saturating_add(approval.as_ref().and_then(|a| a.request.gas).unwrap_or(0))
+                        .saturating_add(80_000);
+
+                    let mut tx = TxEip1559 {
+                        chain_id: self.chain_id,
+                        nonce: nonce_backrun,
+                        max_priority_fee_per_gas: gas_fees.max_priority_fee_per_gas,
+                        max_fee_per_gas: gas_fees.max_fee_per_gas,
+                        gas_limit,
+                        to: TxKind::Call(exec_addr),
+                        value: total_value,
+                        access_list: AccessList::default(),
+                        input: Bytes::from(calldata.clone()),
+                    };
+                    let sig = TxSignerSync::sign_transaction_sync(&self.signer, &mut tx)
+                        .map_err(|e| AppError::Strategy(format!("Sign executor call failed: {}", e)))?;
+                    let signed: TxEnvelope = tx.into_signed(sig).into();
+                    executor_hash = Some(*signed.tx_hash());
+                    executor_tx_raw = Some(signed.encoded_2718());
+                    executor_request = Some(TransactionRequest {
+                        from: Some(self.signer.address()),
+                        to: Some(TxKind::Call(exec_addr)),
+                        max_fee_per_gas: Some(gas_fees.max_fee_per_gas),
+                        max_priority_fee_per_gas: Some(gas_fees.max_priority_fee_per_gas),
+                        gas: Some(gas_limit),
+                        value: Some(total_value),
+                        input: TransactionInput::new(calldata.into()),
+                        nonce: Some(nonce_backrun),
+                        chain_id: Some(self.chain_id),
+                        ..Default::default()
+                    });
+                }
+            }
         }
-        if let Some(app) = &approval {
-            bundle_body.push(BundleItem::Tx {
-                tx: format!("0x{}", hex::encode(&app.raw)),
-                can_revert: false,
-            });
-        }
+
+        // Build bundle body in order: victim hash, then our legs (either executor call or raw txs).
         bundle_body.push(BundleItem::Hash {
             hash: format!("{:#x}", hint.tx_hash),
         });
-        bundle_body.push(BundleItem::Tx {
-            tx: format!("0x{}", hex::encode(&backrun_raw)),
-            can_revert: false,
-        });
+        if let Some(raw) = executor_tx_raw.clone() {
+            bundle_body.push(BundleItem::Tx {
+                tx: format!("0x{}", hex::encode(&raw)),
+                can_revert: false,
+            });
+        } else {
+            if let Some(f) = &front_run {
+                bundle_body.push(BundleItem::Tx {
+                    tx: format!("0x{}", hex::encode(&f.raw)),
+                    can_revert: false,
+                });
+            }
+            if let Some(app) = &approval {
+                bundle_body.push(BundleItem::Tx {
+                    tx: format!("0x{}", hex::encode(&app.raw)),
+                    can_revert: false,
+                });
+            }
+            bundle_body.push(BundleItem::Tx {
+                tx: format!("0x{}", hex::encode(&backrun_raw)),
+                can_revert: false,
+            });
+        }
 
+        let exec_req_for_sim = executor_request.clone();
+        let bundle_reqs_for_sim = bundle_requests.clone();
+        let overrides_for_sim = overrides.clone();
         let bundle_sims = retry_async(
             move |_| {
                 let simulator = self.simulator.clone();
-                let reqs = bundle_requests.clone();
-                let overrides = overrides.clone();
+                let reqs = if let Some(r) = exec_req_for_sim.clone() {
+                    vec![r]
+                } else {
+                    bundle_reqs_for_sim.clone()
+                };
+                let overrides = overrides_for_sim.clone();
                 async move { simulator.simulate_bundle_requests(&reqs, Some(overrides)).await }
             },
             2,
@@ -918,7 +1103,11 @@ impl StrategyExecutor {
             U256::from(bundle_gas_limit) * U256::from(gas_fees.max_fee_per_gas);
 
         if !self.dry_run {
-            let spend = backrun.value.saturating_add(attack_value_eth);
+            let spend = if backrun.uses_flashloan {
+                U256::ZERO
+            } else {
+                backrun.value.saturating_add(attack_value_eth)
+            };
             self.portfolio
                 .ensure_funding(self.chain_id, spend + gas_cost_wei)?;
         }
@@ -946,20 +1135,20 @@ impl StrategyExecutor {
         }
 
         let eth_quote = self.price_feed.get_price("ETHUSD").await?;
-        let profit_eth_f64 = wei_to_eth_f64(gross_profit_wei);
-        let gas_cost_eth_f64 = wei_to_eth_f64(gas_cost_wei);
-        let net_profit_eth_f64 = wei_to_eth_f64(net_profit_wei);
+        let profit_eth_f64 = self.amount_to_display(gross_profit_wei, self.wrapped_native);
+        let gas_cost_eth_f64 = self.amount_to_display(gas_cost_wei, self.wrapped_native);
+        let net_profit_eth_f64 = self.amount_to_display(net_profit_wei, self.wrapped_native);
 
         tracing::info!(
             target: "strategy",
             gas_limit = bundle_gas_limit,
             max_fee_per_gas = gas_fees.max_fee_per_gas,
             gas_cost_eth = gas_cost_eth_f64,
-            backrun_value_eth = wei_to_eth_f64(backrun.value),
-            expected_out_eth = wei_to_eth_f64(backrun.expected_out),
-            front_run_value_eth = wei_to_eth_f64(attack_value_eth),
+            backrun_value_eth = self.amount_to_display(backrun.value, self.wrapped_native),
+            expected_out_eth = self.amount_to_display(backrun.expected_out, self.wrapped_native),
+            front_run_value_eth = self.amount_to_display(attack_value_eth, self.wrapped_native),
             net_profit_eth = net_profit_eth_f64,
-            wallet_eth = wei_to_eth_f64(wallet_chain_balance),
+            wallet_eth = self.amount_to_display(wallet_chain_balance, self.wrapped_native),
             price_source = %eth_quote.source,
             price = eth_quote.price,
             victim_min_out = ?observed_swap.min_out,
@@ -982,8 +1171,8 @@ impl StrategyExecutor {
                 net_profit_eth = net_profit_eth_f64,
                 gross_profit_eth = profit_eth_f64,
                 gas_cost_eth = gas_cost_eth_f64,
-                front_run_value_eth = wei_to_eth_f64(attack_value_eth),
-                wallet_eth = wei_to_eth_f64(wallet_chain_balance),
+                front_run_value_eth = self.amount_to_display(attack_value_eth, self.wrapped_native),
+                wallet_eth = self.amount_to_display(wallet_chain_balance, self.wrapped_native),
                 path_len = observed_swap.path.len(),
                 router = ?observed_swap.router,
                 used_mock_balance = self.dry_run,
@@ -1056,7 +1245,8 @@ impl StrategyExecutor {
             .save_market_price(self.chain_id, "ETHUSD", eth_quote.price, &eth_quote.source)
             .await;
 
-        let _ = self.await_receipt(&backrun.hash).await;
+        let receipt_target = executor_hash.unwrap_or(backrun.hash);
+        let _ = self.await_receipt(&receipt_target).await;
 
         Ok(Some(tx_hash))
     }
@@ -1367,19 +1557,23 @@ impl StrategyExecutor {
         let mut tokens = Vec::new();
         let mut fees = Vec::new();
         let mut offset = 0;
-        tokens.push(Address::from_slice(&path[offset..offset + 20]));
+        // Use checked slicing to avoid panic on malformed input.
+        let first = path.get(offset..offset + 20)?;
+        tokens.push(Address::from_slice(first));
         offset += 20;
         while offset < path.len() {
-            if path.len() < offset + 3 + 20 {
-                return None;
-            }
-            let fee_bytes = &path[offset..offset + 3];
-            let fee = ((fee_bytes[0] as u32) << 16) | ((fee_bytes[1] as u32) << 8) | fee_bytes[2] as u32;
+            let fee_bytes = path.get(offset..offset + 3)?;
+            let fee = ((fee_bytes[0] as u32) << 16)
+                | ((fee_bytes[1] as u32) << 8)
+                | fee_bytes[2] as u32;
             fees.push(fee);
             offset += 3; // skip fee
-            tokens.push(Address::from_slice(&path[offset..offset + 20]));
+
+            let token_bytes = path.get(offset..offset + 20)?;
+            tokens.push(Address::from_slice(token_bytes));
             offset += 20;
         }
+
         Some(ParsedV3Path { tokens, fees })
     }
 
@@ -1434,6 +1628,83 @@ impl StrategyExecutor {
             return false;
         }
         true
+    }
+
+    fn build_v3_swap_payload(
+        &self,
+        router: Address,
+        path: Vec<u8>,
+        amount_in: U256,
+        amount_out_min: U256,
+        recipient: Address,
+    ) -> Vec<u8> {
+        let deadline = current_unix().saturating_add(60);
+        UniV3Router::new(router, self.http_provider.clone())
+            .exactInput(UniV3Router::ExactInputParams {
+                path: path.into(),
+                recipient,
+                deadline: U256::from(deadline),
+                amountIn: amount_in,
+                amountOutMinimum: amount_out_min,
+            })
+            .calldata()
+            .to_vec()
+    }
+
+    fn build_v2_swap_payload(
+        &self,
+        path: Vec<Address>,
+        amount_in: U256,
+        amount_out_min: U256,
+        recipient: Address,
+        use_flashloan: bool,
+    ) -> Vec<u8> {
+        let deadline = U256::from(current_unix().saturating_add(60));
+
+        // Buy path: wrapped_native -> token (or multi-hop starting with wrapped)
+        if path.first().copied() == Some(self.wrapped_native) {
+            if use_flashloan {
+                // We hold wrapped native as ERC20; use token-for-token swap.
+                UniV2Router::swapExactTokensForTokensCall {
+                    amountIn: amount_in,
+                    amountOutMin: amount_out_min,
+                    path,
+                    to: recipient,
+                    deadline,
+                }
+                .abi_encode()
+            } else {
+                // We pay native ETH; value is set on tx, calldata uses ETH entrypoint.
+                UniV2Router::swapExactETHForTokensCall {
+                    amountOutMin: amount_out_min,
+                    path,
+                    to: recipient,
+                    deadline,
+                }
+                .abi_encode()
+            }
+        } else {
+            // Sell path: token -> wrapped_native (potentially multi-hop)
+            if use_flashloan {
+                UniV2Router::swapExactTokensForTokensCall {
+                    amountIn: amount_in,
+                    amountOutMin: amount_out_min,
+                    path,
+                    to: recipient,
+                    deadline,
+                }
+                .abi_encode()
+            } else {
+                UniV2Router::swapExactTokensForETHCall {
+                    amountIn: amount_in,
+                    amountOutMin: amount_out_min,
+                    path,
+                    to: recipient,
+                    deadline,
+                }
+                .abi_encode()
+            }
+        }
     }
 
     async fn maybe_rebalance_inventory(&self) -> Result<(), AppError> {
@@ -1812,6 +2083,214 @@ impl StrategyExecutor {
         Ok(ApproveTx { raw, request })
     }
 
+    fn build_executor_wrapper(
+        &self,
+        approval: Option<&ApproveTx>,
+        backrun: &BackrunTx,
+        gas_fees: &GasFees,
+        gas_limit_hint: u64,
+        nonce: u64,
+    ) -> Result<Option<(Vec<u8>, TransactionRequest, B256)>, AppError> {
+        let exec_addr = match self.bundle_executor {
+            Some(addr) => addr,
+            None => return Ok(None),
+        };
+
+        // Guard: avoid wrapping V3 paths or flashloan legs in the MEVBundleExecutor since
+        // it would not hold the required allowances/funds as msg.sender.
+        if backrun.router_kind == RouterKind::V3Like || backrun.uses_flashloan {
+            return Ok(None);
+        }
+
+        let mut targets = Vec::new();
+        let mut payloads = Vec::new();
+        let mut values = Vec::new();
+        if let Some(app) = approval {
+            if let Some(TxKind::Call(addr)) = app.request.to {
+                targets.push(addr);
+                let bytes = app.request.input.clone().into_input().unwrap_or_default();
+                payloads.push(bytes);
+                values.push(U256::ZERO);
+            }
+        }
+        if let Some(TxKind::Call(addr)) = backrun.request.to {
+            targets.push(addr);
+            let bytes = backrun.request.input.clone().into_input().unwrap_or_default();
+            payloads.push(bytes);
+            values.push(backrun.value);
+        }
+
+        if targets.is_empty() {
+            return Ok(None);
+        }
+
+        let mut gas_limit = backrun
+            .request
+            .gas
+            .unwrap_or(gas_limit_hint)
+            .saturating_add(approval.and_then(|a| a.request.gas).unwrap_or(0))
+            .saturating_add(80_000);
+
+        if gas_limit < 150_000 {
+            gas_limit = 150_000;
+        }
+
+        let mut bribe = U256::ZERO;
+        if self.bundle_executor_bribe_bps > 0 {
+            let base = U256::from(gas_limit)
+                .saturating_mul(U256::from(gas_fees.max_fee_per_gas));
+            bribe = base
+                .saturating_mul(U256::from(self.bundle_executor_bribe_bps))
+                / U256::from(10_000u64);
+        }
+        let bribe_recipient = self
+            .bundle_executor_bribe_recipient
+            .unwrap_or(Address::ZERO);
+
+        let total_value = values
+            .iter()
+            .copied()
+            .fold(U256::ZERO, |acc, v| acc.saturating_add(v))
+            .saturating_add(bribe);
+
+        let exec_call = MEVBundleExecutor::executeCall {
+            targets,
+            payloads,
+            values,
+            bribeRecipient: bribe_recipient,
+            bribeAmount: bribe,
+        };
+        let calldata = exec_call.abi_encode();
+
+        let mut tx = TxEip1559 {
+            chain_id: self.chain_id,
+            nonce,
+            max_priority_fee_per_gas: gas_fees.max_priority_fee_per_gas,
+            max_fee_per_gas: gas_fees.max_fee_per_gas,
+            gas_limit,
+            to: TxKind::Call(exec_addr),
+            value: total_value,
+            access_list: AccessList::default(),
+            input: Bytes::from(calldata.clone()),
+        };
+        let sig = TxSignerSync::sign_transaction_sync(&self.signer, &mut tx)
+            .map_err(|e| AppError::Strategy(format!("Sign executor call failed: {}", e)))?;
+        let signed: TxEnvelope = tx.into_signed(sig).into();
+        let raw = signed.encoded_2718();
+
+        let request = TransactionRequest {
+            from: Some(self.signer.address()),
+            to: Some(TxKind::Call(exec_addr)),
+            max_fee_per_gas: Some(gas_fees.max_fee_per_gas),
+            max_priority_fee_per_gas: Some(gas_fees.max_priority_fee_per_gas),
+            gas: Some(gas_limit),
+            value: Some(total_value),
+            input: TransactionInput::new(calldata.into()),
+            nonce: Some(nonce),
+            chain_id: Some(self.chain_id),
+            ..Default::default()
+        };
+
+        Ok(Some((raw, request, *signed.tx_hash())))
+    }
+
+    fn should_use_flashloan(&self, required_value: U256, wallet_balance: U256, gas_fees: &GasFees) -> bool {
+        if !self.flashloan_enabled || self.flashloan_executor.is_none() || self.dry_run {
+            return false;
+        }
+        // If balance can't cover notional + small buffer, flashloan.
+        let safety_buffer = U256::from(2_000_000_000_000_000u128); // 0.002 ETH
+        if wallet_balance < required_value.saturating_add(safety_buffer) {
+            return true;
+        }
+        // Estimate extra gas overhead for flashloan path; if remaining balance after trade is below this, prefer flashloan.
+        let overhead_gas = U256::from(180_000u64);
+        let overhead_cost = overhead_gas.saturating_mul(U256::from(gas_fees.max_fee_per_gas));
+        let remaining = wallet_balance.saturating_sub(required_value);
+        remaining < overhead_cost
+    }
+
+    fn build_flashloan_transaction(
+        &self,
+        executor: Address,
+        asset: Address,
+        amount: U256,
+        router: Address,
+        swap_payload: Vec<u8>,
+        approve_token: Option<Address>,
+        gas_limit_hint: u64,
+        gas_fees: &GasFees,
+        nonce: u64,
+    ) -> Result<(Vec<u8>, TransactionRequest, B256), AppError> {
+        let mut targets = Vec::new();
+        let mut values = Vec::new();
+        let mut payloads = Vec::new();
+
+        if let Some(tok) = approve_token {
+            let approve = ERC20::approveCall {
+                spender: router,
+                amount: U256::MAX,
+            };
+            targets.push(tok);
+            values.push(U256::ZERO);
+            payloads.push(Bytes::from(approve.abi_encode()));
+        }
+
+        targets.push(router);
+        values.push(U256::ZERO);
+        payloads.push(Bytes::from(swap_payload));
+
+        let callback = FlashCallbackData {
+            targets,
+            values,
+            payloads,
+        };
+        let params = callback.abi_encode();
+
+        let exec_call = OxidizedFlashExecutor::executeCall {
+            assets: vec![asset],
+            amounts: vec![amount],
+            params: Bytes::from(params),
+        };
+        let calldata = exec_call.abi_encode();
+
+        let mut gas_limit = gas_limit_hint.saturating_add(150_000);
+        if gas_limit < 220_000 {
+            gas_limit = 220_000;
+        }
+
+        let mut tx = TxEip1559 {
+            chain_id: self.chain_id,
+            nonce,
+            max_priority_fee_per_gas: gas_fees.max_priority_fee_per_gas,
+            max_fee_per_gas: gas_fees.max_fee_per_gas,
+            gas_limit,
+            to: TxKind::Call(executor),
+            value: U256::ZERO,
+            access_list: AccessList::default(),
+            input: Bytes::from(calldata.clone()),
+        };
+        let sig = TxSignerSync::sign_transaction_sync(&self.signer, &mut tx)
+            .map_err(|e| AppError::Strategy(format!("Sign flashloan tx failed: {}", e)))?;
+        let signed: TxEnvelope = tx.into_signed(sig).into();
+        let raw = signed.encoded_2718();
+
+        let request = TransactionRequest {
+            from: Some(self.signer.address()),
+            to: Some(TxKind::Call(executor)),
+            max_fee_per_gas: Some(gas_fees.max_fee_per_gas),
+            max_priority_fee_per_gas: Some(gas_fees.max_priority_fee_per_gas),
+            gas: Some(gas_limit),
+            value: Some(U256::ZERO),
+            input: TransactionInput::new(calldata.into()),
+            nonce: Some(nonce),
+            chain_id: Some(self.chain_id),
+            ..Default::default()
+        };
+
+        Ok((raw, request, *signed.tx_hash()))
+    }
+
     fn is_common_token_call(input: &[u8]) -> bool {
         if input.len() < 4 {
             return false;
@@ -1897,6 +2376,7 @@ impl StrategyExecutor {
                 if observed.path.len() < 2 {
                     return Err(AppError::Strategy("V3 path too short".into()));
                 }
+                let recipient = self.signer.address();
                 let path_bytes = if let Some(p) = observed.v3_path.clone() {
                     p
                 } else {
@@ -1914,18 +2394,14 @@ impl StrategyExecutor {
                 let min_out = expected_tokens
                     .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
                     / U256::from(10_000u64);
-                let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 300);
                 let access_list = Self::build_access_list(observed.router, &observed.path);
-                let calldata = UniV3Router::new(observed.router, self.http_provider.clone())
-                        .exactInput(UniV3Router::ExactInputParams {
-                            path: path_bytes.clone().into(),
-                            recipient: self.signer.address(),
-                            deadline,
-                            amountIn: value,
-                            amountOutMinimum: min_out,
-                        })
-                    .calldata()
-                    .to_vec();
+                let calldata = self.build_v3_swap_payload(
+                    observed.router,
+                    path_bytes.clone(),
+                    value,
+                    min_out,
+                    recipient,
+                );
                 let mut gas_limit = gas_limit_hint
                     .saturating_mul(12)
                     .checked_div(10)
@@ -1985,6 +2461,8 @@ impl StrategyExecutor {
         wallet_balance: U256,
         gas_limit_hint: u64,
         token_in_override: Option<U256>,
+        use_flashloan: bool,
+        flashloan_executor: Option<Address>,
         nonce: u64,
     ) -> Result<BackrunTx, AppError> {
         let target_token = Self::target_token(&observed.path, self.wrapped_native)
@@ -2098,8 +2576,9 @@ impl StrategyExecutor {
                         max_fee_per_gas,
                     )?;
 
-                    let buy_path = vec![self.wrapped_native, target_token, self.wrapped_native];
-                    let quote_path = buy_path.clone();
+                    // Default path: wrapped native -> target (or multi-hop ending in wrapped native)
+                    let path = vec![self.wrapped_native, target_token];
+                    let quote_path = path.clone();
                     let quote_contract = router_contract.clone();
                     let quote_value = value;
                     let quote: Vec<U256> = retry_async(
@@ -2118,52 +2597,27 @@ impl StrategyExecutor {
                         .ok_or_else(|| AppError::Strategy("Quote missing amounts".into()))?;
                     let ratio_ppm = Self::price_ratio_ppm(expected_out, value);
                     if ratio_ppm < U256::from(1_000u64) {
-                        return Err(AppError::Strategy("Double-swap liquidity too low".into()));
-                    }
-
-                    let re_quote_contract = router_contract.clone();
-                    let re_quote_path = buy_path.clone();
-                    let second_quote: Vec<U256> = retry_async(
-                        move |_| {
-                            let c = re_quote_contract.clone();
-                            let p = re_quote_path.clone();
-                            async move { c.getAmountsOut(value, p.clone()).call().await }
-                        },
-                        3,
-                        Duration::from_millis(100),
-                    )
-                    .await
-                    .map_err(|e| AppError::Strategy(format!("Re-quote failed: {}", e)))?;
-                    let second_out = *second_quote
-                        .last()
-                        .ok_or_else(|| AppError::Strategy("Re-quote missing amounts".into()))?;
-                    let drift = if expected_out > second_out {
-                        expected_out - second_out
-                    } else {
-                        second_out - expected_out
-                    };
-                    let tolerance = expected_out
-                        .saturating_mul(U256::from(self.slippage_bps * 2))
-                        / U256::from(10_000u64);
-                    if drift > tolerance {
-                        return Err(AppError::Strategy("Quote drift too high, skip".into()));
+                        return Err(AppError::Strategy("V2 liquidity too low".into()));
                     }
 
                     let min_out =
                         expected_out.saturating_mul(U256::from(10_000u64 - self.slippage_bps))
                             / U256::from(10_000u64);
-                    let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 300);
-                    let calldata = router_contract
-                        .swapExactETHForTokens(
-                            min_out,
-                            buy_path.clone(),
-                            self.signer.address(),
-                            deadline,
-                        )
-                        .calldata()
-                        .to_vec();
-                    let access_list = Self::build_access_list(observed.router, &buy_path);
-                    (value, expected_out, calldata, access_list)
+                    let recipient = if use_flashloan {
+                        flashloan_executor.unwrap_or(self.signer.address())
+                    } else {
+                        self.signer.address()
+                    };
+                    let calldata = self.build_v2_swap_payload(
+                        path.clone(),
+                        value,
+                        min_out,
+                        recipient,
+                        use_flashloan,
+                    );
+                    let access_list = Self::build_access_list(observed.router, &path);
+                    let tx_value = if use_flashloan { U256::ZERO } else { value };
+                    (tx_value, expected_out, calldata, access_list)
                 }
                 RouterKind::V3Like => {
                     return Err(AppError::Strategy(
@@ -2192,6 +2646,40 @@ impl StrategyExecutor {
             input: Bytes::from(calldata.clone()),
         };
 
+        let flashloan_ok = use_flashloan
+            && flashloan_executor.is_some()
+            && token_in_override.is_none();
+        if flashloan_ok {
+            let exec_addr = flashloan_executor
+                .ok_or_else(|| AppError::Strategy("Missing flashloan executor".into()))?;
+            let gas = GasFees {
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+                base_fee_per_gas: 0,
+            };
+            let (raw, request, hash) = self.build_flashloan_transaction(
+                exec_addr,
+                self.wrapped_native,
+                value,
+                observed.router,
+                calldata.clone(),
+                Some(self.wrapped_native),
+                gas_limit,
+                &gas,
+                nonce,
+            )?;
+            return Ok(BackrunTx {
+                raw,
+                hash,
+                to: exec_addr,
+                value: U256::ZERO,
+                request,
+                expected_out,
+                uses_flashloan: true,
+                router_kind: observed.router_kind,
+            });
+        }
+
         let sig = TxSignerSync::sign_transaction_sync(&self.signer, &mut tx)
             .map_err(|e| AppError::Strategy(format!("Sign backrun failed: {}", e)))?;
         let signed: TxEnvelope = tx.into_signed(sig).into();
@@ -2217,6 +2705,8 @@ impl StrategyExecutor {
             value,
             request,
             expected_out,
+            uses_flashloan: false,
+            router_kind: observed.router_kind,
         })
     }
 
@@ -2239,9 +2729,20 @@ impl StrategyExecutor {
 }
 
 fn wei_to_eth_f64(value: U256) -> f64 {
-    let wei_in_eth = 1_000_000_000_000_000_000u128;
-    let num: u128 = value.try_into().unwrap_or(u128::MAX);
-    (num as f64) / (wei_in_eth as f64)
+    units_to_float(value, 18)
+}
+
+fn units_to_float(value: U256, decimals: u8) -> f64 {
+    let scale = 10f64.powi(decimals as i32);
+    let num = value.to_string().parse::<f64>().unwrap_or(0.0);
+    num / scale
+}
+
+fn current_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[cfg(test)]

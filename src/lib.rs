@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@on1.no>
 
+pub mod app;
 pub mod common;
-pub mod config;
-pub mod data;
-pub mod network;
-pub mod core;
+pub mod domain;
+pub mod infrastructure;
+pub mod services;
 
-
+// Backward-compat re-exports
+pub use infrastructure::network as network;
+pub use infrastructure::data as data;
+pub use services::strategy as core;

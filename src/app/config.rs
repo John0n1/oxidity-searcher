@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@on1.no>
 
-use crate::common::constants;
-use crate::common::error::AppError;
+use crate::domain::constants;
+use crate::domain::error::AppError;
 use alloy::primitives::Address;
 use config::{Config, Environment, File};
 use serde::{Deserialize, Deserializer};
@@ -34,6 +34,7 @@ pub struct GlobalSettings {
     // MEV
     #[serde(default = "default_true")]
     pub flashloan_enabled: bool,
+    pub flashloan_executor_address: Option<Address>,
     #[serde(default = "default_true")]
     pub sandwich_attacks_enabled: bool,
 
@@ -46,6 +47,10 @@ pub struct GlobalSettings {
     pub chainlink_feeds: Option<HashMap<String, String>>, // Symbol -> aggregator address
     pub flashbots_relay_url: Option<String>,
     pub bundle_signer_key: Option<String>,
+    pub bundle_executor_address: Option<Address>,
+    #[serde(default = "default_bribe_bps")]
+    pub bundle_bribe_bps: u64,
+    pub bundle_bribe_recipient: Option<Address>,
     #[serde(default = "default_metrics_port")]
     pub metrics_port: u16,
     #[serde(default = "default_true")]
@@ -92,6 +97,9 @@ fn default_mev_share_url() -> String {
 }
 fn default_mev_share_history_limit() -> u32 {
     200
+}
+fn default_bribe_bps() -> u64 {
+    0
 }
 
 fn deserialize_chain_list<'de, D>(deserializer: D) -> Result<Vec<u64>, D::Error>
