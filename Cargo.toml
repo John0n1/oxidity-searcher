@@ -1,11 +1,11 @@
 [package]
-name = "oxidized-builder"
+name = "oxidity-builder"
 version = "0.1.1-delta"
 edition = "2024"
 authors = ["John0n1 <john@on1.no>"]
-description = "Oxidized Builder - Ethereum block and transactions framework"
-homepage = "https://github.com/John0n1/oxidized-builder"
-repository = "https://github.com/John0n1/oxidized-builder"
+description = "Oxidity - MEV Searcher"
+homepage = "https://build.oxidity.io/"
+repository = "https://github.com/John0n1/oxidity-builder"
 license = "MIT"
 
 [dependencies]
@@ -20,10 +20,10 @@ dotenvy = "0.15"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt", "registry", "parking_lot"] }
 
 # Error Handling
-thiserror = "2.0.17"
+thiserror = "2.0.18"
 anyhow = "1.0"
 
 # --- ETHEREUM (ALLOY STABLE) ---
@@ -33,6 +33,7 @@ alloy-consensus = { version = "1.4.3", features = ["serde"] }
 alloy-primitives = { version = "1.5.2", features = ["serde"] } 
 alloy-json-abi = "1.5.2" 
 alloy-sol-types = { version = "1.5.2"}
+alloy-rpc-client = "1.5.2"
 
 # --- DATA ---
 sqlx = { version = "0.8.6", features = ["runtime-tokio-native-tls", "sqlite", "macros", "chrono"] }

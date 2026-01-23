@@ -45,17 +45,14 @@ impl TokenManager {
             for (chain_str, addr_str) in entry.addresses {
                 if let Ok(chain_id) = chain_str.parse::<u64>() {
                     if let Ok(addr) = addr_str.parse::<Address>() {
-                        tokens_by_chain
-                            .entry(chain_id)
-                            .or_default()
-                            .insert(
-                                addr,
-                                TokenInfo {
-                                    symbol: entry.symbol.clone(),
-                                    decimals: entry.decimals,
-                                    tags: entry.tags.clone(),
-                                },
-                            );
+                        tokens_by_chain.entry(chain_id).or_default().insert(
+                            addr,
+                            TokenInfo {
+                                symbol: entry.symbol.clone(),
+                                decimals: entry.decimals,
+                                tags: entry.tags.clone(),
+                            },
+                        );
                     }
                 }
             }

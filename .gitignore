@@ -1,10 +1,25 @@
+# Development/Production
 /target
-.env
 .venv/
 Cargo.lock
 node_modules
-.DS_Store
+
 .vscode/
+
+package-lock.json
+
+# Environment variables (secrets)
+config.dev.toml
+config.prod.toml
+config.testnet.toml
+config.toml
+.env
+
+# DB
+*.db
 *.db-shm
 *.db-wal
-package-lock.json
+.DS_Store
+
+# Frontend
+app/dist/*

@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@on1.no>
 
-use alloy::primitives::{Address, I256, U256};
-use dashmap::DashMap;
 use crate::common::constants::LOW_BALANCE_THRESHOLD_WEI;
-use crate::network::provider::HttpProvider;
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
-use std::time::Duration;
+use crate::network::provider::HttpProvider;
+use alloy::primitives::{Address, I256, U256};
 use alloy::providers::Provider;
+use dashmap::DashMap;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BalanceTier {
@@ -22,15 +22,15 @@ pub enum BalanceTier {
 pub struct PortfolioManager {
     provider: HttpProvider,
     wallet_address: Address,
-    
+
     // Cache current on-chain balances
     token_balances: DashMap<(u64, Address), U256>,
     eth_balance: DashMap<u64, U256>,
-    
+
     // Metrics: Track Profit & Loss in Signed Wei (I256) to handle negative PnL accurately
     net_pnl_wei: DashMap<u64, I256>,
     total_gas_spent_wei: DashMap<u64, U256>,
-    
+
     // Token profit in signed integer amounts
     token_profit_wei: DashMap<(u64, Address), I256>,
 }
@@ -140,12 +140,12 @@ impl PortfolioManager {
             .unwrap_or(U256::ZERO)
     }
 
-    /// Record a completed trade. 
+    /// Record a completed trade.
     /// Takes raw Wei (U256) for revenue and cost to avoid float precision loss.
     pub fn record_profit(&self, chain_id: u64, revenue_wei: U256, gas_cost_wei: U256) {
         let rev_i256 = I256::from_raw(revenue_wei);
         let cost_i256 = I256::from_raw(gas_cost_wei);
-        
+
         // Net = Revenue - Cost (Can be negative)
         let net = rev_i256.saturating_sub(cost_i256);
 
@@ -169,7 +169,10 @@ impl PortfolioManager {
 
     /// Used by StrategyExecutor for logic checks (e.g. gas boost decisions)
     pub fn get_net_profit_i256(&self, chain_id: u64) -> I256 {
-        self.net_pnl_wei.get(&chain_id).map(|v| *v).unwrap_or(I256::ZERO)
+        self.net_pnl_wei
+            .get(&chain_id)
+            .map(|v| *v)
+            .unwrap_or(I256::ZERO)
     }
 
     /// For Logging/Metrics only (Returns f64 approximate)
@@ -219,16 +222,16 @@ mod tests {
     async fn records_profit_and_net() {
         let dummy_provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
         let pm = PortfolioManager::new(dummy_provider, Address::ZERO);
-        
+
         let revenue = U256::from(1_500_000_000_000_000_000u128); // 1.5 ETH
         let cost = U256::from(400_000_000_000_000_000u128); // 0.4 ETH
-        
+
         pm.record_profit(1, revenue, cost); // Net +1.1
-        
+
         let pnl = pm.get_net_profit_i256(1);
         let expected = I256::from_raw(U256::from(1_100_000_000_000_000_000u128));
         assert_eq!(pnl, expected);
-        
+
         // Float conversion check
         let float_pnl = pm.net_profit_eth(1);
         assert!((float_pnl - 1.1).abs() < 1e-9);

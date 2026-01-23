@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@on1.no>
 
-
 use crate::common::error::AppError;
 use crate::network::provider::HttpProvider;
 use alloy::primitives::keccak256;
 use alloy::providers::Provider;
-use alloy::signers::local::PrivateKeySigner;
 use alloy::signers::SignerSync;
+use alloy::signers::local::PrivateKeySigner;
 use reqwest::header::HeaderValue;
 use serde::Serialize;
 use serde_json::json;
@@ -17,8 +16,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Clone, Debug, Serialize)]
 #[serde(untagged)]
 pub enum BundleItem {
-    Hash { hash: String },
-    Tx { tx: String, #[serde(rename = "canRevert")] can_revert: bool },
+    Hash {
+        hash: String,
+    },
+    Tx {
+        tx: String,
+        #[serde(rename = "canRevert")]
+        can_revert: bool,
+    },
 }
 
 /// Sends bundles or raw transactions to the network/relays.
@@ -51,9 +56,10 @@ impl BundleSender {
             return Ok(());
         }
 
-        let block_number = self.provider.get_block_number().await.map_err(|e| {
-            AppError::Connection(format!("Failed to fetch block number: {}", e))
-        })?;
+        let block_number =
+            self.provider.get_block_number().await.map_err(|e| {
+                AppError::Connection(format!("Failed to fetch block number: {}", e))
+            })?;
         let params = json!({
             "version": "v0.1",
             "inclusion": {
@@ -142,7 +148,7 @@ impl BundleSender {
                         continue;
                     }
                     Err(e) => {
-                        return Err(AppError::Connection(format!("Bundle send failed: {}", e)))
+                        return Err(AppError::Connection(format!("Bundle send failed: {}", e)));
                     }
                 }
             }
@@ -173,7 +179,14 @@ impl BundleSender {
             serde_json::to_vec(&body).map_err(|e| AppError::Initialization(e.to_string()))?;
 
         // Primary: Flashbots relay (signed header)
-        self.post_bundle_with_sig(&self.relay_url, &body_bytes, "flashbots", target_block, raw_txs.len()).await?;
+        self.post_bundle_with_sig(
+            &self.relay_url,
+            &body_bytes,
+            "flashbots",
+            target_block,
+            raw_txs.len(),
+        )
+        .await?;
 
         // Secondary: beaver (no auth) and titan (signed best-effort)
         let secondary = [
@@ -181,8 +194,16 @@ impl BundleSender {
             ("https://rpc.titanbuilder.xyz", true, "titan"),
         ];
         for (url, with_sig, name) in secondary {
-            if let Err(e) =
-                self.post_bundle_optional(url, &body_bytes, with_sig, name, target_block, raw_txs.len()).await
+            if let Err(e) = self
+                .post_bundle_optional(
+                    url,
+                    &body_bytes,
+                    with_sig,
+                    name,
+                    target_block,
+                    raw_txs.len(),
+                )
+                .await
             {
                 tracing::warn!(target: "executor", relay=%url, error=%e, "Secondary builder submit failed");
             }

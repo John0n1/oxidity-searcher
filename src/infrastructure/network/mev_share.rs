@@ -7,10 +7,10 @@ use dashmap::DashSet;
 use futures::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
-use std::sync::Arc;
 use std::str::FromStr;
+use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 use crate::core::strategy::StrategyWork;
 
@@ -157,8 +157,8 @@ impl MevShareClient {
         let mut buffer = String::new();
 
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk
-                .map_err(|e| AppError::Connection(format!("SSE chunk error: {}", e)))?;
+            let chunk =
+                chunk.map_err(|e| AppError::Connection(format!("SSE chunk error: {}", e)))?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
             while let Some(idx) = buffer.find("\n\n") {
@@ -194,9 +194,7 @@ impl MevShareClient {
             }
         }
 
-        Err(AppError::Connection(
-            "SSE stream ended unexpectedly".into(),
-        ))
+        Err(AppError::Connection("SSE stream ended unexpectedly".into()))
     }
 
     async fn handle_event(&self, evt: RawEvent) {
@@ -237,10 +235,7 @@ impl MevShareClient {
             .and_then(parse_u256_hex)
             .unwrap_or(U256::ZERO);
         let gas_limit = raw.gas.as_deref().and_then(parse_u64_hex);
-        let max_fee_per_gas = raw
-            .max_fee_per_gas
-            .as_deref()
-            .and_then(parse_u128_hex);
+        let max_fee_per_gas = raw.max_fee_per_gas.as_deref().and_then(parse_u128_hex);
         let max_priority_fee_per_gas = raw
             .max_priority_fee_per_gas
             .as_deref()

@@ -29,6 +29,7 @@ struct NormalizedSymbols {
     binance_symbols: Vec<String>,
 }
 
+#[derive(Clone)]
 pub struct PriceFeed {
     client: Client,
     // Map: Symbol -> (Price, Timestamp)
@@ -72,8 +73,7 @@ impl PriceFeed {
 
         // 2. Try Chainlink on-chain feed
         if let Some(price) = self.try_chainlink(&normalized.chainlink_symbol).await? {
-            self.store_cache(&normalized.cache_key, price.clone())
-                .await;
+            self.store_cache(&normalized.cache_key, price.clone()).await;
             return Ok(price);
         }
 
@@ -105,8 +105,7 @@ impl PriceFeed {
                 source: "binance".into(),
             };
 
-            self.store_cache(&normalized.cache_key, quote.clone())
-                .await;
+            self.store_cache(&normalized.cache_key, quote.clone()).await;
 
             return Ok(quote);
         }
@@ -235,27 +234,21 @@ mod tests {
         let normalized = normalize_symbol("ethusd");
         assert_eq!(normalized.cache_key, "ETH");
         assert_eq!(normalized.chainlink_symbol, "ETH");
-        assert!(normalized
-            .binance_symbols
-            .contains(&"ETHUSDT".to_string()));
+        assert!(normalized.binance_symbols.contains(&"ETHUSDT".to_string()));
     }
 
     #[test]
     fn normalizes_plain_symbol() {
         let normalized = normalize_symbol("eth");
         assert_eq!(normalized.cache_key, "ETH");
-        assert!(normalized
-            .binance_symbols
-            .contains(&"ETHUSDT".to_string()));
+        assert!(normalized.binance_symbols.contains(&"ETHUSDT".to_string()));
     }
 
     #[test]
     fn normalizes_with_alias_and_separator() {
         let normalized = normalize_symbol("weth-usdc");
         assert_eq!(normalized.chainlink_symbol, "ETH");
-        assert!(normalized
-            .binance_symbols
-            .contains(&"ETHUSDC".to_string()));
+        assert!(normalized.binance_symbols.contains(&"ETHUSDC".to_string()));
         assert!(normalized.binance_symbols.contains(&"ETHUSDT".to_string()));
     }
 }

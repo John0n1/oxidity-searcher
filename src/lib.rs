@@ -8,6 +8,6 @@ pub mod infrastructure;
 pub mod services;
 
 // Backward-compat re-exports
-pub use infrastructure::network as network;
-pub use infrastructure::data as data;
+pub use infrastructure::data;
+pub use infrastructure::network;
 pub use services::strategy as core;

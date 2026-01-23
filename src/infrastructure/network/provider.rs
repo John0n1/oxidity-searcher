@@ -4,10 +4,13 @@
 use crate::common::error::AppError;
 use alloy::network::Ethereum;
 use alloy::providers::RootProvider;
+use alloy_rpc_client::BuiltInConnectionString;
+use std::path::PathBuf;
 use url::Url;
 
 pub type HttpProvider = RootProvider<Ethereum>;
 pub type WsProvider = RootProvider<Ethereum>;
+pub type IpcProvider = RootProvider<Ethereum>;
 
 pub struct ConnectionFactory;
 
@@ -24,6 +27,16 @@ impl ConnectionFactory {
         let provider = RootProvider::connect(ws_url)
             .await
             .map_err(|e| AppError::Connection(format!("WS Connection failed: {}", e)))?;
+
+        Ok(provider)
+    }
+
+    pub async fn ipc(ipc_url: &str) -> Result<IpcProvider, AppError> {
+        let path = PathBuf::from(ipc_url);
+        let conn = BuiltInConnectionString::Ipc(path);
+        let provider: IpcProvider = RootProvider::connect_with(conn)
+            .await
+            .map_err(|e| AppError::Connection(format!("IPC Connection failed: {}", e)))?;
 
         Ok(provider)
     }

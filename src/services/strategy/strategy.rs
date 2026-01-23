@@ -5,44 +5,43 @@ use crate::common::constants::{
     CHAIN_ARBITRUM, CHAIN_ETHEREUM, CHAIN_OPTIMISM, CHAIN_POLYGON, MIN_PROFIT_THRESHOLD_WEI,
 };
 use crate::common::error::AppError;
+use crate::common::retry::retry_async;
 use crate::core::executor::{BundleItem, SharedBundleSender};
 use crate::core::nonce::NonceManager;
 use crate::core::portfolio::PortfolioManager;
 use crate::core::safety::SafetyGuard;
 use crate::core::simulation::Simulator;
 use crate::data::db::Database;
-use crate::data::bundle_executor::MEVBundleExecutor;
-use crate::data::flashloan_abi::{OxidizedFlashExecutor, FlashCallbackData};
+use crate::data::executor::{FlashCallbackData, UnifiedHardenedExecutor};
 use crate::infrastructure::data::token_manager::TokenManager;
 use crate::network::gas::{GasFees, GasOracle};
+use crate::network::mev_share::MevShareHint;
 use crate::network::price_feed::PriceFeed;
 use crate::network::provider::HttpProvider;
-use crate::network::mev_share::MevShareHint;
 use alloy::consensus::{SignableTransaction, Transaction as ConsensusTxTrait, TxEip1559};
-use alloy::eips::eip2930::{AccessList, AccessListItem};
 use alloy::eips::eip2718::Encodable2718;
+use alloy::eips::eip2930::{AccessList, AccessListItem};
 use alloy::network::{TransactionResponse, TxSignerSync};
-use alloy::primitives::{address, Address, Bytes, TxKind, B256, U256, I256};
+use alloy::primitives::{aliases::U24, Address, B256, Bytes, I256, TxKind, U256, address};
 use alloy::providers::Provider;
-use alloy::rpc::types::eth::state::StateOverridesBuilder;
+use alloy::rpc::types::Header;
 use alloy::rpc::types::eth::Transaction;
 use alloy::rpc::types::eth::TransactionInput;
 use alloy::rpc::types::eth::TransactionRequest;
-use alloy::rpc::types::Header;
+use alloy::rpc::types::eth::state::StateOverridesBuilder;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol;
 use alloy::sol_types::SolCall;
-use alloy_sol_types::SolValue;
 use alloy_consensus::TxEnvelope;
+use alloy_sol_types::SolValue;
 use dashmap::DashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::collections::HashSet;
-use tokio::sync::{broadcast::Receiver, mpsc::UnboundedReceiver};
-use crate::common::retry::retry_async;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::ops::Neg;
+use std::sync::Arc;
+use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::{broadcast::Receiver, mpsc::UnboundedReceiver, Mutex};
 
 #[derive(Debug)]
 pub enum StrategyWork {
@@ -104,7 +103,9 @@ sol! {
     }
 }
 
-use UniV2Router::{swapExactETHForTokensCall, swapExactTokensForETHCall, swapExactTokensForTokensCall};
+use UniV2Router::{
+    swapExactETHForTokensCall, swapExactTokensForETHCall, swapExactTokensForTokensCall,
+};
 
 #[derive(Default)]
 pub struct StrategyStats {
@@ -137,8 +138,8 @@ enum SwapDirection {
 }
 
 pub struct StrategyExecutor {
-    tx_rx: UnboundedReceiver<StrategyWork>,
-    mut_block_rx: Receiver<Header>,
+    tx_rx: Mutex<UnboundedReceiver<StrategyWork>>,
+    mut_block_rx: Mutex<Receiver<Header>>,
     safety_guard: Arc<SafetyGuard>,
     bundle_sender: SharedBundleSender,
     db: Database,
@@ -160,10 +161,9 @@ pub struct StrategyExecutor {
     inventory_tokens: DashSet<Address>,
     last_rebalance: Mutex<Instant>,
     toxic_tokens: DashSet<Address>,
-    bundle_executor: Option<Address>,
-    bundle_executor_bribe_bps: u64,
-    bundle_executor_bribe_recipient: Option<Address>,
-    flashloan_executor: Option<Address>,
+    executor: Option<Address>,
+    executor_bribe_bps: u64,
+    executor_bribe_recipient: Option<Address>,
     flashloan_enabled: bool,
 }
 
@@ -226,15 +226,41 @@ impl StrategyExecutor {
         }
 
         match reason {
-            "unknown_router" => { self.stats.skip_unknown_router.fetch_add(1, Ordering::Relaxed); }
-            "decode_failed" => { self.stats.skip_decode_failed.fetch_add(1, Ordering::Relaxed); }
-            "zero_amount_or_no_wrapped_native" => { self.stats.skip_missing_wrapped.fetch_add(1, Ordering::Relaxed); }
-            "gas_price_cap" => { self.stats.skip_gas_cap.fetch_add(1, Ordering::Relaxed); }
-            "simulation_failed" => { self.stats.skip_sim_failed.fetch_add(1, Ordering::Relaxed); }
-            "profit_or_gas_guard" => { self.stats.skip_profit_guard.fetch_add(1, Ordering::Relaxed); }
-            "unsupported_router_type" => { self.stats.skip_unsupported_router.fetch_add(1, Ordering::Relaxed); }
-            "token_call" => { self.stats.skip_token_call.fetch_add(1, Ordering::Relaxed); }
-            "toxic_token" => { self.stats.skip_toxic_token.fetch_add(1, Ordering::Relaxed); }
+            "unknown_router" => {
+                self.stats
+                    .skip_unknown_router
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "decode_failed" => {
+                self.stats
+                    .skip_decode_failed
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "zero_amount_or_no_wrapped_native" => {
+                self.stats
+                    .skip_missing_wrapped
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "gas_price_cap" => {
+                self.stats.skip_gas_cap.fetch_add(1, Ordering::Relaxed);
+            }
+            "simulation_failed" => {
+                self.stats.skip_sim_failed.fetch_add(1, Ordering::Relaxed);
+            }
+            "profit_or_gas_guard" => {
+                self.stats.skip_profit_guard.fetch_add(1, Ordering::Relaxed);
+            }
+            "unsupported_router_type" => {
+                self.stats
+                    .skip_unsupported_router
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "token_call" => {
+                self.stats.skip_token_call.fetch_add(1, Ordering::Relaxed);
+            }
+            "toxic_token" => {
+                self.stats.skip_toxic_token.fetch_add(1, Ordering::Relaxed);
+            }
             _ => {}
         }
     }
@@ -268,15 +294,14 @@ impl StrategyExecutor {
         dry_run: bool,
         router_allowlist: HashSet<Address>,
         wrapped_native: Address,
-        bundle_executor: Option<Address>,
-        bundle_executor_bribe_bps: u64,
-        bundle_executor_bribe_recipient: Option<Address>,
-        flashloan_executor: Option<Address>,
+        executor: Option<Address>,
+        executor_bribe_bps: u64,
+        executor_bribe_recipient: Option<Address>,
         flashloan_enabled: bool,
     ) -> Self {
         Self {
-            tx_rx,
-            mut_block_rx: block_rx,
+            tx_rx: Mutex::new(tx_rx),
+            mut_block_rx: Mutex::new(block_rx),
             safety_guard,
             bundle_sender,
             db,
@@ -298,82 +323,234 @@ impl StrategyExecutor {
             inventory_tokens: DashSet::new(),
             last_rebalance: Mutex::new(Instant::now()),
             toxic_tokens: DashSet::new(),
-            bundle_executor,
-            bundle_executor_bribe_bps,
-            bundle_executor_bribe_recipient,
-            flashloan_executor,
+            executor,
+            executor_bribe_bps,
+            executor_bribe_recipient,
             flashloan_enabled,
         }
     }
 
-    pub async fn run(mut self) -> Result<(), AppError> {
+    pub async fn run(self) -> Result<(), AppError> {
         tracing::info!("StrategyExecutor: waiting for pending transactions");
-        while let Some(work) = self.tx_rx.recv().await {
-            while let Ok(header) = self.mut_block_rx.try_recv() {
-                tracing::debug!("StrategyExecutor: observed new block {:?}", header.hash);
-                let _ = self.maybe_rebalance_inventory().await;
+
+        let executor = Arc::new(self);
+
+        // Spawn a lightweight block watcher so work processing never waits on block stream.
+        let block_exec = executor.clone();
+        tokio::spawn(async move {
+            block_exec.block_watcher().await;
+        });
+
+        loop {
+            let work_opt = {
+                let mut rx = executor.tx_rx.lock().await;
+                rx.recv().await
+            };
+
+            match work_opt {
+                Some(work) => {
+                    let exec = executor.clone();
+                    tokio::spawn(async move {
+                        exec.process_work(work).await;
+                    });
+                }
+                None => break,
             }
+        }
 
-            self.safety_guard.check()?;
+        Ok(())
+    }
 
-            let outcome = match work {
-                StrategyWork::Mempool(tx) => {
-                    let from = tx.from();
-                    let res = self.evaluate_mempool_tx(&tx).await;
-                    (res, Some(from), Some(tx.tx_hash()))
-                }
-                StrategyWork::MevShareHint(hint) => {
-                    let res = self.evaluate_mev_share_hint(&hint).await;
-                    (res, hint.from, Some(hint.tx_hash))
-                }
+    async fn block_watcher(self: Arc<Self>) {
+        loop {
+            let msg = {
+                let mut rx = self.mut_block_rx.lock().await;
+                rx.recv().await
             };
 
-            match outcome {
-                (Ok(Some(tx_hash)), from, _) => {
-                    tracing::info!(
-                        target: "strategy",
-                        from = ?from,
-                        tx_hash = %tx_hash,
-                        "Bundle submitted"
-                    );
-                    self.safety_guard.report_success();
-                    self.stats.submitted.fetch_add(1, Ordering::Relaxed);
+            match msg {
+                Ok(header) => {
+                    tracing::debug!("StrategyExecutor: observed new block {:?}", header.hash);
+                    let _ = self.maybe_rebalance_inventory().await;
                 }
-                (Ok(None), from, tx_hash) => {
-                    tracing::debug!(
-                        target: "strategy",
-                        from=?from,
-                        tx_hash=?tx_hash,
-                        "Skipped item"
-                    );
-                    self.stats.skipped.fetch_add(1, Ordering::Relaxed);
-                }
-                (Err(e), _, _) => {
-                    self.safety_guard.report_failure();
-                    self.stats.failed.fetch_add(1, Ordering::Relaxed);
-                    tracing::error!(target: "strategy", error=%e, "Strategy failed");
-                }
-            };
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            }
+        }
+    }
 
-            let processed = self.stats.processed.fetch_add(1, Ordering::Relaxed) + 1;
-            if processed % 50 == 0 {
-                tracing::info!(
-                    target: "strategy_summary",
-                    processed,
-                    submitted = self.stats.submitted.load(Ordering::Relaxed),
-                    skipped = self.stats.skipped.load(Ordering::Relaxed),
-                    failed = self.stats.failed.load(Ordering::Relaxed),
-                    skip_unknown_router = self.stats.skip_unknown_router.load(Ordering::Relaxed),
-                    skip_decode = self.stats.skip_decode_failed.load(Ordering::Relaxed),
-                    skip_missing_wrapped = self.stats.skip_missing_wrapped.load(Ordering::Relaxed),
-                    skip_gas_cap = self.stats.skip_gas_cap.load(Ordering::Relaxed),
-                    skip_sim_failed = self.stats.skip_sim_failed.load(Ordering::Relaxed),
-                    skip_profit_guard = self.stats.skip_profit_guard.load(Ordering::Relaxed),
-                    skip_unsupported_router = self.stats.skip_unsupported_router.load(Ordering::Relaxed),
-                    skip_token_call = self.stats.skip_token_call.load(Ordering::Relaxed),
-                    "Strategy loop summary"
+    async fn process_work(self: Arc<Self>, work: StrategyWork) {
+        if let Err(e) = self.handle_work(work).await {
+            tracing::error!(target: "strategy", error=%e, "Strategy task failed");
+        }
+    }
+
+    async fn populate_access_list(&self, req: &mut TransactionRequest) {
+        match self.http_provider.create_access_list(&req.clone()).await {
+            Ok(res) => {
+                let list = res.ensure_ok().map(|r| r.access_list).unwrap_or_default();
+                if !list.0.is_empty() {
+                    req.access_list = Some(list);
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    target: "access_list",
+                    error=%e,
+                    "eth_createAccessList failed; continuing without access list"
                 );
             }
+        }
+    }
+
+    async fn apply_access_list(
+        &self,
+        req: &mut TransactionRequest,
+        fallback: AccessList,
+    ) -> AccessList {
+        self.populate_access_list(req).await;
+        req.access_list.clone().unwrap_or(fallback)
+    }
+
+    async fn sign_with_access_list(
+        &self,
+        mut request: TransactionRequest,
+        fallback: AccessList,
+    ) -> Result<(Vec<u8>, TransactionRequest, B256), AppError> {
+        let access_list = self.apply_access_list(&mut request, fallback).await;
+
+        let to = request
+            .to
+            .ok_or_else(|| AppError::Strategy("Missing `to` in tx request".into()))?;
+        let gas = request
+            .gas
+            .ok_or_else(|| AppError::Strategy("Missing `gas` in tx request".into()))?;
+        let value = request.value.unwrap_or_default();
+        let max_fee_per_gas = request.max_fee_per_gas.ok_or_else(|| {
+            AppError::Strategy("Missing max_fee_per_gas in tx request".into())
+        })?;
+        let max_priority_fee_per_gas = request.max_priority_fee_per_gas.ok_or_else(|| {
+            AppError::Strategy("Missing max_priority_fee_per_gas in tx request".into())
+        })?;
+        let nonce = request
+            .nonce
+            .ok_or_else(|| AppError::Strategy("Missing nonce in tx request".into()))?;
+        let chain_id = request
+            .chain_id
+            .unwrap_or(self.chain_id);
+        let input_bytes = request
+            .input
+            .clone()
+            .into_input()
+            .map(Bytes::from)
+            .unwrap_or_default();
+
+        let mut tx = TxEip1559 {
+            chain_id,
+            nonce,
+            max_priority_fee_per_gas,
+            max_fee_per_gas,
+            gas_limit: gas,
+            to,
+            value,
+            access_list,
+            input: input_bytes,
+        };
+
+        let sig = TxSignerSync::sign_transaction_sync(&self.signer, &mut tx)
+            .map_err(|e| AppError::Strategy(format!("Sign tx failed: {}", e)))?;
+        let signed: TxEnvelope = tx.into_signed(sig).into();
+        let raw = signed.encoded_2718();
+        Ok((raw, request, *signed.tx_hash()))
+    }
+
+    async fn sign_swap_request(
+        &self,
+        to: Address,
+        gas_limit: u64,
+        value: U256,
+        max_fee_per_gas: u128,
+        max_priority_fee_per_gas: u128,
+        nonce: u64,
+        calldata: Vec<u8>,
+        access_list: AccessList,
+    ) -> Result<(Vec<u8>, TransactionRequest, B256), AppError> {
+        let request = TransactionRequest {
+            from: Some(self.signer.address()),
+            to: Some(TxKind::Call(to)),
+            max_fee_per_gas: Some(max_fee_per_gas),
+            max_priority_fee_per_gas: Some(max_priority_fee_per_gas),
+            gas: Some(gas_limit),
+            value: Some(value),
+            input: TransactionInput::new(calldata.into()),
+            nonce: Some(nonce),
+            chain_id: Some(self.chain_id),
+            ..Default::default()
+        };
+
+        self.sign_with_access_list(request, access_list).await
+    }
+
+    async fn handle_work(&self, work: StrategyWork) -> Result<(), AppError> {
+        self.safety_guard.check()?;
+
+        let outcome = match work {
+            StrategyWork::Mempool(tx) => {
+                let from = tx.from();
+                let res = self.evaluate_mempool_tx(&tx).await;
+                (res, Some(from), Some(tx.tx_hash()))
+            }
+            StrategyWork::MevShareHint(hint) => {
+                let res = self.evaluate_mev_share_hint(&hint).await;
+                (res, hint.from, Some(hint.tx_hash))
+            }
+        };
+
+        match outcome {
+            (Ok(Some(tx_hash)), from, _) => {
+                tracing::info!(
+                    target: "strategy",
+                    from = ?from,
+                    tx_hash = %tx_hash,
+                    "Bundle submitted"
+                );
+                self.safety_guard.report_success();
+                self.stats.submitted.fetch_add(1, Ordering::Relaxed);
+            }
+            (Ok(None), from, tx_hash) => {
+                tracing::debug!(
+                    target: "strategy",
+                    from=?from,
+                    tx_hash=?tx_hash,
+                    "Skipped item"
+                );
+                self.stats.skipped.fetch_add(1, Ordering::Relaxed);
+            }
+            (Err(e), _, _) => {
+                self.safety_guard.report_failure();
+                self.stats.failed.fetch_add(1, Ordering::Relaxed);
+                tracing::error!(target: "strategy", error=%e, "Strategy failed");
+            }
+        };
+
+        let processed = self.stats.processed.fetch_add(1, Ordering::Relaxed) + 1;
+        if processed % 50 == 0 {
+            tracing::info!(
+                target: "strategy_summary",
+                processed,
+                submitted = self.stats.submitted.load(Ordering::Relaxed),
+                skipped = self.stats.skipped.load(Ordering::Relaxed),
+                failed = self.stats.failed.load(Ordering::Relaxed),
+                skip_unknown_router = self.stats.skip_unknown_router.load(Ordering::Relaxed),
+                skip_decode = self.stats.skip_decode_failed.load(Ordering::Relaxed),
+                skip_missing_wrapped = self.stats.skip_missing_wrapped.load(Ordering::Relaxed),
+                skip_gas_cap = self.stats.skip_gas_cap.load(Ordering::Relaxed),
+                skip_sim_failed = self.stats.skip_sim_failed.load(Ordering::Relaxed),
+                skip_profit_guard = self.stats.skip_profit_guard.load(Ordering::Relaxed),
+                skip_unsupported_router = self.stats.skip_unsupported_router.load(Ordering::Relaxed),
+                skip_token_call = self.stats.skip_token_call.load(Ordering::Relaxed),
+                "Strategy loop summary"
+            );
         }
 
         Ok(())
@@ -434,13 +611,9 @@ impl StrategyExecutor {
             return Ok(None);
         }
 
-        let real_balance = self
-            .portfolio
-            .update_eth_balance(self.chain_id)
-            .await?;
+        let real_balance = self.portfolio.update_eth_balance(self.chain_id).await?;
         let (wallet_chain_balance, _) = if self.dry_run {
-            let gas_headroom =
-                U256::from(tx.gas_limit()) * U256::from(gas_fees.max_fee_per_gas);
+            let gas_headroom = U256::from(tx.gas_limit()) * U256::from(gas_fees.max_fee_per_gas);
             let value_headroom = tx.value().saturating_mul(U256::from(2u64));
             let mock = gas_headroom
                 .saturating_add(value_headroom)
@@ -449,11 +622,7 @@ impl StrategyExecutor {
         } else {
             (real_balance, false)
         };
-        let base_gas_budget = U256::from(tx.gas_limit()) * U256::from(gas_fees.max_fee_per_gas);
-        if !self.dry_run {
-            self.portfolio
-                .ensure_funding(self.chain_id, base_gas_budget)?;
-        }
+        // Do not gate locally on wallet balance; we simulate with a fat override and let the builder/validator decide.
 
         let mut attack_value_eth = U256::ZERO;
         let mut bundle_requests: Vec<TransactionRequest> = Vec::new();
@@ -461,10 +630,14 @@ impl StrategyExecutor {
         let executor_tx: Option<(Vec<u8>, TransactionRequest, B256)>;
         let executor_hash: Option<B256>;
 
+        // Capture the current on-chain nonce once; use local cursor for this bundle.
+        let mut nonce_cursor = self.nonce_manager.get_next_nonce().await?;
+
         let mut front_run: Option<FrontRunTx> = None;
         let mut approval: Option<ApproveTx> = None;
         if direction == SwapDirection::BuyWithEth {
-            let nonce_front = self.nonce_manager.get_next_nonce().await?;
+            let nonce_front = nonce_cursor;
+            nonce_cursor = nonce_cursor.saturating_add(1);
             match self
                 .build_front_run_tx(
                     &observed_swap,
@@ -495,7 +668,8 @@ impl StrategyExecutor {
                 .needs_approval(target_token, observed_swap.router, f.expected_tokens)
                 .await?
             {
-                let needed_nonce = self.nonce_manager.get_next_nonce().await?;
+                let needed_nonce = nonce_cursor;
+                nonce_cursor = nonce_cursor.saturating_add(1);
                 approval = Some(
                     self.build_approval_tx(
                         target_token,
@@ -509,24 +683,29 @@ impl StrategyExecutor {
             }
         }
 
-        let use_flashloan = self.should_use_flashloan(
-            observed_swap.amount_in,
-            wallet_chain_balance,
-            &gas_fees,
-        ) && front_run.is_none();
+        let use_flashloan =
+            self.should_use_flashloan(observed_swap.amount_in, wallet_chain_balance, &gas_fees)
+                && front_run.is_none();
 
-        let nonce_backrun = self.nonce_manager.get_next_nonce().await?;
+        let sim_balance = U256::from_str("10000000000000000000000")
+            .unwrap_or_else(|_| U256::from(u128::MAX));
+        let trade_balance = if use_flashloan {
+            sim_balance
+        } else {
+            wallet_chain_balance
+        };
+
+        let nonce_backrun = nonce_cursor;
 
         let backrun = match self
             .build_backrun_tx(
                 &observed_swap,
                 gas_fees.max_fee_per_gas,
                 gas_fees.max_priority_fee_per_gas,
-                wallet_chain_balance,
+                trade_balance,
                 tx.gas_limit(),
                 front_run.as_ref().map(|f| f.expected_tokens),
                 use_flashloan,
-                self.flashloan_executor,
                 nonce_backrun,
             )
             .await
@@ -545,13 +724,20 @@ impl StrategyExecutor {
             .unwrap_or_default();
 
         let overrides = StateOverridesBuilder::default()
-            .with_balance(self.signer.address(), wallet_chain_balance)
+            .with_balance(self.signer.address(), sim_balance)
             .with_nonce(self.signer.address(), sim_nonce)
             .build();
 
         // Build optional executor wrapper for approval + backrun legs.
         executor_tx = self
-            .build_executor_wrapper(approval.as_ref(), &backrun, &gas_fees, tx.gas_limit(), nonce_backrun)?;
+            .build_executor_wrapper(
+                approval.as_ref(),
+                &backrun,
+                &gas_fees,
+                tx.gas_limit(),
+                nonce_backrun,
+            )
+            .await?;
         executor_hash = executor_tx.as_ref().map(|(_, _, h)| *h);
 
         if let Some(f) = &front_run {
@@ -572,7 +758,10 @@ impl StrategyExecutor {
             bundle_requests.push(backrun.request.clone());
             raw_bundle.push(backrun_raw.clone());
         }
-        let bundle_reqs_for_sim = bundle_requests.clone();
+        let mut bundle_reqs_for_sim = bundle_requests.clone();
+        for req in bundle_reqs_for_sim.iter_mut() {
+            self.populate_access_list(req).await;
+        }
         let overrides_for_sim = overrides.clone();
         let bundle_sims = retry_async(
             move |_| {
@@ -599,18 +788,9 @@ impl StrategyExecutor {
             gas_used_total = gas_used_total.saturating_add(sim.gas_used);
         }
         let bundle_gas_limit = gas_used_total.max(tx.gas_limit());
-        let gas_cost_wei =
-            U256::from(bundle_gas_limit) * U256::from(gas_fees.max_fee_per_gas);
+        let gas_cost_wei = U256::from(bundle_gas_limit) * U256::from(gas_fees.max_fee_per_gas);
 
-        if !self.dry_run {
-            let spend = if backrun.uses_flashloan {
-                U256::ZERO
-            } else {
-                backrun.value.saturating_add(attack_value_eth)
-            };
-            self.portfolio
-                .ensure_funding(self.chain_id, spend + gas_cost_wei)?;
-        }
+        // No local balance gating here; avoid blocking concurrent bundles. The builder/validator will enforce real balances.
 
         let total_eth_in = backrun.value.saturating_add(attack_value_eth);
         let gross_profit_wei = backrun.expected_out.saturating_sub(total_eth_in);
@@ -623,9 +803,12 @@ impl StrategyExecutor {
 
         let net_profit_wei = gross_profit_wei.saturating_sub(gas_cost_wei);
         let profit_floor = StrategyExecutor::dynamic_profit_floor(wallet_chain_balance);
-        
+
         if net_profit_wei < profit_floor {
-            self.log_skip("profit_or_gas_guard", &format!("Net {} < Floor {}", net_profit_wei, profit_floor));
+            self.log_skip(
+                "profit_or_gas_guard",
+                &format!("Net {} < Floor {}", net_profit_wei, profit_floor),
+            );
             return Ok(None);
         }
 
@@ -681,9 +864,14 @@ impl StrategyExecutor {
             .update_status(&format!("{:#x}", backrun.hash), None, Some(false))
             .await;
 
-        self.bundle_sender
+        if let Err(e) = self
+            .bundle_sender
             .send_bundle(&raw_bundle, self.chain_id)
-            .await?;
+            .await
+        {
+            self.emergency_exit_inventory("bundle send failed").await;
+            return Err(e);
+        }
 
         let to_addr = match tx.kind() {
             TxKind::Call(addr) => Some(addr),
@@ -716,7 +904,10 @@ impl StrategyExecutor {
                 &format!("{:#x}", self.signer.address()),
                 recorded_to
                     .as_ref()
-                    .and_then(|k| match k { TxKind::Call(a) => Some(format!("{:#x}", a)), _ => None })
+                    .and_then(|k| match k {
+                        TxKind::Call(a) => Some(format!("{:#x}", a)),
+                        _ => None,
+                    })
                     .as_deref(),
                 recorded_value.to_string().as_str(),
                 Some("strategy_backrun"),
@@ -755,7 +946,9 @@ impl StrategyExecutor {
             .await;
 
         let receipt_target = executor_hash.unwrap_or(backrun.hash);
-        let _ = self.await_receipt(&receipt_target).await;
+        if !self.await_receipt(&receipt_target).await? {
+            self.emergency_exit_inventory("bundle receipt missing/failed").await;
+        }
 
         Ok(Some(format!("{tx_hash:#x}")))
     }
@@ -769,8 +962,7 @@ impl StrategyExecutor {
             return Ok(None);
         }
 
-        let Some(observed_swap) =
-            Self::decode_swap_input(hint.router, &hint.call_data, hint.value)
+        let Some(observed_swap) = Self::decode_swap_input(hint.router, &hint.call_data, hint.value)
         else {
             self.log_skip("decode_failed", "unable to decode swap input");
             return Ok(None);
@@ -827,8 +1019,7 @@ impl StrategyExecutor {
 
         let real_balance = self.portfolio.update_eth_balance(self.chain_id).await?;
         let (wallet_chain_balance, _) = if self.dry_run {
-            let gas_headroom =
-                U256::from(gas_limit_hint) * U256::from(gas_fees.max_fee_per_gas);
+            let gas_headroom = U256::from(gas_limit_hint) * U256::from(gas_fees.max_fee_per_gas);
             let value_headroom = hint.value.saturating_mul(U256::from(2u64));
             let mock = gas_headroom
                 .saturating_add(value_headroom)
@@ -837,11 +1028,7 @@ impl StrategyExecutor {
         } else {
             (real_balance, false)
         };
-        let base_gas_budget = U256::from(gas_limit_hint) * U256::from(gas_fees.max_fee_per_gas);
-        if !self.dry_run {
-            self.portfolio
-                .ensure_funding(self.chain_id, base_gas_budget)?;
-        }
+        // Skip local balance gating for concurrent bundles; rely on simulation override and builder validation.
 
         let mut attack_value_eth = U256::ZERO;
         let mut bundle_requests: Vec<TransactionRequest> = Vec::new();
@@ -850,10 +1037,14 @@ impl StrategyExecutor {
         let mut executor_request: Option<TransactionRequest> = None;
         let mut executor_hash: Option<B256> = None;
 
+        // Capture the on-chain nonce once for this bundle.
+        let mut nonce_cursor = self.nonce_manager.get_next_nonce().await?;
+
         let mut front_run: Option<FrontRunTx> = None;
         let mut approval: Option<ApproveTx> = None;
         if direction == SwapDirection::BuyWithEth {
-            let nonce_front = self.nonce_manager.get_next_nonce().await?;
+            let nonce_front = nonce_cursor;
+            nonce_cursor = nonce_cursor.saturating_add(1);
             match self
                 .build_front_run_tx(
                     &observed_swap,
@@ -883,7 +1074,8 @@ impl StrategyExecutor {
                 .needs_approval(target_token, observed_swap.router, f.expected_tokens)
                 .await?
             {
-                let needed_nonce = self.nonce_manager.get_next_nonce().await?;
+                let needed_nonce = nonce_cursor;
+                nonce_cursor = nonce_cursor.saturating_add(1);
                 approval = Some(
                     self.build_approval_tx(
                         target_token,
@@ -897,23 +1089,28 @@ impl StrategyExecutor {
             }
         }
 
-        let nonce_backrun = self.nonce_manager.get_next_nonce().await?;
-        let use_flashloan = self.should_use_flashloan(
-            observed_swap.amount_in,
-            wallet_chain_balance,
-            &gas_fees,
-        ) && front_run.is_none();
+        let use_flashloan =
+            self.should_use_flashloan(observed_swap.amount_in, wallet_chain_balance, &gas_fees)
+                && front_run.is_none();
+        let sim_balance = U256::from_str("10000000000000000000000")
+            .unwrap_or_else(|_| U256::from(u128::MAX));
+        let trade_balance = if use_flashloan {
+            sim_balance
+        } else {
+            wallet_chain_balance
+        };
+        let nonce_backrun = nonce_cursor;
+        nonce_cursor = nonce_cursor.saturating_add(1);
         let backrun = match self
             .build_backrun_tx(
                 &observed_swap,
                 gas_fees.max_fee_per_gas,
                 gas_fees.max_priority_fee_per_gas,
-                wallet_chain_balance,
+                trade_balance,
                 gas_limit_hint,
                 front_run.as_ref().map(|f| f.expected_tokens),
                 use_flashloan,
-                self.flashloan_executor,
-                nonce_backrun,
+                nonce_cursor,
             )
             .await
         {
@@ -931,13 +1128,11 @@ impl StrategyExecutor {
             .unwrap_or_default();
 
         let overrides = StateOverridesBuilder::default()
-            .with_balance(self.signer.address(), wallet_chain_balance)
+            .with_balance(self.signer.address(), sim_balance)
             .with_nonce(self.signer.address(), sim_nonce)
             .build();
 
-        let max_fee_hint = hint
-            .max_fee_per_gas
-            .unwrap_or(gas_fees.max_fee_per_gas);
+        let max_fee_hint = hint.max_fee_per_gas.unwrap_or(gas_fees.max_fee_per_gas);
         let max_prio_hint = hint
             .max_priority_fee_per_gas
             .unwrap_or(gas_fees.max_priority_fee_per_gas);
@@ -960,8 +1155,8 @@ impl StrategyExecutor {
         bundle_requests.push(backrun.request.clone());
 
         // If we can avoid a front-run, wrap our legs in the on-chain executor for atomicity.
-        if self.bundle_executor.is_some() && front_run.is_none() {
-            if let Some(exec_addr) = self.bundle_executor {
+        if self.executor.is_some() && front_run.is_none() {
+            if let Some(exec_addr) = self.executor {
                 let mut targets = Vec::new();
                 let mut payloads = Vec::new();
                 let mut values = Vec::new();
@@ -969,24 +1164,19 @@ impl StrategyExecutor {
                 if let Some(app) = &approval {
                     if let Some(TxKind::Call(addr)) = app.request.to {
                         targets.push(addr);
-                        let bytes = app
-                            .request
-                            .input
-                            .clone()
-                            .into_input()
-                            .unwrap_or_default();
+                        let bytes = app.request.input.clone().into_input().unwrap_or_default();
                         payloads.push(bytes);
                         values.push(U256::ZERO);
                     }
                 }
                 if let Some(TxKind::Call(addr)) = backrun.request.to {
                     targets.push(addr);
-                        let bytes = backrun
-                            .request
-                            .input
-                            .clone()
-                            .into_input()
-                            .unwrap_or_default();
+                    let bytes = backrun
+                        .request
+                        .input
+                        .clone()
+                        .into_input()
+                        .unwrap_or_default();
                     payloads.push(bytes);
                     values.push(backrun.value);
                 }
@@ -996,7 +1186,7 @@ impl StrategyExecutor {
                         .iter()
                         .copied()
                         .fold(U256::ZERO, |acc, v| acc.saturating_add(v));
-                    let exec_call = MEVBundleExecutor::executeCall {
+                    let exec_call = UnifiedHardenedExecutor::executeBundleCall {
                         targets,
                         payloads,
                         values,
@@ -1011,34 +1201,21 @@ impl StrategyExecutor {
                         .saturating_add(approval.as_ref().and_then(|a| a.request.gas).unwrap_or(0))
                         .saturating_add(80_000);
 
-                    let mut tx = TxEip1559 {
-                        chain_id: self.chain_id,
-                        nonce: nonce_backrun,
-                        max_priority_fee_per_gas: gas_fees.max_priority_fee_per_gas,
-                        max_fee_per_gas: gas_fees.max_fee_per_gas,
-                        gas_limit,
-                        to: TxKind::Call(exec_addr),
-                        value: total_value,
-                        access_list: AccessList::default(),
-                        input: Bytes::from(calldata.clone()),
-                    };
-                    let sig = TxSignerSync::sign_transaction_sync(&self.signer, &mut tx)
-                        .map_err(|e| AppError::Strategy(format!("Sign executor call failed: {}", e)))?;
-                    let signed: TxEnvelope = tx.into_signed(sig).into();
-                    executor_hash = Some(*signed.tx_hash());
-                    executor_tx_raw = Some(signed.encoded_2718());
-                    executor_request = Some(TransactionRequest {
-                        from: Some(self.signer.address()),
-                        to: Some(TxKind::Call(exec_addr)),
-                        max_fee_per_gas: Some(gas_fees.max_fee_per_gas),
-                        max_priority_fee_per_gas: Some(gas_fees.max_priority_fee_per_gas),
-                        gas: Some(gas_limit),
-                        value: Some(total_value),
-                        input: TransactionInput::new(calldata.into()),
-                        nonce: Some(nonce_backrun),
-                        chain_id: Some(self.chain_id),
-                        ..Default::default()
-                    });
+                    let (raw, request, hash) = self
+                        .sign_swap_request(
+                            exec_addr,
+                            gas_limit,
+                            total_value,
+                            gas_fees.max_fee_per_gas,
+                            gas_fees.max_priority_fee_per_gas,
+                            nonce_backrun,
+                            calldata,
+                            AccessList::default(),
+                        )
+                        .await?;
+                    executor_hash = Some(hash);
+                    executor_tx_raw = Some(raw);
+                    executor_request = Some(request);
                 }
             }
         }
@@ -1072,7 +1249,10 @@ impl StrategyExecutor {
         }
 
         let exec_req_for_sim = executor_request.clone();
-        let bundle_reqs_for_sim = bundle_requests.clone();
+        let mut bundle_reqs_for_sim = bundle_requests.clone();
+        for req in bundle_reqs_for_sim.iter_mut() {
+            self.populate_access_list(req).await;
+        }
         let overrides_for_sim = overrides.clone();
         let bundle_sims = retry_async(
             move |_| {
@@ -1083,7 +1263,11 @@ impl StrategyExecutor {
                     bundle_reqs_for_sim.clone()
                 };
                 let overrides = overrides_for_sim.clone();
-                async move { simulator.simulate_bundle_requests(&reqs, Some(overrides)).await }
+                async move {
+                    simulator
+                        .simulate_bundle_requests(&reqs, Some(overrides))
+                        .await
+                }
             },
             2,
             Duration::from_millis(100),
@@ -1099,18 +1283,9 @@ impl StrategyExecutor {
             gas_used_total = gas_used_total.saturating_add(sim.gas_used);
         }
         let bundle_gas_limit = gas_used_total.max(gas_limit_hint);
-        let gas_cost_wei =
-            U256::from(bundle_gas_limit) * U256::from(gas_fees.max_fee_per_gas);
+        let gas_cost_wei = U256::from(bundle_gas_limit) * U256::from(gas_fees.max_fee_per_gas);
 
-        if !self.dry_run {
-            let spend = if backrun.uses_flashloan {
-                U256::ZERO
-            } else {
-                backrun.value.saturating_add(attack_value_eth)
-            };
-            self.portfolio
-                .ensure_funding(self.chain_id, spend + gas_cost_wei)?;
-        }
+        // Likewise, do not block based on local balance; validator will enforce account state.
 
         let total_eth_in = backrun.value.saturating_add(attack_value_eth);
         let gross_profit_wei = backrun.expected_out.saturating_sub(total_eth_in);
@@ -1125,7 +1300,10 @@ impl StrategyExecutor {
         let profit_floor = StrategyExecutor::dynamic_profit_floor(wallet_chain_balance);
 
         if net_profit_wei < profit_floor {
-            self.log_skip("profit_or_gas_guard", &format!("Net {} < Floor {}", net_profit_wei, profit_floor));
+            self.log_skip(
+                "profit_or_gas_guard",
+                &format!("Net {} < Floor {}", net_profit_wei, profit_floor),
+            );
             return Ok(None);
         }
 
@@ -1182,14 +1360,16 @@ impl StrategyExecutor {
             return Ok(Some(tx_hash));
         }
 
-        let _ = self
-            .db
-            .update_status(&tx_hash, None, Some(false))
-            .await;
+        let _ = self.db.update_status(&tx_hash, None, Some(false)).await;
 
-        self.bundle_sender
+        if let Err(e) = self
+            .bundle_sender
             .send_mev_share_bundle(&bundle_body)
-            .await?;
+            .await
+        {
+            self.emergency_exit_inventory("mev_share bundle send failed").await;
+            return Err(e);
+        }
 
         let from_addr = hint.from.unwrap_or(Address::ZERO);
         self.db
@@ -1246,7 +1426,9 @@ impl StrategyExecutor {
             .await;
 
         let receipt_target = executor_hash.unwrap_or(backrun.hash);
-        let _ = self.await_receipt(&receipt_target).await;
+        if !self.await_receipt(&receipt_target).await? {
+            self.emergency_exit_inventory("mev_share receipt missing/failed").await;
+        }
 
         Ok(Some(tx_hash))
     }
@@ -1263,7 +1445,12 @@ impl StrategyExecutor {
         }
     }
 
-    fn boost_fees(&self, fees: &mut GasFees, victim_max_fee: Option<u128>, victim_tip: Option<u128>) {
+    fn boost_fees(
+        &self,
+        fees: &mut GasFees,
+        victim_max_fee: Option<u128>,
+        victim_tip: Option<u128>,
+    ) {
         let base_gwei = fees.base_fee_per_gas / 1_000_000_000u128;
         let mut boost_bps: u64 = if base_gwei > 80 {
             13000 // +30%
@@ -1272,49 +1459,51 @@ impl StrategyExecutor {
         } else {
             11000 // +10%
         };
-        
+
         let pnl = self.portfolio.get_net_profit_i256(self.chain_id);
         // -0.1 ETH threshold approx in I256
-        let neg_threshold = I256::from_raw(U256::from(100_000_000_000_000_000u128)).neg(); 
-        
+        let neg_threshold = I256::from_raw(U256::from(100_000_000_000_000_000u128)).neg();
+
         if pnl < neg_threshold {
-             boost_bps = (boost_bps as f64 * 0.8) as u64; 
+            boost_bps = (boost_bps as f64 * 0.8) as u64;
         } else if pnl.is_positive() {
-             boost_bps = (boost_bps as f64 * 1.05) as u64;
+            boost_bps = (boost_bps as f64 * 1.05) as u64;
         }
         boost_bps = boost_bps.max(10200).min(14500);
 
-        let boost = |val: u128| -> u128 {
-            (val.saturating_mul(boost_bps as u128) / 10_000u128).max(val)
-        };
+        let boost =
+            |val: u128| -> u128 { (val.saturating_mul(boost_bps as u128) / 10_000u128).max(val) };
         fees.max_fee_per_gas = boost(fees.max_fee_per_gas);
         fees.max_priority_fee_per_gas = boost(fees.max_priority_fee_per_gas);
-        
+
         let one_gwei: u128 = 1_000_000_000;
         let tip_floor = ((fees.base_fee_per_gas / 10).max(2 * one_gwei)).min(30 * one_gwei);
         if fees.max_priority_fee_per_gas < tip_floor {
             fees.max_priority_fee_per_gas = tip_floor;
         }
-        let min_fee = fees.base_fee_per_gas.saturating_add(fees.max_priority_fee_per_gas);
+        let min_fee = fees
+            .base_fee_per_gas
+            .saturating_add(fees.max_priority_fee_per_gas);
         if fees.max_fee_per_gas < min_fee {
             fees.max_fee_per_gas = min_fee;
         }
 
         if let Some(v_fee) = victim_max_fee {
-            let fee_target = v_fee
-                .saturating_mul(VICTIM_FEE_BUMP_BPS as u128)
-                / 10_000u128;
+            let fee_target = v_fee.saturating_mul(VICTIM_FEE_BUMP_BPS as u128) / 10_000u128;
             fees.max_fee_per_gas = fees.max_fee_per_gas.max(fee_target);
         }
         if let Some(v_tip) = victim_tip {
-            let tip_target = v_tip
-                .saturating_mul(VICTIM_FEE_BUMP_BPS as u128)
-                / 10_000u128;
+            let tip_target = v_tip.saturating_mul(VICTIM_FEE_BUMP_BPS as u128) / 10_000u128;
             fees.max_priority_fee_per_gas = fees.max_priority_fee_per_gas.max(tip_target);
         }
     }
 
-    fn gas_ratio_ok(&self, gas_cost_wei: U256, gross_profit_wei: U256, wallet_balance: U256) -> bool {
+    fn gas_ratio_ok(
+        &self,
+        gas_cost_wei: U256,
+        gross_profit_wei: U256,
+        wallet_balance: U256,
+    ) -> bool {
         if gross_profit_wei.is_zero() {
             return false;
         }
@@ -1371,13 +1560,13 @@ impl StrategyExecutor {
                 return divisors;
             }
         }
-        (2, 3) 
+        (2, 3)
     }
 
     fn dynamic_gas_ratio_limit(&self, wallet_balance: U256) -> u64 {
         let pnl = self.portfolio.get_net_profit_i256(self.chain_id);
         let base = if wallet_balance < U256::from(100_000_000_000_000_000u128) {
-            5000 
+            5000
         } else if wallet_balance < U256::from(500_000_000_000_000_000u128) {
             6500
         } else if wallet_balance < U256::from(2_000_000_000_000_000_000u128) {
@@ -1444,90 +1633,89 @@ impl StrategyExecutor {
             return None;
         }
 
-        if let Ok(decoded) = swapExactETHForTokensCall::abi_decode(input) {
-            return Some(ObservedSwap {
-                router,
-                path: decoded.path,
-                v3_fees: Vec::new(),
-                v3_path: None,
-                amount_in: eth_value,
-                min_out: decoded.amountOutMin,
-                recipient: decoded.to,
-                router_kind: RouterKind::V2Like,
-            });
-        }
-
-        if let Ok(decoded) = swapExactTokensForETHCall::abi_decode(input) {
-            return Some(ObservedSwap {
-                router,
-                path: decoded.path,
-                v3_fees: Vec::new(),
-                v3_path: None,
-                amount_in: decoded.amountIn,
-                min_out: decoded.amountOutMin,
-                recipient: decoded.to,
-                router_kind: RouterKind::V2Like,
-            });
-        }
-
-        if let Ok(decoded) = swapExactTokensForTokensCall::abi_decode(input) {
-            return Some(ObservedSwap {
-                router,
-                path: decoded.path,
-                v3_fees: Vec::new(),
-                v3_path: None,
-                amount_in: decoded.amountIn,
-                min_out: decoded.amountOutMin,
-                recipient: decoded.to,
-                router_kind: RouterKind::V2Like,
-            });
-        }
-
-        if let Ok(decoded) = UniV3Router::exactInputSingleCall::abi_decode(input) {
-            let params = decoded.params;
-            let path_bytes = Self::encode_v3_path(&[params.tokenIn, params.tokenOut], &[params.fee.to()]);
-            let fee_u32: u32 = params.fee.to::<u32>();
-            if !Self::v3_fee_sane(fee_u32) {
-                return None;
+        let selector: [u8; 4] = input[..4].try_into().ok()?;
+        match selector {
+            swapExactETHForTokensCall::SELECTOR => {
+                let decoded = swapExactETHForTokensCall::abi_decode(input).ok()?;
+                Some(ObservedSwap {
+                    router,
+                    path: decoded.path,
+                    v3_fees: Vec::new(),
+                    v3_path: None,
+                    amount_in: eth_value,
+                    min_out: decoded.amountOutMin,
+                    recipient: decoded.to,
+                    router_kind: RouterKind::V2Like,
+                })
             }
-            if !Self::validate_v3_tokens(&[params.tokenIn, params.tokenOut]) {
-                return None;
+            swapExactTokensForETHCall::SELECTOR => {
+                let decoded = swapExactTokensForETHCall::abi_decode(input).ok()?;
+                Some(ObservedSwap {
+                    router,
+                    path: decoded.path,
+                    v3_fees: Vec::new(),
+                    v3_path: None,
+                    amount_in: decoded.amountIn,
+                    min_out: decoded.amountOutMin,
+                    recipient: decoded.to,
+                    router_kind: RouterKind::V2Like,
+                })
             }
-            return Some(ObservedSwap {
-                router,
-                path: vec![params.tokenIn, params.tokenOut],
-                v3_fees: vec![fee_u32],
-                v3_path: path_bytes,
-                amount_in: params.amountIn,
-                min_out: params.amountOutMinimum,
-                recipient: params.recipient,
-                router_kind: RouterKind::V3Like,
-            });
-        }
-
-        if let Ok(decoded) = UniV3Router::exactInputCall::abi_decode(input) {
-            let params = decoded.params;
-            if let Some(path) = Self::parse_v3_path(&params.path) {
-                if path.fees.iter().any(|f| !Self::v3_fee_sane(*f)) {
+            swapExactTokensForTokensCall::SELECTOR => {
+                let decoded = swapExactTokensForTokensCall::abi_decode(input).ok()?;
+                Some(ObservedSwap {
+                    router,
+                    path: decoded.path,
+                    v3_fees: Vec::new(),
+                    v3_path: None,
+                    amount_in: decoded.amountIn,
+                    min_out: decoded.amountOutMin,
+                    recipient: decoded.to,
+                    router_kind: RouterKind::V2Like,
+                })
+            }
+            UniV3Router::exactInputSingleCall::SELECTOR => {
+                let decoded = UniV3Router::exactInputSingleCall::abi_decode(input).ok()?;
+                let params = decoded.params;
+                let path_bytes =
+                    Self::encode_v3_path(&[params.tokenIn, params.tokenOut], &[params.fee.to()]);
+                let fee_u32: u32 = params.fee.to::<u32>();
+                if !Self::v3_fee_sane(fee_u32) {
                     return None;
                 }
-                if !Self::validate_v3_tokens(&path.tokens) {
+                if !Self::validate_v3_tokens(&[params.tokenIn, params.tokenOut]) {
                     return None;
                 }
-                return Some(ObservedSwap {
+                Some(ObservedSwap {
+                    router,
+                    path: vec![params.tokenIn, params.tokenOut],
+                    v3_fees: vec![fee_u32],
+                    v3_path: path_bytes,
+                    amount_in: params.amountIn,
+                    min_out: params.amountOutMinimum,
+                    recipient: params.recipient,
+                    router_kind: RouterKind::V3Like,
+                })
+            }
+            UniV3Router::exactInputCall::SELECTOR => {
+                let decoded = UniV3Router::exactInputCall::abi_decode(input).ok()?;
+                let params = decoded.params;
+                let Some(path) = Self::parse_v3_path(&params.path) else {
+                    return None;
+                };
+                Some(ObservedSwap {
                     router,
                     path: path.tokens.clone(),
                     v3_fees: path.fees.clone(),
                     v3_path: Some(params.path.to_vec()),
-                amount_in: params.amountIn,
-                min_out: params.amountOutMinimum,
-                recipient: params.recipient,
-                router_kind: RouterKind::V3Like,
-            });
+                    amount_in: params.amountIn,
+                    min_out: params.amountOutMinimum,
+                    recipient: params.recipient,
+                    router_kind: RouterKind::V3Like,
+                })
             }
+            _ => None,
         }
-
-        None
     }
 
     fn target_token(path: &[Address], wrapped_native: Address) -> Option<Address> {
@@ -1547,31 +1735,50 @@ impl StrategyExecutor {
     }
 
     fn parse_v3_path(path: &[u8]) -> Option<ParsedV3Path> {
-        // Expected layout: token (20) + [fee (3) + token (20)]*
-        if path.len() < 43 {
+        const ADDRESS_BYTES: usize = 20;
+        const FEE_BYTES: usize = 3;
+        const HOP_BYTES: usize = ADDRESS_BYTES + FEE_BYTES;
+
+        // Need at least two tokens (one hop).
+        if path.len() < ADDRESS_BYTES + HOP_BYTES {
             return None;
         }
-        if (path.len() - 20) % 23 != 0 {
-            return None;
-        }
+
         let mut tokens = Vec::new();
         let mut fees = Vec::new();
-        let mut offset = 0;
-        // Use checked slicing to avoid panic on malformed input.
-        let first = path.get(offset..offset + 20)?;
-        tokens.push(Address::from_slice(first));
-        offset += 20;
-        while offset < path.len() {
-            let fee_bytes = path.get(offset..offset + 3)?;
-            let fee = ((fee_bytes[0] as u32) << 16)
-                | ((fee_bytes[1] as u32) << 8)
-                | fee_bytes[2] as u32;
-            fees.push(fee);
-            offset += 3; // skip fee
 
-            let token_bytes = path.get(offset..offset + 20)?;
+        // First token
+        let first = path.get(..ADDRESS_BYTES)?;
+        tokens.push(Address::from_slice(first));
+
+        let mut cursor = ADDRESS_BYTES;
+        while cursor + HOP_BYTES <= path.len() {
+            let fee_bytes = path.get(cursor..cursor + FEE_BYTES)?;
+            let token_bytes = path.get(cursor + FEE_BYTES..cursor + HOP_BYTES)?;
+
+            let fee = U24::try_from_be_slice(fee_bytes)
+                .map(|v| v.to::<u32>())?;
+            if !Self::v3_fee_sane(fee) {
+                return None;
+            }
+
             tokens.push(Address::from_slice(token_bytes));
-            offset += 20;
+            fees.push(fee);
+
+            cursor += HOP_BYTES;
+
+            // Bound hop explosion early.
+            if tokens.len() > 4 {
+                return None;
+            }
+        }
+
+        // Cursor must land exactly at the end (no trailing junk) and have at least one hop.
+        if cursor != path.len() || tokens.len() < 2 {
+            return None;
+        }
+        if !Self::validate_v3_tokens(&tokens) {
+            return None;
         }
 
         Some(ParsedV3Path { tokens, fees })
@@ -1708,10 +1915,7 @@ impl StrategyExecutor {
     }
 
     async fn maybe_rebalance_inventory(&self) -> Result<(), AppError> {
-        let mut guard = self
-            .last_rebalance
-            .lock()
-            .map_err(|_| AppError::Strategy("Rebalance lock poisoned".into()))?;
+        let mut guard = self.last_rebalance.lock().await;
         if guard.elapsed().as_secs() < 60 {
             return Ok(());
         }
@@ -1764,6 +1968,9 @@ impl StrategyExecutor {
             return Ok(());
         }
 
+        // Use a single nonce snapshot for this maintenance flow.
+        let mut nonce_cursor = self.nonce_manager.get_next_nonce().await?;
+
         // Quote token -> wrapped_native on V2 (liquidity check)
         let router_contract = UniV2Router::new(router, self.http_provider.clone());
         let sell_path = vec![token, self.wrapped_native];
@@ -1814,8 +2021,7 @@ impl StrategyExecutor {
         {
             return Ok(());
         }
-        let min_out = expected_out
-            .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+        let min_out = expected_out.saturating_mul(U256::from(10_000u64 - self.slippage_bps))
             / U256::from(10_000u64);
         let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 300);
 
@@ -1825,7 +2031,8 @@ impl StrategyExecutor {
             .await
             .unwrap_or(true)
         {
-            let nonce = self.nonce_manager.get_next_nonce().await?;
+            let nonce = nonce_cursor;
+            nonce_cursor = nonce_cursor.saturating_add(1);
             let approval = self
                 .build_approval_tx(
                     token,
@@ -1841,7 +2048,7 @@ impl StrategyExecutor {
                 .await;
         }
 
-        let nonce_sell = self.nonce_manager.get_next_nonce().await?;
+        let nonce_sell = nonce_cursor;
         let gas_limit = 180_000u64;
         let calldata = router_contract
             .swapExactTokensForETH(
@@ -1853,27 +2060,63 @@ impl StrategyExecutor {
             )
             .calldata()
             .to_vec();
-                let mut tx = TxEip1559 {
-                    chain_id: self.chain_id,
-                    nonce: nonce_sell,
-                    max_priority_fee_per_gas: gas_fees.max_priority_fee_per_gas,
-                    max_fee_per_gas: gas_fees.max_fee_per_gas,
-                    gas_limit,
-                    to: TxKind::Call(router),
-                    value: U256::ZERO,
-                    access_list: Self::build_access_list(router, &[token]),
-                    input: calldata.clone().into(),
-                };
-        let sig = TxSignerSync::sign_transaction_sync(&self.signer, &mut tx)
-            .map_err(|e| AppError::Strategy(format!("Sign inventory sell failed: {}", e)))?;
-        let signed: TxEnvelope = tx.into_signed(sig).into();
-        let raw = signed.encoded_2718();
-        let _ = self
-            .bundle_sender
-            .send_bundle(&[raw], self.chain_id)
-            .await;
+        let mut request = TransactionRequest {
+            from: Some(self.signer.address()),
+            to: Some(TxKind::Call(router)),
+            max_fee_per_gas: Some(gas_fees.max_fee_per_gas),
+            max_priority_fee_per_gas: Some(gas_fees.max_priority_fee_per_gas),
+            gas: Some(gas_limit),
+            value: Some(U256::ZERO),
+            input: TransactionInput::new(calldata.clone().into()),
+            nonce: Some(nonce_sell),
+            chain_id: Some(self.chain_id),
+            ..Default::default()
+        };
+        let access_list =
+            self.apply_access_list(&mut request, Self::build_access_list(router, &[token])).await;
+        let (raw, _, _) = self
+            .sign_with_access_list(request, access_list)
+            .await?;
+        let _ = self.bundle_sender.send_bundle(&[raw], self.chain_id).await;
 
         Ok(())
+    }
+
+    async fn emergency_exit_inventory(&self, reason: &str) {
+        let routers: Vec<Address> = self.router_allowlist.iter().copied().collect();
+        if routers.is_empty() {
+            tracing::warn!(target: "inventory", reason=%reason, "No routers available for emergency exit");
+            return;
+        }
+
+        let tokens: Vec<Address> = self.inventory_tokens.iter().map(|t| *t).collect();
+        for token in tokens {
+            for router in routers.iter().copied() {
+                match self.rebalance_token(token, router).await {
+                    Ok(_) => {
+                        tracing::warn!(
+                            target: "inventory",
+                            reason=%reason,
+                            token=%format!("{:#x}", token),
+                            router=%format!("{:#x}", router),
+                            "Emergency exit attempted"
+                        );
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "inventory",
+                            reason=%reason,
+                            token=%format!("{:#x}", token),
+                            router=%format!("{:#x}", router),
+                            error=%e,
+                            "Emergency exit failed, trying next router"
+                        );
+                        continue;
+                    }
+                }
+            }
+        }
     }
 
     fn mark_toxic_token(&self, token: Address, reason: &str) {
@@ -2024,7 +2267,12 @@ impl StrategyExecutor {
         }
     }
 
-    async fn needs_approval(&self, token: Address, spender: Address, required: U256) -> Result<bool, AppError> {
+    async fn needs_approval(
+        &self,
+        token: Address,
+        spender: Address,
+        required: U256,
+    ) -> Result<bool, AppError> {
         let erc20 = ERC20::new(token, self.http_provider.clone());
         let allowance: U256 = retry_async(
             move |_| {
@@ -2052,38 +2300,24 @@ impl StrategyExecutor {
             .calldata()
             .to_vec();
         let gas_limit = 70_000u64;
-        let mut tx = TxEip1559 {
-            chain_id: self.chain_id,
-            nonce,
-            max_priority_fee_per_gas,
-            max_fee_per_gas,
-            gas_limit,
-            to: TxKind::Call(token),
-            value: U256::ZERO,
-            access_list: Self::build_access_list(spender, &[token]),
-            input: calldata.clone().into(),
-        };
-        let sig = TxSignerSync::sign_transaction_sync(&self.signer, &mut tx)
-            .map_err(|e| AppError::Strategy(format!("Sign approval failed: {}", e)))?;
-        let signed: TxEnvelope = tx.into_signed(sig).into();
-        let raw = signed.encoded_2718();
-        let request = TransactionRequest {
-            from: Some(self.signer.address()),
-            to: Some(TxKind::Call(token)),
-            max_fee_per_gas: Some(max_fee_per_gas),
-            max_priority_fee_per_gas: Some(max_priority_fee_per_gas),
-            gas: Some(gas_limit),
-            value: Some(U256::ZERO),
-            input: TransactionInput::new(calldata.into()),
-            nonce: Some(nonce),
-            chain_id: Some(self.chain_id),
-            ..Default::default()
-        };
+        let fallback = Self::build_access_list(spender, &[token]);
+        let (raw, request, _) = self
+            .sign_swap_request(
+                token,
+                gas_limit,
+                U256::ZERO,
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+                nonce,
+                calldata,
+                fallback,
+            )
+            .await?;
 
         Ok(ApproveTx { raw, request })
     }
 
-    fn build_executor_wrapper(
+    async fn build_executor_wrapper(
         &self,
         approval: Option<&ApproveTx>,
         backrun: &BackrunTx,
@@ -2091,12 +2325,12 @@ impl StrategyExecutor {
         gas_limit_hint: u64,
         nonce: u64,
     ) -> Result<Option<(Vec<u8>, TransactionRequest, B256)>, AppError> {
-        let exec_addr = match self.bundle_executor {
+        let exec_addr = match self.executor {
             Some(addr) => addr,
             None => return Ok(None),
         };
 
-        // Guard: avoid wrapping V3 paths or flashloan legs in the MEVBundleExecutor since
+        // Guard: avoid wrapping V3 paths or flashloan legs in the executor since
         // it would not hold the required allowances/funds as msg.sender.
         if backrun.router_kind == RouterKind::V3Like || backrun.uses_flashloan {
             return Ok(None);
@@ -2115,7 +2349,12 @@ impl StrategyExecutor {
         }
         if let Some(TxKind::Call(addr)) = backrun.request.to {
             targets.push(addr);
-            let bytes = backrun.request.input.clone().into_input().unwrap_or_default();
+            let bytes = backrun
+                .request
+                .input
+                .clone()
+                .into_input()
+                .unwrap_or_default();
             payloads.push(bytes);
             values.push(backrun.value);
         }
@@ -2136,16 +2375,12 @@ impl StrategyExecutor {
         }
 
         let mut bribe = U256::ZERO;
-        if self.bundle_executor_bribe_bps > 0 {
-            let base = U256::from(gas_limit)
-                .saturating_mul(U256::from(gas_fees.max_fee_per_gas));
-            bribe = base
-                .saturating_mul(U256::from(self.bundle_executor_bribe_bps))
-                / U256::from(10_000u64);
+        if self.executor_bribe_bps > 0 {
+            let base = U256::from(gas_limit).saturating_mul(U256::from(gas_fees.max_fee_per_gas));
+            bribe =
+                base.saturating_mul(U256::from(self.executor_bribe_bps)) / U256::from(10_000u64);
         }
-        let bribe_recipient = self
-            .bundle_executor_bribe_recipient
-            .unwrap_or(Address::ZERO);
+        let bribe_recipient = self.executor_bribe_recipient.unwrap_or(Address::ZERO);
 
         let total_value = values
             .iter()
@@ -2153,7 +2388,7 @@ impl StrategyExecutor {
             .fold(U256::ZERO, |acc, v| acc.saturating_add(v))
             .saturating_add(bribe);
 
-        let exec_call = MEVBundleExecutor::executeCall {
+        let exec_call = UnifiedHardenedExecutor::executeBundleCall {
             targets,
             payloads,
             values,
@@ -2162,40 +2397,29 @@ impl StrategyExecutor {
         };
         let calldata = exec_call.abi_encode();
 
-        let mut tx = TxEip1559 {
-            chain_id: self.chain_id,
-            nonce,
-            max_priority_fee_per_gas: gas_fees.max_priority_fee_per_gas,
-            max_fee_per_gas: gas_fees.max_fee_per_gas,
-            gas_limit,
-            to: TxKind::Call(exec_addr),
-            value: total_value,
-            access_list: AccessList::default(),
-            input: Bytes::from(calldata.clone()),
-        };
-        let sig = TxSignerSync::sign_transaction_sync(&self.signer, &mut tx)
-            .map_err(|e| AppError::Strategy(format!("Sign executor call failed: {}", e)))?;
-        let signed: TxEnvelope = tx.into_signed(sig).into();
-        let raw = signed.encoded_2718();
+        let (raw, request, hash) = self
+            .sign_swap_request(
+                exec_addr,
+                gas_limit,
+                total_value,
+                gas_fees.max_fee_per_gas,
+                gas_fees.max_priority_fee_per_gas,
+                nonce,
+                calldata,
+                AccessList::default(),
+            )
+            .await?;
 
-        let request = TransactionRequest {
-            from: Some(self.signer.address()),
-            to: Some(TxKind::Call(exec_addr)),
-            max_fee_per_gas: Some(gas_fees.max_fee_per_gas),
-            max_priority_fee_per_gas: Some(gas_fees.max_priority_fee_per_gas),
-            gas: Some(gas_limit),
-            value: Some(total_value),
-            input: TransactionInput::new(calldata.into()),
-            nonce: Some(nonce),
-            chain_id: Some(self.chain_id),
-            ..Default::default()
-        };
-
-        Ok(Some((raw, request, *signed.tx_hash())))
+        Ok(Some((raw, request, hash)))
     }
 
-    fn should_use_flashloan(&self, required_value: U256, wallet_balance: U256, gas_fees: &GasFees) -> bool {
-        if !self.flashloan_enabled || self.flashloan_executor.is_none() || self.dry_run {
+    fn should_use_flashloan(
+        &self,
+        required_value: U256,
+        wallet_balance: U256,
+        gas_fees: &GasFees,
+    ) -> bool {
+        if !self.flashloan_enabled || self.executor.is_none() || self.dry_run {
             return false;
         }
         // If balance can't cover notional + small buffer, flashloan.
@@ -2210,7 +2434,7 @@ impl StrategyExecutor {
         remaining < overhead_cost
     }
 
-    fn build_flashloan_transaction(
+    async fn build_flashloan_transaction(
         &self,
         executor: Address,
         asset: Address,
@@ -2247,7 +2471,7 @@ impl StrategyExecutor {
         };
         let params = callback.abi_encode();
 
-        let exec_call = OxidizedFlashExecutor::executeCall {
+        let exec_call = UnifiedHardenedExecutor::executeFlashLoanCall {
             assets: vec![asset],
             amounts: vec![amount],
             params: Bytes::from(params),
@@ -2258,22 +2482,6 @@ impl StrategyExecutor {
         if gas_limit < 220_000 {
             gas_limit = 220_000;
         }
-
-        let mut tx = TxEip1559 {
-            chain_id: self.chain_id,
-            nonce,
-            max_priority_fee_per_gas: gas_fees.max_priority_fee_per_gas,
-            max_fee_per_gas: gas_fees.max_fee_per_gas,
-            gas_limit,
-            to: TxKind::Call(executor),
-            value: U256::ZERO,
-            access_list: AccessList::default(),
-            input: Bytes::from(calldata.clone()),
-        };
-        let sig = TxSignerSync::sign_transaction_sync(&self.signer, &mut tx)
-            .map_err(|e| AppError::Strategy(format!("Sign flashloan tx failed: {}", e)))?;
-        let signed: TxEnvelope = tx.into_signed(sig).into();
-        let raw = signed.encoded_2718();
 
         let request = TransactionRequest {
             from: Some(self.signer.address()),
@@ -2288,7 +2496,7 @@ impl StrategyExecutor {
             ..Default::default()
         };
 
-        Ok((raw, request, *signed.tx_hash()))
+        self.sign_with_access_list(request, AccessList::default()).await
     }
 
     fn is_common_token_call(input: &[u8]) -> bool {
@@ -2329,7 +2537,8 @@ impl StrategyExecutor {
             max_fee_per_gas,
         )?;
 
-        let (expected_tokens, calldata, value, gas_limit, access_list) = match observed.router_kind {
+        let (expected_tokens, calldata, value, gas_limit, access_list) = match observed.router_kind
+        {
             RouterKind::V2Like => {
                 let router_contract = UniV2Router::new(observed.router, self.http_provider.clone());
                 let path = vec![self.wrapped_native, target_token];
@@ -2413,39 +2622,22 @@ impl StrategyExecutor {
             }
         };
 
-        let mut tx = TxEip1559 {
-            chain_id: self.chain_id,
-            nonce,
-            max_priority_fee_per_gas,
-            max_fee_per_gas,
-            gas_limit,
-            to: TxKind::Call(observed.router),
-            value,
-            access_list,
-            input: Bytes::from(calldata.clone()),
-        };
-
-        let sig = TxSignerSync::sign_transaction_sync(&self.signer, &mut tx)
-            .map_err(|e| AppError::Strategy(format!("Sign front-run failed: {}", e)))?;
-        let signed: TxEnvelope = tx.into_signed(sig).into();
-        let raw = signed.encoded_2718();
-
-        let request = TransactionRequest {
-            from: Some(self.signer.address()),
-            to: Some(TxKind::Call(observed.router)),
-            max_fee_per_gas: Some(max_fee_per_gas),
-            max_priority_fee_per_gas: Some(max_priority_fee_per_gas),
-            gas: Some(gas_limit),
-            value: Some(value),
-            input: TransactionInput::new(calldata.into()),
-            nonce: Some(nonce),
-            chain_id: Some(self.chain_id),
-            ..Default::default()
-        };
+        let (raw, request, hash) = self
+            .sign_swap_request(
+                observed.router,
+                gas_limit,
+                value,
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+                nonce,
+                calldata,
+                access_list,
+            )
+            .await?;
 
         Ok(Some(FrontRunTx {
             raw,
-            hash: *signed.tx_hash(),
+            hash,
             to: observed.router,
             value,
             request,
@@ -2462,7 +2654,6 @@ impl StrategyExecutor {
         gas_limit_hint: u64,
         token_in_override: Option<U256>,
         use_flashloan: bool,
-        flashloan_executor: Option<Address>,
         nonce: u64,
     ) -> Result<BackrunTx, AppError> {
         let target_token = Self::target_token(&observed.path, self.wrapped_native)
@@ -2474,7 +2665,9 @@ impl StrategyExecutor {
             ));
         }
 
-        let (value, expected_out, calldata, access_list) = if let Some(tokens_in) = token_in_override {
+        let (value, expected_out, calldata, access_list) = if let Some(tokens_in) =
+            token_in_override
+        {
             match observed.router_kind {
                 RouterKind::V2Like => {
                     let router_contract =
@@ -2505,10 +2698,17 @@ impl StrategyExecutor {
                     if !self.dry_run {
                         // Probe toxicity before trusting expected_out
                         if !self
-                            .probe_v2_sell_for_toxicity(target_token, observed.router, sell_amount, expected_out)
+                            .probe_v2_sell_for_toxicity(
+                                target_token,
+                                observed.router,
+                                sell_amount,
+                                expected_out,
+                            )
                             .await?
                         {
-                            return Err(AppError::Strategy("toxic token detected on backrun".into()));
+                            return Err(AppError::Strategy(
+                                "toxic token detected on backrun".into(),
+                            ));
                         }
                     }
                     let min_out = expected_out
@@ -2538,11 +2738,18 @@ impl StrategyExecutor {
                     }
                     if !self.dry_run {
                         if !self
-                            .probe_v3_sell_for_toxicity(observed.router, rev_path.clone(), tokens_in, expected_out)
+                            .probe_v3_sell_for_toxicity(
+                                observed.router,
+                                rev_path.clone(),
+                                tokens_in,
+                                expected_out,
+                            )
                             .await?
                         {
                             self.mark_toxic_token(target_token, "v3_probe_shortfall");
-                            return Err(AppError::Strategy("toxic token detected on backrun".into()));
+                            return Err(AppError::Strategy(
+                                "toxic token detected on backrun".into(),
+                            ));
                         }
                     }
                     let min_out = expected_out
@@ -2600,11 +2807,11 @@ impl StrategyExecutor {
                         return Err(AppError::Strategy("V2 liquidity too low".into()));
                     }
 
-                    let min_out =
-                        expected_out.saturating_mul(U256::from(10_000u64 - self.slippage_bps))
-                            / U256::from(10_000u64);
+                    let min_out = expected_out
+                        .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+                        / U256::from(10_000u64);
                     let recipient = if use_flashloan {
-                        flashloan_executor.unwrap_or(self.signer.address())
+                        self.executor.unwrap_or(self.signer.address())
                     } else {
                         self.signer.address()
                     };
@@ -2622,7 +2829,7 @@ impl StrategyExecutor {
                 RouterKind::V3Like => {
                     return Err(AppError::Strategy(
                         "V3 double swap without owned tokens not supported".into(),
-                    ))
+                    ));
                 }
             }
         };
@@ -2634,23 +2841,11 @@ impl StrategyExecutor {
         if gas_limit < 200_000 {
             gas_limit = 200_000;
         }
-        let mut tx = TxEip1559 {
-            chain_id: self.chain_id,
-            nonce,
-            max_priority_fee_per_gas,
-            max_fee_per_gas,
-            gas_limit,
-            to: TxKind::Call(observed.router),
-            value,
-            access_list,
-            input: Bytes::from(calldata.clone()),
-        };
 
-        let flashloan_ok = use_flashloan
-            && flashloan_executor.is_some()
-            && token_in_override.is_none();
+        let flashloan_ok = use_flashloan && self.executor.is_some() && token_in_override.is_none();
         if flashloan_ok {
-            let exec_addr = flashloan_executor
+            let exec_addr = self
+                .executor
                 .ok_or_else(|| AppError::Strategy("Missing flashloan executor".into()))?;
             let gas = GasFees {
                 max_fee_per_gas,
@@ -2667,7 +2862,8 @@ impl StrategyExecutor {
                 gas_limit,
                 &gas,
                 nonce,
-            )?;
+            )
+            .await?;
             return Ok(BackrunTx {
                 raw,
                 hash,
@@ -2680,27 +2876,22 @@ impl StrategyExecutor {
             });
         }
 
-        let sig = TxSignerSync::sign_transaction_sync(&self.signer, &mut tx)
-            .map_err(|e| AppError::Strategy(format!("Sign backrun failed: {}", e)))?;
-        let signed: TxEnvelope = tx.into_signed(sig).into();
-        let raw = signed.encoded_2718();
-
-        let request = TransactionRequest {
-            from: Some(self.signer.address()),
-            to: Some(TxKind::Call(observed.router)),
-            max_fee_per_gas: Some(max_fee_per_gas),
-            max_priority_fee_per_gas: Some(max_priority_fee_per_gas),
-            gas: Some(gas_limit),
-            value: Some(value),
-            input: TransactionInput::new(calldata.into()),
-            nonce: Some(nonce),
-            chain_id: Some(self.chain_id),
-            ..Default::default()
-        };
+        let (raw, request, hash) = self
+            .sign_swap_request(
+                observed.router,
+                gas_limit,
+                value,
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+                nonce,
+                calldata,
+                access_list,
+            )
+            .await?;
 
         Ok(BackrunTx {
             raw,
-            hash: *signed.tx_hash(),
+            hash,
             to: observed.router,
             value,
             request,
@@ -2710,7 +2901,7 @@ impl StrategyExecutor {
         })
     }
 
-    async fn await_receipt(&self, hash: &B256) -> Result<(), AppError> {
+    async fn await_receipt(&self, hash: &B256) -> Result<bool, AppError> {
         for _ in 0..3 {
             if let Ok(Some(rcpt)) = self.http_provider.get_transaction_receipt(*hash).await {
                 let block_num = rcpt.block_number;
@@ -2720,18 +2911,20 @@ impl StrategyExecutor {
                     block_num.map(|b| b as i64),
                     Some(status),
                 );
-                break;
+                return Ok(status);
             }
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
-        Ok(())
+        Ok(false)
     }
 }
 
+#[allow(dead_code)]
 fn wei_to_eth_f64(value: U256) -> f64 {
     units_to_float(value, 18)
 }
 
+#[allow(dead_code)]
 fn units_to_float(value: U256, decimals: u8) -> f64 {
     let scale = 10f64.powi(decimals as i32);
     let num = value.to_string().parse::<f64>().unwrap_or(0.0);
@@ -2792,12 +2985,8 @@ mod tests {
         };
         let call = UniV3Router::exactInputSingleCall { params };
         let data = call.abi_encode();
-        let decoded = StrategyExecutor::decode_swap_input(
-            WETH_MAINNET,
-            &data,
-            U256::from(0u64),
-        )
-        .expect("decode v3 single");
+        let decoded = StrategyExecutor::decode_swap_input(WETH_MAINNET, &data, U256::from(0u64))
+            .expect("decode v3 single");
         assert_eq!(decoded.router_kind, RouterKind::V3Like);
         assert_eq!(decoded.path.len(), 2);
     }
@@ -2813,6 +3002,25 @@ mod tests {
         assert_eq!(parsed.tokens.len(), 2);
         assert_eq!(parsed.tokens[1], out);
         assert_eq!(parsed.fees, vec![500]);
+    }
+
+    #[test]
+    fn rejects_invalid_v3_path_length() {
+        // Missing last token bytes.
+        let mut path: Vec<u8> = Vec::new();
+        path.extend_from_slice(WETH_MAINNET.as_slice());
+        path.extend_from_slice(&[0u8, 1u8, 244u8]); // fee 500
+        path.extend_from_slice(&[1u8; 10]); // truncated address
+        assert!(StrategyExecutor::parse_v3_path(&path).is_none());
+    }
+
+    #[test]
+    fn rejects_invalid_v3_fee() {
+        let mut path: Vec<u8> = Vec::new();
+        path.extend_from_slice(WETH_MAINNET.as_slice());
+        path.extend_from_slice(&[0u8, 0u8, 1u8]); // fee 1 (not standard)
+        path.extend_from_slice([2u8; 20].as_slice());
+        assert!(StrategyExecutor::parse_v3_path(&path).is_none());
     }
 
     #[test]

@@ -1,5 +1,0 @@
-{
-  "name": "Oxidized MEV Builder Dashboard",
-  "description": "A high-performance monitoring and control interface for the Oxidized-Builder Rust MEV bot, featuring real-time PnL tracking, log streaming, and AI-driven strategy analysis.",
-  "requestFramePermissions": []
-}

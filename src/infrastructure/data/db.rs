@@ -3,7 +3,7 @@
 
 use crate::common::error::AppError;
 use crate::data::schema::TransactionRecord;
-use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
+use sqlx::{Pool, Row, Sqlite, sqlite::SqlitePoolOptions};
 
 #[derive(Clone)]
 pub struct Database {
@@ -116,7 +116,7 @@ impl Database {
             SET block_number = COALESCE(?, block_number),
                 status = COALESCE(?, status)
             WHERE tx_hash = ?
-            "#
+            "#,
         )
         .bind(block_number)
         .bind(status)

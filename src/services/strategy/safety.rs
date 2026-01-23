@@ -18,7 +18,7 @@ impl SafetyGuard {
             consecutive_failures: AtomicUsize::new(0),
             last_failure_ts: AtomicUsize::new(0),
             max_failures: 5,
-            reset_interval_sec: 300, 
+            reset_interval_sec: 300,
         }
     }
 

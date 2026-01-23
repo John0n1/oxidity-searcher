@@ -6,18 +6,17 @@ use crate::domain::error::AppError;
 use alloy::primitives::Address;
 use config::{Config, Environment, File};
 use serde::{Deserialize, Deserializer};
+use std::fs;
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::path::Path;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct GlobalSettings {
     // General
     #[serde(default = "default_debug")]
     pub debug: bool,
-    #[serde(
-        default = "default_chain",
-        deserialize_with = "deserialize_chain_list"
-    )]
+    #[serde(default = "default_chain", deserialize_with = "deserialize_chain_list")]
     pub chains: Vec<u64>,
 
     // Identity
@@ -34,23 +33,19 @@ pub struct GlobalSettings {
     // MEV
     #[serde(default = "default_true")]
     pub flashloan_enabled: bool,
-    pub flashloan_executor_address: Option<Address>,
+    pub executor_address: Option<Address>,
     #[serde(default = "default_true")]
     pub sandwich_attacks_enabled: bool,
-
-    // Dynamic Maps (Chain ID -> URL)
-    // In Rust config, we often flatten these or use specific prefixes
-    // but for simplicity, we map specific env vars manually if needed,
-    // or use a HashMap if the config file structure supports it.
     pub rpc_urls: Option<HashMap<String, String>>,
     pub ws_urls: Option<HashMap<String, String>>,
+    pub ipc_urls: Option<HashMap<String, String>>,
     pub chainlink_feeds: Option<HashMap<String, String>>, // Symbol -> aggregator address
     pub flashbots_relay_url: Option<String>,
     pub bundle_signer_key: Option<String>,
-    pub bundle_executor_address: Option<Address>,
     #[serde(default = "default_bribe_bps")]
-    pub bundle_bribe_bps: u64,
-    pub bundle_bribe_recipient: Option<Address>,
+    pub executor_bribe_bps: u64,
+    pub executor_bribe_recipient: Option<Address>,
+    pub tokenlist_path: Option<String>,
     #[serde(default = "default_metrics_port")]
     pub metrics_port: u16,
     #[serde(default = "default_true")]
@@ -145,23 +140,34 @@ impl GlobalSettings {
         // Load .env file if it exists
         dotenvy::dotenv().ok();
 
+        let active_config = detect_active_config_file();
         let mut builder = Config::builder();
 
-        if let Some(path) = path {
-            builder = builder.add_source(File::with_name(path).required(true));
-        } else {
-            builder = builder.add_source(File::with_name("config").required(false));
+        match active_config {
+            Some(ref active_path) => {
+                // Environment is lower priority; active config wins
+                builder = builder
+                    .add_source(Environment::default())
+                    .add_source(File::from(Path::new(active_path)).required(true));
+            }
+            None => {
+                if let Some(path) = path {
+                    builder = builder.add_source(File::with_name(path).required(true));
+                } else {
+                    builder = builder.add_source(File::with_name("config").required(false));
+                }
+                // Environment (and .env) override non-active configs
+                builder = builder.add_source(Environment::default());
+            }
         }
-
-        builder = builder
-            // 3. Environment variables (e.g. WALLET_KEY overrides everything)
-            .add_source(Environment::default());
 
         let mut settings: GlobalSettings = builder.build()?.try_deserialize()?;
 
         // Allow CHAINS env to be comma/space separated string (e.g. "1,137")
-        if let Ok(chains_str) = std::env::var("CHAINS") {
-            settings.chains = parse_chain_list(&chains_str)?;
+        if active_config.is_none() {
+            if let Ok(chains_str) = std::env::var("CHAINS") {
+                settings.chains = parse_chain_list(&chains_str)?;
+            }
         }
 
         // Basic Validation
@@ -202,6 +208,7 @@ impl GlobalSettings {
         let candidates = [
             format!("WS_URL_{}", chain_id),
             format!("WEBSOCKET_URL_{}", chain_id),
+            format!("IPC_URL_{}", chain_id),
         ];
 
         for key in candidates {
@@ -216,10 +223,53 @@ impl GlobalSettings {
         )))
     }
 
+    /// Optional IPC URL for a specific chain, preferring explicit config, then env, then local Nethermind default.
+    pub fn get_ipc_url(&self, chain_id: u64) -> Option<String> {
+        if let Some(urls) = &self.ipc_urls {
+            if let Some(url) = urls.get(&chain_id.to_string()) {
+                return Some(url.clone());
+            }
+        }
+
+        let candidates = [
+            format!("IPC_URL_{}", chain_id),
+            format!("IPC_PATH_{}", chain_id),
+            "IPC_URL".to_string(),
+            "IPC_PATH".to_string(),
+        ];
+
+        for key in candidates {
+            if let Ok(v) = std::env::var(&key) {
+                if !v.trim().is_empty() {
+                    return Some(v);
+                }
+            }
+        }
+
+        // Local default for mainnet Nethermind.
+        let default_ipc = "/mnt/pool/ethereum/nethermind/nethermind.ipc";
+        if chain_id == 1 && Path::new(default_ipc).exists() {
+            return Some(default_ipc.to_string());
+        }
+
+        None
+    }
+
     pub fn get_chainlink_feed(&self, symbol: &str) -> Option<String> {
         self.chainlink_feeds
             .as_ref()
             .and_then(|m| m.get(&symbol.to_uppercase()).cloned())
+    }
+
+    pub fn profit_receiver_or_wallet(&self) -> Address {
+        self.profit_receiver_address.unwrap_or(self.wallet_address)
+    }
+
+    pub fn tokenlist_path(&self) -> String {
+        std::env::var("TOKENLIST_PATH")
+            .ok()
+            .or_else(|| self.tokenlist_path.clone())
+            .unwrap_or_else(|| "data/tokenlist.json".to_string())
     }
 
     pub fn flashbots_relay_url(&self) -> String {
@@ -242,10 +292,7 @@ impl GlobalSettings {
             .and_then(|m| m.get(&chain_id.to_string()).cloned())
     }
 
-    pub fn routers_for_chain(
-        &self,
-        chain_id: u64,
-    ) -> Result<HashMap<String, Address>, AppError> {
+    pub fn routers_for_chain(&self, chain_id: u64) -> Result<HashMap<String, Address>, AppError> {
         if let Some(map) = self
             .router_allowlist_by_chain
             .as_ref()
@@ -275,6 +322,53 @@ impl GlobalSettings {
 
         Ok(constants::default_chainlink_feeds(chain_id))
     }
+}
+
+fn detect_active_config_file() -> Option<String> {
+    // Check common config.*.toml files first
+    let priority_files = [
+        "config.prod.toml",
+        "config.dev.toml",
+        "config.testnet.toml",
+        "config.example.toml",
+        "config.toml",
+    ];
+
+    for file in priority_files.iter() {
+        if let Some(true) = config_has_active_flag(file) {
+            return Some((*file).to_string());
+        }
+    }
+
+    // Fallback: scan current dir for config.*.toml with THIS_ACTIVE = true
+    if let Ok(entries) = fs::read_dir(".") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with("config.") && name.ends_with(".toml") {
+                    if let Some(true) = config_has_active_flag(name) {
+                        return Some(name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn config_has_active_flag(path: &str) -> Option<bool> {
+    let p = Path::new(path);
+    if !p.exists() {
+        return None;
+    }
+
+    Config::builder()
+        .add_source(File::from(p))
+        .build()
+        .ok()?
+        .get_bool("THIS_ACTIVE")
+        .ok()
 }
 
 fn parse_chain_list(raw: &str) -> Result<Vec<u64>, AppError> {

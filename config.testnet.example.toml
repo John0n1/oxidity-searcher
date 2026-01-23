@@ -1,0 +1,44 @@
+# Testnet defaults (e.g., Sepolia). Environment variables in .env override these.
+
+THIS_ACTIVE = false
+
+debug = true
+chains = [11155111]
+
+wallet_key = "0xtestnet000000000000000000000000000000000000000000000000000000000"
+wallet_address = "0x0000000000000000000000000000000000000000"
+profit_receiver_address = "0x0000000000000000000000000000000000000000"
+
+max_gas_price_gwei = 50
+simulation_backend = "revm"
+flashloan_enabled = false
+sandwich_attacks_enabled = true
+executor_address = "0x0000000000000000000000000000000000000000"
+executor_bribe_bps = 0
+executor_bribe_recipient = "0x0000000000000000000000000000000000000000"
+
+rpc_urls = { "11155111" = "https://sepolia.infura.io/v3/YOUR_KEY" }
+ws_urls  = { "11155111" = "wss://sepolia.infura.io/ws/v3/YOUR_KEY" }
+chainlink_feeds = { ETH = "0x0000000000000000000000000000000000000000" }
+flashbots_relay_url = "https://relay-sepolia.flashbots.net"
+bundle_signer_key = "0xtestnet000000000000000000000000000000000000000000000000000000000"
+
+tokenlist_path = "data/tokenlist.json"
+metrics_port = 9100
+strategy_enabled = true
+slippage_bps = 75
+gas_caps_gwei = { "11155111" = 50 }
+
+mev_share_enabled = false
+mev_share_stream_url = "https://mev-share.flashbots.net"
+mev_share_history_limit = 200
+
+router_allowlist_by_chain = {
+  "11155111" = {
+    UNISWAP_V3 = "0x0000000000000000000000000000000000000000",
+  },
+}
+
+chainlink_feeds_by_chain = {
+  "11155111" = { ETH = "0x0000000000000000000000000000000000000000" },
+}

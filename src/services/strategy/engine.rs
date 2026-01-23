@@ -10,14 +10,14 @@ use crate::core::portfolio::PortfolioManager;
 use crate::core::safety::SafetyGuard;
 use crate::core::simulation::Simulator;
 use crate::core::strategy::{StrategyExecutor, StrategyStats};
-use crate::network::mev_share::MevShareClient;
 use crate::data::db::Database;
+use crate::infrastructure::data::token_manager::TokenManager;
 use crate::network::gas::GasOracle;
+use crate::network::mev_share::MevShareClient;
 use crate::network::price_feed::PriceFeed;
 use crate::network::provider::{HttpProvider, WsProvider};
-use crate::infrastructure::data::token_manager::TokenManager;
-use alloy::signers::local::PrivateKeySigner;
 use alloy::primitives::Address;
+use alloy::signers::local::PrivateKeySigner;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -35,10 +35,9 @@ pub struct Engine {
     chain_id: u64,
     relay_url: String,
     bundle_signer: PrivateKeySigner,
-    bundle_executor: Option<Address>,
-    bundle_bribe_bps: u64,
-    bundle_bribe_recipient: Option<Address>,
-    flashloan_executor: Option<Address>,
+    executor: Option<Address>,
+    executor_bribe_bps: u64,
+    executor_bribe_recipient: Option<Address>,
     flashloan_enabled: bool,
     max_gas_price_gwei: u64,
     simulator: Simulator,
@@ -68,10 +67,9 @@ impl Engine {
         chain_id: u64,
         relay_url: String,
         bundle_signer: PrivateKeySigner,
-        bundle_executor: Option<Address>,
-        bundle_bribe_bps: u64,
-        bundle_bribe_recipient: Option<Address>,
-        flashloan_executor: Option<Address>,
+        executor: Option<Address>,
+        executor_bribe_bps: u64,
+        executor_bribe_recipient: Option<Address>,
         flashloan_enabled: bool,
         max_gas_price_gwei: u64,
         simulator: Simulator,
@@ -98,10 +96,9 @@ impl Engine {
             chain_id,
             relay_url,
             bundle_signer,
-            bundle_executor,
-            bundle_bribe_bps,
-            bundle_bribe_recipient,
-            flashloan_executor,
+            executor,
+            executor_bribe_bps,
+            executor_bribe_recipient,
             flashloan_enabled,
             max_gas_price_gwei,
             simulator,
@@ -145,29 +142,28 @@ impl Engine {
                 tx_receiver,
                 block_receiver,
                 self.safety_guard.clone(),
-            bundle_sender.clone(),
-            self.db.clone(),
-            self.portfolio.clone(),
-            self.gas_oracle.clone(),
-            self.price_feed,
-            self.chain_id,
-            self.max_gas_price_gwei,
-            self.simulator,
-            self.token_manager.clone(),
-            stats,
-            self.bundle_signer.clone(),
-            self.nonce_manager.clone(),
-            self.slippage_bps,
-            self.http_provider.clone(),
-            self.dry_run,
-            self.router_allowlist.clone(),
-            self.wrapped_native,
-            self.bundle_executor,
-            self.bundle_bribe_bps,
-            self.bundle_bribe_recipient,
-            self.flashloan_executor,
-            self.flashloan_enabled,
-        );
+                bundle_sender.clone(),
+                self.db.clone(),
+                self.portfolio.clone(),
+                self.gas_oracle.clone(),
+                self.price_feed,
+                self.chain_id,
+                self.max_gas_price_gwei,
+                self.simulator,
+                self.token_manager.clone(),
+                stats,
+                self.bundle_signer.clone(),
+                self.nonce_manager.clone(),
+                self.slippage_bps,
+                self.http_provider.clone(),
+                self.dry_run,
+                self.router_allowlist.clone(),
+                self.wrapped_native,
+                self.executor,
+                self.executor_bribe_bps,
+                self.executor_bribe_recipient,
+                self.flashloan_enabled,
+            );
 
             if self.mev_share_enabled {
                 let mev_share = MevShareClient::new(
@@ -176,9 +172,14 @@ impl Engine {
                     tx_sender.clone(),
                     self.mev_share_history_limit,
                 );
-                tokio::try_join!(mempool.run(), block_listener.run(), strategy.run(), mev_share.run())
-                    .map(|_| ())
-                    .map_err(|e| AppError::Unknown(e.into()))
+                tokio::try_join!(
+                    mempool.run(),
+                    block_listener.run(),
+                    strategy.run(),
+                    mev_share.run()
+                )
+                .map(|_| ())
+                .map_err(|e| AppError::Unknown(e.into()))
             } else {
                 tokio::try_join!(mempool.run(), block_listener.run(), strategy.run())
                     .map(|_| ())

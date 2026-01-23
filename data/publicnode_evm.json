@@ -1,0 +1,89 @@
+{
+  "generated_at": "2026-01-22T22:39:30.426768+00:00",
+  "provider": "publicnode",
+  "stack": "evm",
+  "verified": true,
+  "count": 17,
+  "chains": {
+    "arbitrum": {
+      "rpc": "https://arbitrum-rpc.publicnode.com",
+      "ws": "wss://arbitrum-rpc.publicnode.com",
+      "chain_id": 42161
+    },
+    "optimism": {
+      "rpc": "https://optimism-rpc.publicnode.com",
+      "ws": "wss://optimism-rpc.publicnode.com",
+      "chain_id": 10
+    },
+    "base": {
+      "rpc": "https://base-rpc.publicnode.com",
+      "ws": "wss://base-rpc.publicnode.com",
+      "chain_id": 8453
+    },
+    "bsc": {
+      "rpc": "https://bsc-rpc.publicnode.com",
+      "ws": "wss://bsc-rpc.publicnode.com",
+      "chain_id": 56
+    },
+    "gnosis": {
+      "rpc": "https://gnosis-rpc.publicnode.com",
+      "ws": "wss://gnosis-rpc.publicnode.com",
+      "chain_id": 100
+    },
+    "celo": {
+      "rpc": "https://celo-rpc.publicnode.com",
+      "ws": "wss://celo-rpc.publicnode.com",
+      "chain_id": 42220
+    },
+    "moonbeam": {
+      "rpc": "https://moonbeam-rpc.publicnode.com",
+      "ws": "wss://moonbeam-rpc.publicnode.com",
+      "chain_id": 1284
+    },
+    "moonriver": {
+      "rpc": "https://moonriver-rpc.publicnode.com",
+      "ws": "wss://moonriver-rpc.publicnode.com",
+      "chain_id": 1285
+    },
+    "linea": {
+      "rpc": "https://linea-rpc.publicnode.com",
+      "ws": "wss://linea-rpc.publicnode.com",
+      "chain_id": 59144
+    },
+    "scroll": {
+      "rpc": "https://scroll-rpc.publicnode.com",
+      "ws": "wss://scroll-rpc.publicnode.com",
+      "chain_id": 534352
+    },
+    "mantle": {
+      "rpc": "https://mantle-rpc.publicnode.com",
+      "ws": "wss://mantle-rpc.publicnode.com",
+      "chain_id": 5000
+    },
+    "blast": {
+      "rpc": "https://blast-rpc.publicnode.com",
+      "ws": "wss://blast-rpc.publicnode.com",
+      "chain_id": 81457
+    },
+    "ethereum-sepolia": {
+      "rpc": "https://ethereum-sepolia-rpc.publicnode.com",
+      "ws": "wss://ethereum-sepolia-rpc.publicnode.com",
+      "chain_id": 11155111
+    },
+    "base-sepolia": {
+      "rpc": "https://base-sepolia-rpc.publicnode.com",
+      "ws": "wss://base-sepolia-rpc.publicnode.com",
+      "chain_id": 84532
+    },
+    "optimism-sepolia": {
+      "rpc": "https://optimism-sepolia-rpc.publicnode.com",
+      "ws": "wss://optimism-sepolia-rpc.publicnode.com",
+      "chain_id": 11155420
+    },
+    "arbitrum-sepolia": {
+      "rpc": "https://arbitrum-sepolia-rpc.publicnode.com",
+      "ws": "wss://arbitrum-sepolia-rpc.publicnode.com",
+      "chain_id": 421614
+    }
+  }
+}

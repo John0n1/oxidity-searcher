@@ -2,8 +2,8 @@
 """
 merge_rust_to_merged.py
 
-Merges all .rs files under /home/john/oxidized_builder/src into one merged.rs at
-/home/john/oxidized_builder/merged.rs.
+Merges all .rs files under /home/john/oxidity.builder/src into one merged.rs at
+/home/john/oxidity.builder/merged.rs.
 
 It hoists/deduplicates top-level Rust imports:
   - `use ...;`

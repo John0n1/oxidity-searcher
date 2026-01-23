@@ -5,11 +5,11 @@ use crate::common::error::AppError;
 use crate::core::nonce::NonceManager;
 use crate::network::provider::WsProvider;
 use alloy::providers::Provider;
+use alloy::rpc::types::BlockNumberOrTag;
 use alloy::rpc::types::Header;
-use alloy::rpc::types::{BlockNumberOrTag};
 use futures::StreamExt;
 use tokio::sync::broadcast::Sender;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 pub struct BlockListener {
     provider: WsProvider,
@@ -54,10 +54,7 @@ impl BlockListener {
                     tracing::warn!("BlockListener: subscription ended, retrying after backoff");
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "Block subscription failed ({}); falling back to polling",
-                        e
-                    );
+                    tracing::warn!("Block subscription failed ({}); falling back to polling", e);
                     self.poll_once(&mut last_hash).await;
                 }
             }

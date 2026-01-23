@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@on1.no>
 
-
 use std::future::Future;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -43,13 +42,7 @@ mod tests {
         let res: Result<u32, ()> = retry_async(
             |_| {
                 let current = counter.fetch_add(1, Ordering::Relaxed);
-                async move {
-                    if current < 2 {
-                        Err(())
-                    } else {
-                        Ok(7)
-                    }
-                }
+                async move { if current < 2 { Err(()) } else { Ok(7) } }
             },
             4,
             Duration::from_millis(1),
