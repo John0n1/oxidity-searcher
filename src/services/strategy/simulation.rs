@@ -194,6 +194,12 @@ pub fn decode_flashloan_revert(revert_data: &[u8]) -> String {
             UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::InvalidWETHAddress(_) => "🚫 Invalid WETH address".to_string(),
             UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::InvalidProfitReceiver(_) => "🚫 Invalid profit receiver".to_string(),
             UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::BribeFailed(_) => "💰 Bribe payment failed".to_string(),
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::BalanceInvariantBroken(e) => {
+                format!(
+                    "🔒 Balance invariant broke for token {:?}: before {}, after {}",
+                    e.token, e.beforeBalance, e.afterBalance
+                )
+            }
             UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::OnlyOwner(_) => "🚫 Caller is not owner".to_string(),
             UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::OnlyVault(_) => "🚫 Caller is not Balancer Vault".to_string(),
             _ => "Reverted with known custom error".to_string(), // Fallback if Debug is missing
@@ -207,4 +213,62 @@ pub fn decode_flashloan_revert(revert_data: &[u8]) -> String {
 
     // Unknown binary data
     format!("Unknown Revert: 0x{}", hex::encode(revert_data))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::primitives::{Address, U256};
+
+    #[test]
+    fn decodes_insufficient_funds_error() {
+        let err = UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::InsufficientFundsForRepayment(
+            UnifiedHardenedExecutor::InsufficientFundsForRepayment {
+                token: Address::from([1u8; 20]),
+                required: U256::from(10u64),
+                available: U256::from(5u64),
+            },
+        );
+        let data = err.abi_encode();
+        let msg = decode_flashloan_revert(&data);
+        assert!(msg.contains("INSOLVENT"));
+        assert!(msg.contains("10"));
+    }
+
+    #[test]
+    fn decodes_execution_failed_error() {
+        let reason = b"boom".to_vec();
+        let err = UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::ExecutionFailed(
+            UnifiedHardenedExecutor::ExecutionFailed {
+                index: U256::from(2u64),
+                reason: reason.clone().into(),
+            },
+        );
+        let data = err.abi_encode();
+        let msg = decode_flashloan_revert(&data);
+        assert!(msg.contains("boom"));
+        assert!(msg.contains("2"));
+    }
+
+    #[test]
+    fn decodes_balance_invariant_broken() {
+        let err = UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::BalanceInvariantBroken(
+            UnifiedHardenedExecutor::BalanceInvariantBroken {
+                token: Address::from([9u8; 20]),
+                beforeBalance: U256::from(100u64),
+                afterBalance: U256::from(50u64),
+            },
+        );
+        let data = err.abi_encode();
+        let msg = decode_flashloan_revert(&data);
+        assert!(msg.contains("Balance invariant"));
+        assert!(msg.contains("100"));
+        assert!(msg.contains("50"));
+    }
+
+    #[test]
+    fn decodes_empty_revert() {
+        let msg = decode_flashloan_revert(&[]);
+        assert!(msg.contains("Reverted with no data"));
+    }
 }

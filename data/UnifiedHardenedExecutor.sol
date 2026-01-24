@@ -53,6 +53,7 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient {
     event ProfitReceiverUpdated(address indexed newReceiver);
     event SweepPreferenceUpdated(bool sweepToEth);
     event DistributeFailed(address token, uint256 amount); // Funds left in contract
+    event CallFailed(uint256 index, bytes reason);
 
     // --- Errors ---
     error OnlyOwner();
@@ -66,6 +67,7 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient {
     error TokenTransferFailed();
     error ApprovalFailed();
     error BribeFailed();
+    error BalanceInvariantBroken(address token, uint256 beforeBalance, uint256 afterBalance);
 
     constructor(address _profitReceiver, address _weth) {
         if (_profitReceiver == address(0)) revert InvalidProfitReceiver();
@@ -100,18 +102,29 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient {
         bytes[] calldata payloads,
         uint256[] calldata values,
         address bribeRecipient,
-        uint256 bribeAmount
+        uint256 bribeAmount,
+        bool allowPartial,
+        address balanceCheckToken
     ) external payable onlyOwner {
         if (targets.length != payloads.length || targets.length != values.length) {
             revert LengthMismatch();
         }
+
+        uint256 tokenBalanceBefore = balanceCheckToken == address(0)
+            ? 0
+            : IERC20(balanceCheckToken).balanceOf(address(this));
 
         // 1. Execute all calls
         // msg.value is already credited to address(this).balance
         for (uint256 i = 0; i < targets.length; i++) {
             (bool success, bytes memory result) = targets[i].call{value: values[i]}(payloads[i]);
             if (!success) {
-                _revertWithDetails(i, result);
+                if (allowPartial) {
+                    emit CallFailed(i, result);
+                    continue;
+                } else {
+                    _revertWithDetails(i, result);
+                }
             }
         }
 
@@ -135,6 +148,14 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient {
         if (remaining > 0) {
             (bool success, ) = profitReceiver.call{value: remaining}("");
             if (!success) emit DistributeFailed(address(0), remaining);
+        }
+
+        // 4. Balance invariant (optional)
+        if (balanceCheckToken != address(0)) {
+            uint256 tokenBalanceAfter = IERC20(balanceCheckToken).balanceOf(address(this));
+            if (tokenBalanceAfter < tokenBalanceBefore) {
+                revert BalanceInvariantBroken(balanceCheckToken, tokenBalanceBefore, tokenBalanceAfter);
+            }
         }
     }
 

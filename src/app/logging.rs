@@ -5,7 +5,7 @@ use chrono::Utc;
 use serde::Serialize;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
-use tracing_subscriber::{fmt, prelude::*, reload, EnvFilter, Registry};
+use tracing_subscriber::{EnvFilter, Registry, fmt, prelude::*, reload};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LogRecord {
@@ -79,8 +79,8 @@ pub fn setup_logging(log_level: &str, json_format: bool) {
     let (filter_layer, handle) = reload::Layer::new(filter);
     let _ = LOG_RELOAD.set(handle);
 
-    let buffer = LOG_BUFFER
-        .get_or_init(|| Arc::new(Mutex::new(Vec::with_capacity(LOG_BUFFER_MAX))));
+    let buffer =
+        LOG_BUFFER.get_or_init(|| Arc::new(Mutex::new(Vec::with_capacity(LOG_BUFFER_MAX))));
 
     let capture_layer = LogCaptureLayer {
         buffer: buffer.clone(),

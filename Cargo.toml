@@ -2,7 +2,7 @@
 name = "oxidity-builder"
 version = "0.1.1-delta"
 edition = "2024"
-authors = ["John0n1 <john@on1.no>"]
+authors = ["oxidity.io | John Hauger Mitander"]
 description = "Oxidity - MEV Searcher"
 homepage = "https://build.oxidity.io/"
 repository = "https://github.com/John0n1/oxidity-builder"
@@ -56,3 +56,28 @@ hex = "0.4"
 # CLI
 clap = { version = "4.5", features = ["derive"] }
 crypto-common = "0.1.7"
+
+
+[package.metadata.deb]
+package-name = "oxidity-builder"
+maintainer = "oxidity.io | John Hauger Mitander"
+depends = "$auto"
+section = "net"
+priority = "optional"
+
+assets = [
+  ["target/release/mytool", "usr/bin/", "755"],
+  ["README.md", "usr/share/doc/mytool/README.md", "644"],
+]
+
+[package.metadata.wix]
+product-name = "oxidity-builder"
+manufacturer = "oxidity.io | John Hauger Mitander"
+upgrade-guid = "00700700-7007-4007-8007-007007007007"
+path-guid = "0B00B1E5-0F5E-4007-9007-00C0FFEEBEEF"
+product-icon = "docs/logo/oxidity_logo.ico"
+banner = "docs/logo/oxidity_logo_1024.png"
+dialog = "docs/logo/oxidity_logo_1024.png"
+help-url = "https://builder.oxidity.io/help"
+license = true
+eula = true

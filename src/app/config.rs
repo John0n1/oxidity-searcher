@@ -6,10 +6,10 @@ use crate::domain::error::AppError;
 use alloy::primitives::Address;
 use config::{Config, Environment, File};
 use serde::{Deserialize, Deserializer};
-use std::fs;
 use std::collections::HashMap;
-use std::str::FromStr;
+use std::fs;
 use std::path::Path;
+use std::str::FromStr;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct GlobalSettings {

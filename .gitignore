@@ -2,12 +2,11 @@
 /target
 .venv/
 Cargo.lock
+.cargo
 node_modules
-
 .vscode/
-
 package-lock.json
-
+merge.py
 # Environment variables (secrets)
 config.dev.toml
 config.prod.toml
@@ -22,4 +21,4 @@ config.toml
 .DS_Store
 
 # Frontend
-app/dist/*
+

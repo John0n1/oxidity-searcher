@@ -16,9 +16,11 @@ use crate::network::gas::GasOracle;
 use crate::network::mev_share::MevShareClient;
 use crate::network::price_feed::PriceFeed;
 use crate::network::provider::{HttpProvider, WsProvider};
+use crate::services::strategy::strategy::ReserveCache;
 use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
@@ -130,6 +132,21 @@ impl Engine {
             self.relay_url.clone(),
             self.bundle_signer.clone(),
         ));
+        let reserve_cache = Arc::new(ReserveCache::new(self.http_provider.clone()));
+        if Path::new("data/pairs.json").exists() {
+            if let Err(e) = reserve_cache.load_pairs_from_file("data/pairs.json") {
+                tracing::warn!(target: "reserves", error=%e, "Failed to preload pairs.json");
+            } else {
+                tracing::info!(target: "reserves", "Preloaded pairs.json");
+            }
+        }
+        {
+            let cache = reserve_cache.clone();
+            let ws_for_cache = self.ws_provider.clone();
+            tokio::spawn(async move {
+                cache.run_v2_log_listener(ws_for_cache).await;
+            });
+        }
         let stats = Arc::new(StrategyStats::default());
         let _metrics_addr = crate::common::metrics::spawn_metrics_server(
             self.metrics_port,
@@ -163,6 +180,7 @@ impl Engine {
                 self.executor_bribe_bps,
                 self.executor_bribe_recipient,
                 self.flashloan_enabled,
+                reserve_cache.clone(),
             );
 
             if self.mev_share_enabled {

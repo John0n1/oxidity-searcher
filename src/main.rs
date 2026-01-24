@@ -52,8 +52,8 @@ async fn main() -> Result<(), AppError> {
     let settings = GlobalSettings::load_with_path(cli.config.as_deref())?;
     setup_logging(if settings.debug { "debug" } else { "info" }, false);
 
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "sqlite://oxidity_builder.db".to_string());
+    let database_url =
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://oxidity_builder.db".to_string());
     let db = Database::new(&database_url).await?;
 
     let chain_id = *settings.chains.get(0).unwrap_or(&1);

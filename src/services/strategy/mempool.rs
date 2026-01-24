@@ -63,7 +63,11 @@ impl MempoolScanner {
             .map_err(|err| AppError::Connection(format!("Filter create failed: {}", err)))?;
 
         loop {
-            match self.provider.get_filter_changes::<Transaction>(filter_id).await {
+            match self
+                .provider
+                .get_filter_changes::<Transaction>(filter_id)
+                .await
+            {
                 Ok(txs) => {
                     for tx in txs {
                         if tx.input().len() > 4 {

@@ -64,3 +64,37 @@ impl SafetyGuard {
         tracing::info!("Safety Guard: Circuit breaker auto-reset.");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trips_after_max_failures() {
+        let guard = SafetyGuard::new();
+        for _ in 0..guard.max_failures {
+            guard.report_failure();
+        }
+        let res = guard.check();
+        assert!(res.is_err(), "guard should trip after max failures");
+    }
+
+    #[test]
+    fn resets_after_interval() {
+        let guard = SafetyGuard::new();
+        for _ in 0..guard.max_failures {
+            guard.report_failure();
+        }
+        // Simulate old failure timestamp so check() triggers auto-reset.
+        guard
+            .last_failure_ts
+            .store(1, Ordering::Relaxed); // far in the past
+        let res = guard.check();
+        assert!(res.is_ok(), "guard should auto-reset after interval");
+        assert_eq!(
+            guard.consecutive_failures.load(Ordering::Relaxed),
+            0,
+            "failures should be reset"
+        );
+    }
+}

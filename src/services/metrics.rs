@@ -63,7 +63,8 @@ pub async fn spawn_metrics_server(
                         let _ = socket.write_all(response.as_bytes()).await;
                     } else if route.starts_with("/logs") {
                         let logs = recent_logs(200);
-                        let body = serde_json::to_string(&logs).unwrap_or_else(|_| "[]".to_string());
+                        let body =
+                            serde_json::to_string(&logs).unwrap_or_else(|_| "[]".to_string());
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                             body.len(),
@@ -81,10 +82,18 @@ pub async fn spawn_metrics_server(
 
                         let (status, body) = match level {
                             Some(lvl) => match set_log_level(lvl) {
-                                Ok(_) => ("200 OK", json!({"status": "ok", "level": lvl}).to_string()),
-                                Err(e) => ("400 Bad Request", json!({"status": "error", "error": e}).to_string()),
+                                Ok(_) => {
+                                    ("200 OK", json!({"status": "ok", "level": lvl}).to_string())
+                                }
+                                Err(e) => (
+                                    "400 Bad Request",
+                                    json!({"status": "error", "error": e}).to_string(),
+                                ),
                             },
-                            None => ("400 Bad Request", json!({"status": "error", "error": "missing level"}).to_string()),
+                            None => (
+                                "400 Bad Request",
+                                json!({"status": "error", "error": "missing level"}).to_string(),
+                            ),
                         };
 
                         let response = format!(
