@@ -19,6 +19,7 @@ executor_bribe_recipient = "0x0000000000000000000000000000000000000000"
 
 rpc_urls = { "11155111" = "https://sepolia.infura.io/v3/YOUR_KEY" }
 ws_urls  = { "11155111" = "wss://sepolia.infura.io/ws/v3/YOUR_KEY" }
+ipc_urls = { "11155111" = "/var/lib/ethereum/geth.ipc" }
 chainlink_feeds = { ETH = "0x0000000000000000000000000000000000000000" }
 flashbots_relay_url = "https://relay-sepolia.flashbots.net"
 bundle_signer_key = "0xtestnet000000000000000000000000000000000000000000000000000000000"

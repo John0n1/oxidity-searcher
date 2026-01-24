@@ -208,12 +208,14 @@ impl GlobalSettings {
         let candidates = [
             format!("WS_URL_{}", chain_id),
             format!("WEBSOCKET_URL_{}", chain_id),
-            format!("IPC_URL_{}", chain_id),
         ];
 
         for key in candidates {
             if let Ok(v) = std::env::var(&key) {
-                return Ok(v);
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    return Ok(trimmed.to_string());
+                }
             }
         }
 
@@ -401,4 +403,70 @@ fn parse_address_map(
                 .map_err(|_| AppError::InvalidAddress(format!("{field}:{k} -> {v}")))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::primitives::Address;
+    use std::collections::HashMap;
+
+    fn base_settings() -> GlobalSettings {
+        GlobalSettings {
+            debug: default_debug(),
+            chains: vec![1],
+            wallet_key: "0x0".to_string(),
+            wallet_address: Address::ZERO,
+            profit_receiver_address: None,
+            max_gas_price_gwei: default_max_gas(),
+            simulation_backend: default_sim_backend(),
+            flashloan_enabled: default_true(),
+            executor_address: None,
+            sandwich_attacks_enabled: default_true(),
+            rpc_urls: None,
+            ws_urls: None,
+            ipc_urls: None,
+            chainlink_feeds: None,
+            flashbots_relay_url: None,
+            bundle_signer_key: None,
+            executor_bribe_bps: default_bribe_bps(),
+            executor_bribe_recipient: None,
+            tokenlist_path: None,
+            metrics_port: default_metrics_port(),
+            strategy_enabled: default_true(),
+            slippage_bps: default_slippage_bps(),
+            gas_caps_gwei: None,
+            mev_share_stream_url: default_mev_share_url(),
+            mev_share_history_limit: default_mev_share_history_limit(),
+            mev_share_enabled: default_true(),
+            router_allowlist_by_chain: None,
+            chainlink_feeds_by_chain: None,
+        }
+    }
+
+    #[test]
+    fn ipc_url_prefers_configured_map() {
+        let mut settings = base_settings();
+        settings.ipc_urls = Some(HashMap::from([(
+            "1".to_string(),
+            "/tmp/test.ipc".to_string(),
+        )]));
+        assert_eq!(settings.get_ipc_url(1).as_deref(), Some("/tmp/test.ipc"));
+    }
+
+    #[test]
+    fn ws_lookup_does_not_use_ipc_entries() {
+        let mut settings = base_settings();
+        settings.ipc_urls = Some(HashMap::from([(
+            "1".to_string(),
+            "/tmp/socket.ipc".to_string(),
+        )]));
+        settings.ws_urls = None;
+
+        let err = settings.get_ws_url(1).unwrap_err();
+        match err {
+            AppError::Config(msg) => assert!(msg.contains("No WS URL")),
+            other => panic!("Unexpected error variant: {other:?}"),
+        }
+    }
 }

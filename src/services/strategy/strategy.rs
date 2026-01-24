@@ -469,6 +469,8 @@ struct BackrunTx {
     value: U256,
     request: TransactionRequest,
     expected_out: U256,
+    expected_out_token: Address,
+    unwrap_to_native: bool,
     uses_flashloan: bool,
     router_kind: RouterKind,
 }
@@ -2997,9 +2999,8 @@ impl StrategyExecutor {
             None => return Ok(None),
         };
 
-        // Guard: avoid wrapping V3 paths or flashloan legs in the executor since
-        // it would not hold the required allowances/funds as msg.sender.
-        if backrun.router_kind == RouterKind::V3Like || backrun.uses_flashloan {
+        // Guard: avoid wrapping flashloan legs in the executor wrapper until repay/allowance handling is explicit.
+        if backrun.uses_flashloan {
             return Ok(None);
         }
 
@@ -3026,6 +3027,21 @@ impl StrategyExecutor {
             values.push(backrun.value);
         }
 
+        // If the backrun leaves the executor holding WETH (e.g., V3 exactInput),
+        // unwrap it to native ETH so the bribe check passes.
+        let unwrap_weth = (backrun.unwrap_to_native
+            || (backrun.router_kind == RouterKind::V3Like
+                && backrun.expected_out_token == self.wrapped_native))
+            && backrun.expected_out > U256::ZERO;
+        if unwrap_weth {
+            targets.push(self.wrapped_native);
+            let mut withdraw_calldata = Vec::with_capacity(4 + 32);
+            withdraw_calldata.extend_from_slice(&[0x2e, 0x1a, 0x7d, 0x4d]); // withdraw(uint256)
+            withdraw_calldata.extend_from_slice(&backrun.expected_out.to_be_bytes::<32>());
+            payloads.push(Bytes::from(withdraw_calldata));
+            values.push(U256::ZERO);
+        }
+
         if targets.is_empty() {
             return Ok(None);
         }
@@ -3036,6 +3052,10 @@ impl StrategyExecutor {
             .unwrap_or(gas_limit_hint)
             .saturating_add(approval.and_then(|a| a.request.gas).unwrap_or(0))
             .saturating_add(80_000);
+
+        if unwrap_weth {
+            gas_limit = gas_limit.saturating_add(30_000);
+        }
 
         if gas_limit < 150_000 {
             gas_limit = 150_000;
@@ -3341,11 +3361,14 @@ impl StrategyExecutor {
             ));
         }
 
+        let expected_out_token;
+        let mut unwrap_to_native = false;
         let (value, expected_out, calldata, access_list) = if let Some(tokens_in) =
             token_in_override
         {
             match observed.router_kind {
                 RouterKind::V2Like => {
+                    expected_out_token = self.wrapped_native;
                     let router_contract =
                         UniV2Router::new(observed.router, self.http_provider.clone());
                     let sell_path = vec![target_token, self.wrapped_native];
@@ -3411,6 +3434,8 @@ impl StrategyExecutor {
                     (U256::ZERO, expected_out, calldata, access_list)
                 }
                 RouterKind::V3Like => {
+                    expected_out_token = self.wrapped_native;
+                    unwrap_to_native = true;
                     let rev_path = Self::reverse_v3_path(&observed.path, &observed.v3_fees)
                         .ok_or_else(|| AppError::Strategy("Reverse V3 path failed".into()))?;
                     let expected_out = self.quote_v3_path(&rev_path, tokens_in).await?;
@@ -3487,6 +3512,7 @@ impl StrategyExecutor {
                     let Some(swap) = swap else {
                         return Err(AppError::Strategy("V2 liquidity too low".into()));
                     };
+                    expected_out_token = target_token;
                     (
                         swap.tx_value,
                         swap.expected_out,
@@ -3540,6 +3566,8 @@ impl StrategyExecutor {
                 value: U256::ZERO,
                 request,
                 expected_out,
+                expected_out_token,
+                unwrap_to_native,
                 uses_flashloan: true,
                 router_kind: observed.router_kind,
             });
@@ -3565,6 +3593,8 @@ impl StrategyExecutor {
             value,
             request,
             expected_out,
+            expected_out_token,
+            unwrap_to_native,
             uses_flashloan: false,
             router_kind: observed.router_kind,
         })

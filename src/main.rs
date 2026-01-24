@@ -59,34 +59,20 @@ async fn main() -> Result<(), AppError> {
     let chain_id = *settings.chains.get(0).unwrap_or(&1);
 
     let ipc_url = settings.get_ipc_url(chain_id);
-    let (ws_provider, http_provider) = match ipc_url {
-        Some(ipc_url) => match ConnectionFactory::ipc(&ipc_url).await {
-            Ok(ipc_provider) => {
-                tracing::info!(target: "rpc", %ipc_url, "Using IPC provider");
-                (ipc_provider.clone(), ipc_provider)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    target: "rpc",
-                    %ipc_url,
-                    error = %e,
-                    "IPC connection failed; falling back to WS/HTTP"
-                );
-                let ws_url = settings.get_ws_url(chain_id)?;
-                let ws_provider = ConnectionFactory::ws(&ws_url).await?;
-                let rpc_url = settings.get_rpc_url(chain_id)?;
-                let http_provider = ConnectionFactory::http(&rpc_url)?;
-                (ws_provider, http_provider)
-            }
-        },
-        None => {
-            let ws_url = settings.get_ws_url(chain_id)?;
-            let ws_provider = ConnectionFactory::ws(&ws_url).await?;
-            let rpc_url = settings.get_rpc_url(chain_id)?;
-            let http_provider = ConnectionFactory::http(&rpc_url)?;
-            (ws_provider, http_provider)
+    let ws_url = match settings.get_ws_url(chain_id) {
+        Ok(url) => Some(url),
+        Err(e) => {
+            tracing::warn!(
+                target: "rpc",
+                error = %e,
+                "WS URL unavailable; continuing without WS fallback"
+            );
+            None
         }
     };
+    let rpc_url = settings.get_rpc_url(chain_id)?;
+    let (ws_provider, http_provider) =
+        ConnectionFactory::preferred(ipc_url.as_deref(), ws_url.as_deref(), &rpc_url).await?;
 
     let wallet_address = settings.wallet_address;
     let portfolio = Arc::new(PortfolioManager::new(http_provider.clone(), wallet_address));

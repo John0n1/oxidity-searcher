@@ -222,13 +222,14 @@ mod tests {
 
     #[test]
     fn decodes_insufficient_funds_error() {
-        let err = UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::InsufficientFundsForRepayment(
-            UnifiedHardenedExecutor::InsufficientFundsForRepayment {
-                token: Address::from([1u8; 20]),
-                required: U256::from(10u64),
-                available: U256::from(5u64),
-            },
-        );
+        let err =
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::InsufficientFundsForRepayment(
+                UnifiedHardenedExecutor::InsufficientFundsForRepayment {
+                    token: Address::from([1u8; 20]),
+                    required: U256::from(10u64),
+                    available: U256::from(5u64),
+                },
+            );
         let data = err.abi_encode();
         let msg = decode_flashloan_revert(&data);
         assert!(msg.contains("INSOLVENT"));

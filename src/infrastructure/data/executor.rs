@@ -66,8 +66,8 @@ mod tests {
         };
 
         let encoded = data.abi_encode();
-        let decoded = <FlashCallbackData as SolType>::abi_decode(&encoded)
-            .expect("decode callback");
+        let decoded =
+            <FlashCallbackData as SolType>::abi_decode(&encoded).expect("decode callback");
 
         assert_eq!(decoded.targets, targets);
         assert_eq!(decoded.values, values);

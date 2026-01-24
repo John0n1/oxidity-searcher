@@ -86,9 +86,7 @@ mod tests {
             guard.report_failure();
         }
         // Simulate old failure timestamp so check() triggers auto-reset.
-        guard
-            .last_failure_ts
-            .store(1, Ordering::Relaxed); // far in the past
+        guard.last_failure_ts.store(1, Ordering::Relaxed); // far in the past
         let res = guard.check();
         assert!(res.is_ok(), "guard should auto-reset after interval");
         assert_eq!(
