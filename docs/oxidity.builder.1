@@ -1,0 +1,37 @@
+OXIDITY.BUILDER(1)             User Commands            OXIDITY.BUILDER(1)
+
+NAME
+    oxidity.builder - Rust-based MEV searcher and bundle submitter
+
+SYNOPSIS
+    oxidity.builder --config <path> [ENV...]
+
+DESCRIPTION
+    Watches pending transactions and optional MEV-Share hints, simulates
+    sandwich/backrun bundles, and submits them to builders/relays. Maintains
+    lightweight PnL in SQLite and exposes metrics/log-level controls.
+
+OPTIONS
+    --config PATH      Path to the TOML config (see config.example.toml).
+    --help             Show brief help.
+
+ENVIRONMENT
+    PRIVATE_KEY        Hex-encoded signing key (0x-prefixed).
+    RPC_URL            RPC endpoint with mempool access.
+    METRICS_TOKEN      Bearer token required for /metrics and /log-level
+                       when enabled.
+    CHAINS             Comma-separated chain IDs; runtime uses the first.
+
+FILES
+    config.example.toml   Sample configuration.
+    oxidity_builder.db    Default SQLite database (auto-migrated).
+    docs/*.md             Detailed setup and operational docs.
+
+SECURITY
+    Metrics/log endpoints bind to 127.0.0.1 by default; expose publicly only
+    behind a trusted proxy with METRICS_TOKEN set. Avoid sending unrelated
+    transactions from the same key to prevent nonce clashes with the bundle
+    lease manager.
+
+SEE ALSO
+    README.md, docs/setup.md, docs/infrastructure.md, docs/flashloan.md

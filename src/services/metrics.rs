@@ -15,7 +15,20 @@ pub async fn spawn_metrics_server(
     stats: Arc<StrategyStats>,
     portfolio: Arc<PortfolioManager>,
 ) -> Option<SocketAddr> {
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let bind_addr = std::env::var("METRICS_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let addr: SocketAddr = match format!("{}:{}", bind_addr, port).parse() {
+        Ok(a) => a,
+        Err(e) => {
+            tracing::warn!(
+                "Invalid METRICS_BIND '{}': {}. Falling back to 127.0.0.1:{}",
+                bind_addr,
+                e,
+                port
+            );
+            SocketAddr::from(([127, 0, 0, 1], port))
+        }
+    };
+
     let listener = match TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
@@ -42,6 +55,30 @@ pub async fn spawn_metrics_server(
                         .next()
                         .and_then(|l| l.split_whitespace().nth(1))
                         .unwrap_or("/");
+                    let headers: Vec<&str> = req
+                        .lines()
+                        .skip(1)
+                        .take_while(|l| !l.is_empty())
+                        .collect();
+                    let auth_header = headers
+                        .iter()
+                        .find_map(|l| l.strip_prefix("Authorization:").map(|v| v.trim()));
+                    if let Some(token) = std::env::var("METRICS_TOKEN").ok() {
+                        let ok = auth_header
+                            .and_then(|v| v.strip_prefix("Bearer ").or(Some(v)))
+                            .map(|v| v.trim() == token)
+                            .unwrap_or(false);
+                        if !ok {
+                            let body = r#"{"status":"error","error":"unauthorized"}"#;
+                            let response = format!(
+                                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                                body.len(),
+                                body
+                            );
+                            let _ = socket.write_all(response.as_bytes()).await;
+                            continue;
+                        }
+                    }
                     let (route, query) = path.split_once('?').unwrap_or((path, ""));
 
                     if route.starts_with("/dashboard") {

@@ -11,7 +11,7 @@ use reqwest::header::HeaderValue;
 use serde::Serialize;
 use serde_json::json;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::services::strategy::time_utils::current_unix;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(untagged)]
@@ -305,10 +305,3 @@ impl BundleSender {
 }
 
 pub type SharedBundleSender = Arc<BundleSender>;
-
-fn current_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}

@@ -1,0 +1,787 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@on1.no>
+
+use crate::common::error::AppError;
+use crate::common::retry::retry_async;
+use crate::data::executor::{FlashCallbackData, UnifiedHardenedExecutor};
+use crate::services::strategy::decode::{
+    encode_v3_path, reverse_v3_path, target_token, ObservedSwap, RouterKind,
+};
+use crate::services::strategy::routers::{ERC20, UniV2Router, UniV3Router};
+use crate::services::strategy::strategy::StrategyExecutor;
+use alloy::eips::eip2930::AccessList;
+use alloy::primitives::{Address, B256, Bytes, TxKind, U256};
+use alloy::rpc::types::eth::{TransactionInput, TransactionRequest};
+use alloy::sol_types::{SolCall, SolValue};
+use std::time::Duration;
+
+pub struct BackrunTx {
+    pub raw: Vec<u8>,
+    pub hash: B256,
+    pub to: Address,
+    pub value: U256,
+    pub request: TransactionRequest,
+    pub expected_out: U256,
+    pub expected_out_token: Address,
+    pub unwrap_to_native: bool,
+    pub uses_flashloan: bool,
+    pub router_kind: RouterKind,
+}
+
+pub struct FrontRunTx {
+    pub raw: Vec<u8>,
+    pub hash: B256,
+    pub to: Address,
+    pub value: U256,
+    pub request: TransactionRequest,
+    pub expected_tokens: U256,
+}
+
+pub struct ApproveTx {
+    pub raw: Vec<u8>,
+    pub request: TransactionRequest,
+}
+
+impl StrategyExecutor {
+    pub(crate) async fn needs_approval(
+        &self,
+        token: Address,
+        spender: Address,
+        required: U256,
+    ) -> Result<bool, AppError> {
+        let erc20 = ERC20::new(token, self.http_provider.clone());
+        let allowance: U256 = retry_async(
+            move |_| {
+                let c = erc20.clone();
+                async move { c.allowance(self.signer.address(), spender).call().await }
+            },
+            2,
+            Duration::from_millis(100),
+        )
+        .await
+        .map_err(|e| AppError::Strategy(format!("Allowance check failed: {}", e)))?;
+        Ok(allowance < required)
+    }
+
+    pub(crate) async fn build_approval_tx(
+        &self,
+        token: Address,
+        spender: Address,
+        max_fee_per_gas: u128,
+        max_priority_fee_per_gas: u128,
+        nonce: u64,
+    ) -> Result<ApproveTx, AppError> {
+        let calldata = ERC20::new(token, self.http_provider.clone())
+            .approve(spender, U256::MAX)
+            .calldata()
+            .to_vec();
+        let gas_limit = 70_000u64;
+        let fallback = Self::build_access_list(spender, &[token]);
+        let (raw, request, _) = self
+            .sign_swap_request(
+                token,
+                gas_limit,
+                U256::ZERO,
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+                nonce,
+                calldata,
+                fallback,
+            )
+            .await?;
+
+        Ok(ApproveTx { raw, request })
+    }
+
+    pub(crate) async fn build_executor_wrapper(
+        &self,
+        approval: Option<&ApproveTx>,
+        backrun: &BackrunTx,
+        gas_fees: &crate::network::gas::GasFees,
+        gas_limit_hint: u64,
+        nonce: u64,
+    ) -> Result<Option<(Vec<u8>, TransactionRequest, B256)>, AppError> {
+        let exec_addr = match self.executor {
+            Some(addr) => addr,
+            None => return Ok(None),
+        };
+
+        if backrun.uses_flashloan {
+            return Ok(None);
+        }
+
+        let mut targets = Vec::new();
+        let mut payloads = Vec::new();
+        let mut values = Vec::new();
+        if let Some(app) = approval {
+            if let Some(TxKind::Call(addr)) = app.request.to {
+                targets.push(addr);
+                let bytes = app.request.input.clone().into_input().unwrap_or_default();
+                payloads.push(bytes);
+                values.push(U256::ZERO);
+            }
+        }
+        if let Some(TxKind::Call(addr)) = backrun.request.to {
+            targets.push(addr);
+            let bytes = backrun
+                .request
+                .input
+                .clone()
+                .into_input()
+                .unwrap_or_default();
+            payloads.push(bytes);
+            values.push(backrun.value);
+        }
+
+        let unwrap_weth = (backrun.unwrap_to_native
+            || (backrun.router_kind == RouterKind::V3Like
+                && backrun.expected_out_token == self.wrapped_native))
+            && backrun.expected_out > U256::ZERO;
+        if unwrap_weth {
+            targets.push(self.wrapped_native);
+            let mut withdraw_calldata = Vec::with_capacity(4 + 32);
+            withdraw_calldata.extend_from_slice(&[0x2e, 0x1a, 0x7d, 0x4d]); // withdraw(uint256)
+            withdraw_calldata.extend_from_slice(&backrun.expected_out.to_be_bytes::<32>());
+            payloads.push(Bytes::from(withdraw_calldata));
+            values.push(U256::ZERO);
+        }
+
+        if targets.is_empty() {
+            return Ok(None);
+        }
+
+        let mut gas_limit = backrun
+            .request
+            .gas
+            .unwrap_or(gas_limit_hint)
+            .saturating_add(approval.and_then(|a| a.request.gas).unwrap_or(0))
+            .saturating_add(80_000);
+
+        if unwrap_weth {
+            gas_limit = gas_limit.saturating_add(30_000);
+        }
+
+        if gas_limit < 150_000 {
+            gas_limit = 150_000;
+        }
+
+        let mut bribe = U256::ZERO;
+        if self.executor_bribe_bps > 0 {
+            let base = U256::from(gas_limit).saturating_mul(U256::from(gas_fees.max_fee_per_gas));
+            bribe =
+                base.saturating_mul(U256::from(self.executor_bribe_bps)) / U256::from(10_000u64);
+        }
+        let bribe_recipient = self.executor_bribe_recipient.unwrap_or(Address::ZERO);
+
+        let total_value = values
+            .iter()
+            .copied()
+            .fold(U256::ZERO, |acc, v| acc.saturating_add(v))
+            .saturating_add(bribe);
+
+        let exec_call = UnifiedHardenedExecutor::executeBundleCall {
+            targets,
+            payloads,
+            values,
+            bribeRecipient: bribe_recipient,
+            bribeAmount: bribe,
+            allowPartial: true,
+            balanceCheckToken: self.wrapped_native,
+        };
+        let calldata = exec_call.abi_encode();
+
+        let (raw, request, hash) = self
+            .sign_swap_request(
+                exec_addr,
+                gas_limit,
+                total_value,
+                gas_fees.max_fee_per_gas,
+                gas_fees.max_priority_fee_per_gas,
+                nonce,
+                calldata,
+                AccessList::default(),
+            )
+            .await?;
+
+        Ok(Some((raw, request, hash)))
+    }
+
+    pub(crate) fn should_use_flashloan(
+        &self,
+        required_value: U256,
+        wallet_balance: U256,
+        gas_fees: &crate::network::gas::GasFees,
+    ) -> bool {
+        if !self.flashloan_enabled || self.executor.is_none() || self.dry_run {
+            return false;
+        }
+        let safety_buffer = U256::from(2_000_000_000_000_000u128); // 0.002 ETH
+        if wallet_balance < required_value.saturating_add(safety_buffer) {
+            return true;
+        }
+        let overhead_gas = U256::from(180_000u64);
+        let overhead_cost = overhead_gas.saturating_mul(U256::from(gas_fees.max_fee_per_gas));
+        let remaining = wallet_balance.saturating_sub(required_value);
+        remaining < overhead_cost
+    }
+
+    pub(crate) async fn build_flashloan_transaction(
+        &self,
+        executor: Address,
+        asset: Address,
+        amount: U256,
+        router: Address,
+        swap_payload: Vec<u8>,
+        approve_token: Option<Address>,
+        gas_limit_hint: u64,
+        gas_fees: &crate::network::gas::GasFees,
+        nonce: u64,
+    ) -> Result<(Vec<u8>, TransactionRequest, B256), AppError> {
+        let mut targets = Vec::new();
+        let mut values = Vec::new();
+        let mut payloads = Vec::new();
+
+        if let Some(tok) = approve_token {
+            let approve = ERC20::approveCall {
+                spender: router,
+                amount: U256::MAX,
+            };
+            targets.push(tok);
+            values.push(U256::ZERO);
+            payloads.push(Bytes::from(approve.abi_encode()));
+        }
+
+        targets.push(router);
+        values.push(U256::ZERO);
+        payloads.push(Bytes::from(swap_payload));
+
+        let callback = FlashCallbackData {
+            targets,
+            values,
+            payloads,
+        };
+        let params = callback.abi_encode();
+
+        let exec_call = UnifiedHardenedExecutor::executeFlashLoanCall {
+            assets: vec![asset],
+            amounts: vec![amount],
+            params: Bytes::from(params),
+        };
+        let calldata = exec_call.abi_encode();
+
+        let mut gas_limit = gas_limit_hint.saturating_add(150_000);
+        if gas_limit < 220_000 {
+            gas_limit = 220_000;
+        }
+
+        let request = Self::flashloan_request_template(
+            self.signer.address(),
+            executor,
+            gas_fees,
+            gas_limit,
+            nonce,
+            calldata,
+            self.chain_id,
+        );
+
+        self.sign_with_access_list(request, AccessList::default())
+            .await
+    }
+
+    pub(crate) fn flashloan_request_template(
+        from: Address,
+        executor: Address,
+        gas_fees: &crate::network::gas::GasFees,
+        gas_limit: u64,
+        nonce: u64,
+        calldata: Vec<u8>,
+        chain_id: u64,
+    ) -> TransactionRequest {
+        TransactionRequest {
+            from: Some(from),
+            to: Some(TxKind::Call(executor)),
+            max_fee_per_gas: Some(gas_fees.max_fee_per_gas),
+            max_priority_fee_per_gas: Some(gas_fees.max_priority_fee_per_gas),
+            gas: Some(gas_limit),
+            value: Some(U256::ZERO),
+            input: TransactionInput::new(calldata.into()),
+            nonce: Some(nonce),
+            chain_id: Some(chain_id),
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn is_common_token_call(input: &[u8]) -> bool {
+        if input.len() < 4 {
+            return false;
+        }
+        let selector = &input[..4];
+        const TRANSFER: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
+        const TRANSFER_FROM: [u8; 4] = [0x23, 0xb8, 0x72, 0xdd];
+        const APPROVE: [u8; 4] = [0x09, 0x5e, 0xa7, 0xb3];
+        const PERMIT: [u8; 4] = [0xd5, 0x05, 0xac, 0xcf]; // EIP-2612
+        selector == TRANSFER
+            || selector == TRANSFER_FROM
+            || selector == APPROVE
+            || selector == PERMIT
+    }
+
+    pub(crate) async fn build_front_run_tx(
+        &self,
+        observed: &ObservedSwap,
+        max_fee_per_gas: u128,
+        max_priority_fee_per_gas: u128,
+        wallet_balance: U256,
+        gas_limit_hint: u64,
+        nonce: u64,
+    ) -> Result<Option<FrontRunTx>, AppError> {
+        if wallet_balance.is_zero() {
+            return Ok(None);
+        }
+        let target_token = target_token(&observed.path, self.wrapped_native)
+            .ok_or_else(|| AppError::Strategy("Unable to derive target token".into()))?;
+
+        let value = StrategyExecutor::dynamic_backrun_value(
+            observed.amount_in,
+            wallet_balance,
+            self.slippage_bps,
+            gas_limit_hint,
+            max_fee_per_gas,
+        )?;
+
+        let (expected_tokens, calldata, value, gas_limit, access_list) = match observed.router_kind
+        {
+            RouterKind::V2Like => {
+                let path = vec![self.wrapped_native, target_token];
+                let swap = self
+                    .build_v2_swap(
+                        observed.router,
+                        path,
+                        value,
+                        self.slippage_bps,
+                        gas_limit_hint,
+                        11,
+                        10,
+                        160_000,
+                        false,
+                        self.signer.address(),
+                        false,
+                    )
+                    .await?;
+                let Some(swap) = swap else {
+                    return Ok(None);
+                };
+                (
+                    swap.expected_out,
+                    swap.calldata,
+                    swap.tx_value,
+                    swap.gas_limit,
+                    swap.access_list,
+                )
+            }
+            RouterKind::V3Like => {
+                if observed.path.len() < 2 {
+                    return Err(AppError::Strategy("V3 path too short".into()));
+                }
+                let recipient = self.signer.address();
+                let path_bytes = if let Some(p) = observed.v3_path.clone() {
+                    p
+                } else {
+                    encode_v3_path(&observed.path, &observed.v3_fees)
+                        .ok_or_else(|| AppError::Strategy("Encode V3 path failed".into()))?
+                };
+                if observed.path.first().copied() != Some(self.wrapped_native) {
+                    return Ok(None);
+                }
+                let expected_tokens = self.quote_v3_path(&path_bytes, value).await?;
+                let ratio_ppm = StrategyExecutor::price_ratio_ppm(expected_tokens, value);
+                if ratio_ppm < U256::from(1_000u64) {
+                    return Ok(None);
+                }
+                let min_out = expected_tokens
+                    .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+                    / U256::from(10_000u64);
+                let access_list = StrategyExecutor::build_access_list(observed.router, &observed.path);
+                let calldata = self.build_v3_swap_payload(
+                    observed.router,
+                    path_bytes.clone(),
+                    value,
+                    min_out,
+                    recipient,
+                );
+                let mut gas_limit = gas_limit_hint
+                    .saturating_mul(12)
+                    .checked_div(10)
+                    .unwrap_or(320_000);
+                if gas_limit < 200_000 {
+                    gas_limit = 200_000;
+                }
+                (expected_tokens, calldata, value, gas_limit, access_list)
+            }
+        };
+
+        let (raw, request, hash) = self
+            .sign_swap_request(
+                observed.router,
+                gas_limit,
+                value,
+                max_fee_per_gas,
+                max_priority_fee_per_gas,
+                nonce,
+                calldata,
+                access_list,
+            )
+            .await?;
+
+        Ok(Some(FrontRunTx {
+            raw,
+            hash,
+            to: observed.router,
+            value,
+            request,
+            expected_tokens,
+        }))
+    }
+
+    pub(crate) async fn build_backrun_tx(
+        &self,
+        observed: &ObservedSwap,
+        max_fee_per_gas: u128,
+        max_priority_fee_per_gas: u128,
+        wallet_balance: U256,
+        gas_limit_hint: u64,
+        token_in_override: Option<U256>,
+        use_flashloan: bool,
+        nonce: u64,
+    ) -> Result<BackrunTx, AppError> {
+        let target_token = target_token(&observed.path, self.wrapped_native)
+            .ok_or_else(|| AppError::Strategy("Unable to derive target token".into()))?;
+
+        if wallet_balance.is_zero() {
+            return Err(AppError::Strategy(
+                "No balance available for backrun".into(),
+            ));
+        }
+
+        let expected_out_token;
+        let mut unwrap_to_native = false;
+
+        if token_in_override.is_none() {
+            match observed.router_kind {
+                RouterKind::V2Like => {
+                    let value = StrategyExecutor::dynamic_backrun_value(
+                        observed.amount_in,
+                        wallet_balance,
+                        self.slippage_bps,
+                        gas_limit_hint,
+                        max_fee_per_gas,
+                    )?;
+                    expected_out_token = target_token;
+                    let path = vec![self.wrapped_native, target_token];
+                    let recipient = if use_flashloan {
+                        self.executor.unwrap_or(self.signer.address())
+                    } else {
+                        self.signer.address()
+                    };
+                    let swap = self
+                        .build_v2_swap(
+                            observed.router,
+                            path.clone(),
+                            value,
+                            self.slippage_bps,
+                            gas_limit_hint,
+                            12,
+                            10,
+                            200_000,
+                            use_flashloan,
+                            recipient,
+                            true,
+                        )
+                        .await?
+                        .ok_or_else(|| AppError::Strategy("V2 swap build failed".into()))?;
+                    let tokens_out = swap.expected_out;
+                    let access_list = swap.access_list.clone();
+                    let mut calldata = swap.calldata.clone();
+                    let mut gas_limit = swap.gas_limit;
+                    if use_flashloan {
+                        let executor = self
+                            .executor
+                            .ok_or_else(|| AppError::Strategy("Missing flashloan executor".into()))?;
+                        let (raw, req, hash) = self
+                            .build_flashloan_transaction(
+                                executor,
+                                path[0],
+                                value,
+                                observed.router,
+                                calldata,
+                                Some(target_token),
+                                gas_limit_hint,
+                                &crate::network::gas::GasFees {
+                                    max_fee_per_gas,
+                                    max_priority_fee_per_gas,
+                                    base_fee_per_gas: 0,
+                                },
+                                nonce,
+                            )
+                            .await?;
+                        return Ok(BackrunTx {
+                            raw,
+                            hash,
+                            to: executor,
+                            value: U256::ZERO,
+                            request: req,
+                            expected_out: tokens_out,
+                            expected_out_token,
+                            unwrap_to_native: false,
+                            uses_flashloan: true,
+                            router_kind: observed.router_kind,
+                        });
+                    }
+                    if let Some(addr) = swap.access_list.0.first().map(|a| a.address) {
+                        if addr != observed.router {
+                            calldata = self.reserve_cache.build_v2_swap_payload(
+                                path,
+                                value,
+                                swap.expected_out,
+                                self.signer.address(),
+                                use_flashloan,
+                                self.wrapped_native,
+                            );
+                            gas_limit = gas_limit.max(gas_limit_hint);
+                        }
+                    }
+                    return Ok(BackrunTx {
+                        raw: Vec::new(),
+                        hash: B256::ZERO,
+                        to: observed.router,
+                        value,
+                        request: TransactionRequest {
+                            from: Some(self.signer.address()),
+                            to: Some(TxKind::Call(observed.router)),
+                            max_fee_per_gas: Some(max_fee_per_gas),
+                            max_priority_fee_per_gas: Some(max_priority_fee_per_gas),
+                            gas: Some(gas_limit),
+                            value: Some(value),
+                            input: TransactionInput::new(calldata.into()),
+                            nonce: Some(nonce),
+                            chain_id: Some(self.chain_id),
+                            access_list: Some(access_list),
+                            ..Default::default()
+                        },
+                        expected_out: tokens_out,
+                        expected_out_token,
+                        unwrap_to_native,
+                        uses_flashloan: false,
+                        router_kind: observed.router_kind,
+                    });
+                }
+                RouterKind::V3Like => {
+                    let value = StrategyExecutor::dynamic_backrun_value(
+                        observed.amount_in,
+                        wallet_balance,
+                        self.slippage_bps,
+                        gas_limit_hint,
+                        max_fee_per_gas,
+                    )?;
+                    expected_out_token = observed
+                        .path
+                        .last()
+                        .copied()
+                        .ok_or_else(|| AppError::Strategy("Missing V3 target token".into()))?;
+                    let path_bytes = if let Some(p) = observed.v3_path.clone() {
+                        p
+                    } else {
+                        encode_v3_path(&observed.path, &observed.v3_fees)
+                            .ok_or_else(|| AppError::Strategy("Encode V3 path failed".into()))?
+                    };
+                    let expected_out = self.quote_v3_path(&path_bytes, value).await?;
+                    let ratio_ppm = StrategyExecutor::price_ratio_ppm(expected_out, value);
+                    if ratio_ppm < U256::from(1_000u64) {
+                        return Err(AppError::Strategy("V3 liquidity too low".into()));
+                    }
+                    let min_out = expected_out
+                        .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+                        / U256::from(10_000u64);
+                    let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 300);
+                    let calldata = UniV3Router::new(observed.router, self.http_provider.clone())
+                        .exactInput(UniV3Router::ExactInputParams {
+                            path: path_bytes.clone().into(),
+                            recipient: self.signer.address(),
+                            deadline,
+                            amountIn: value,
+                            amountOutMinimum: min_out,
+                        })
+                        .calldata()
+                        .to_vec();
+                    let access_list = StrategyExecutor::build_access_list(observed.router, &observed.path);
+                    return Ok(BackrunTx {
+                        raw: Vec::new(),
+                        hash: B256::ZERO,
+                        to: observed.router,
+                        value,
+                        request: TransactionRequest {
+                            from: Some(self.signer.address()),
+                            to: Some(TxKind::Call(observed.router)),
+                            max_fee_per_gas: Some(max_fee_per_gas),
+                            max_priority_fee_per_gas: Some(max_priority_fee_per_gas),
+                            gas: Some(gas_limit_hint.max(180_000)),
+                            value: Some(U256::ZERO),
+                            input: TransactionInput::new(calldata.into()),
+                            nonce: Some(nonce),
+                            chain_id: Some(self.chain_id),
+                            access_list: Some(access_list),
+                            ..Default::default()
+                        },
+                        expected_out,
+                        expected_out_token,
+                        unwrap_to_native,
+                        uses_flashloan: false,
+                        router_kind: observed.router_kind,
+                    });
+                }
+            }
+        }
+
+        let tokens_in = token_in_override.unwrap();
+        let (value, expected_out, calldata, access_list) = match observed.router_kind {
+            RouterKind::V2Like => {
+                expected_out_token = self.wrapped_native;
+                let router_contract = UniV2Router::new(observed.router, self.http_provider.clone());
+                let sell_path = vec![target_token, self.wrapped_native];
+                let sell_amount = tokens_in;
+                let expected_out =
+                    if let Some(q) = self.reserve_cache.quote_v2_path(&sell_path, sell_amount) {
+                        q
+                    } else {
+                        let quote_path = sell_path.clone();
+                        let quote_contract = router_contract.clone();
+                        let quote: Vec<U256> = retry_async(
+                            move |_| {
+                                let c = quote_contract.clone();
+                                let p = quote_path.clone();
+                                async move { c.getAmountsOut(sell_amount, p.clone()).call().await }
+                            },
+                            3,
+                            Duration::from_millis(100),
+                        )
+                        .await
+                        .map_err(|e| AppError::Strategy(format!("Sell quote failed: {}", e)))?;
+                        *quote
+                            .last()
+                            .ok_or_else(|| AppError::Strategy("Sell quote missing amounts".into()))?
+                    };
+                let ratio_ppm = StrategyExecutor::price_ratio_ppm(expected_out, sell_amount);
+                if ratio_ppm < U256::from(1_000u64) {
+                    return Err(AppError::Strategy("Sell liquidity too low".into()));
+                }
+                if !self.dry_run {
+                    if !self
+                        .probe_v2_sell_for_toxicity(
+                            target_token,
+                            observed.router,
+                            sell_amount,
+                            expected_out,
+                        )
+                        .await?
+                    {
+                        return Err(AppError::Strategy(
+                            "toxic token detected on backrun".into(),
+                        ));
+                    }
+                }
+                let min_out = expected_out
+                    .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+                    / U256::from(10_000u64);
+                let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 300);
+                let calldata = router_contract
+                    .swapExactTokensForETH(
+                        sell_amount,
+                        min_out,
+                        sell_path.clone(),
+                        self.signer.address(),
+                        deadline,
+                    )
+                    .calldata()
+                    .to_vec();
+                let access_list = StrategyExecutor::build_access_list(observed.router, &sell_path);
+                (U256::ZERO, expected_out, calldata, access_list)
+            }
+            RouterKind::V3Like => {
+                expected_out_token = self.wrapped_native;
+                unwrap_to_native = true;
+                let rev_path = reverse_v3_path(&observed.path, &observed.v3_fees)
+                    .ok_or_else(|| AppError::Strategy("Reverse V3 path failed".into()))?;
+                let expected_out = self.quote_v3_path(&rev_path, tokens_in).await?;
+                let ratio_ppm = StrategyExecutor::price_ratio_ppm(expected_out, tokens_in);
+                if ratio_ppm < U256::from(1_000u64) {
+                    return Err(AppError::Strategy("Sell liquidity too low".into()));
+                }
+                if !self.dry_run {
+                    if !self
+                        .probe_v3_sell_for_toxicity(
+                            observed.router,
+                            rev_path.clone(),
+                            tokens_in,
+                            expected_out,
+                        )
+                        .await?
+                    {
+                        self.mark_toxic_token(target_token, "v3_probe_shortfall");
+                        return Err(AppError::Strategy(
+                            "toxic token detected on backrun".into(),
+                        ));
+                    }
+                }
+                let min_out = expected_out
+                    .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+                    / U256::from(10_000u64);
+                let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 300);
+                let calldata = UniV3Router::new(observed.router, self.http_provider.clone())
+                    .exactInput(UniV3Router::ExactInputParams {
+                        path: rev_path.clone().into(),
+                        recipient: self.signer.address(),
+                        deadline,
+                        amountIn: tokens_in,
+                        amountOutMinimum: min_out,
+                    })
+                    .calldata()
+                    .to_vec();
+                let access_list = StrategyExecutor::build_access_list(observed.router, &observed.path);
+                (U256::ZERO, expected_out, calldata, access_list)
+            }
+        };
+
+        let access_list = access_list.clone();
+        let (raw, request, hash) = self
+            .sign_with_access_list(
+                TransactionRequest {
+                    from: Some(self.signer.address()),
+                    to: Some(TxKind::Call(observed.router)),
+                    max_fee_per_gas: Some(max_fee_per_gas),
+                    max_priority_fee_per_gas: Some(max_priority_fee_per_gas),
+                    gas: Some(gas_limit_hint),
+                    value: Some(value),
+                    input: TransactionInput::new(calldata.into()),
+                    nonce: Some(nonce),
+                    chain_id: Some(self.chain_id),
+                    access_list: Some(access_list.clone()),
+                    ..Default::default()
+                },
+                access_list,
+            )
+            .await?;
+
+        Ok(BackrunTx {
+            raw,
+            hash,
+            to: observed.router,
+            value,
+            request,
+            expected_out,
+            expected_out_token,
+            unwrap_to_native,
+            uses_flashloan: use_flashloan,
+            router_kind: observed.router_kind,
+        })
+    }
+}

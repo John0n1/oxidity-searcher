@@ -7,9 +7,11 @@ use dashmap::DashSet;
 use futures::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
+use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
 
 use crate::core::strategy::StrategyWork;
@@ -63,9 +65,12 @@ pub struct MevShareClient {
     client: Client,
     chain_id: u64,
     seen: Arc<DashSet<B256>>,
+    seen_order: Arc<Mutex<VecDeque<B256>>>,
     tx_sender: UnboundedSender<StrategyWork>,
     history_limit: u32,
 }
+
+const SEEN_MAX: usize = 50_000;
 
 impl MevShareClient {
     pub fn new(
@@ -84,6 +89,7 @@ impl MevShareClient {
                 .unwrap(),
             chain_id,
             seen: Arc::new(DashSet::new()),
+            seen_order: Arc::new(Mutex::new(VecDeque::new())),
             tx_sender,
             history_limit,
         }
@@ -197,6 +203,16 @@ impl MevShareClient {
         Err(AppError::Connection("SSE stream ended unexpectedly".into()))
     }
 
+    async fn record_seen(&self, key: B256) {
+        let mut order = self.seen_order.lock().await;
+        order.push_back(key);
+        if order.len() > SEEN_MAX {
+            if let Some(oldest) = order.pop_front() {
+                self.seen.remove(&oldest);
+            }
+        }
+    }
+
     async fn handle_event(&self, evt: RawEvent) {
         let Some(txs) = evt.txs else { return };
 
@@ -204,6 +220,7 @@ impl MevShareClient {
             if let Some(hint) = self.convert_hint(tx) {
                 let key = hint.tx_hash;
                 if self.seen.insert(key) {
+                    self.record_seen(key).await;
                     let _ = self.tx_sender.send(StrategyWork::MevShareHint(hint));
                 }
             }

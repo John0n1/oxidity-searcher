@@ -20,6 +20,7 @@ use oxidity_builder::services::strategy::simulation::Simulator;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
+use futures::future::try_join_all;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Oxidity Builder")]
@@ -56,37 +57,24 @@ async fn main() -> Result<(), AppError> {
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://oxidity_builder.db".to_string());
     let db = Database::new(&database_url).await?;
 
-    let chain_id = *settings.chains.get(0).unwrap_or(&1);
-
-    let ipc_url = settings.get_ipc_url(chain_id);
-    let ws_url = match settings.get_ws_url(chain_id) {
-        Ok(url) => Some(url),
-        Err(e) => {
-            tracing::warn!(
-                target: "rpc",
-                error = %e,
-                "WS URL unavailable; continuing without WS fallback"
-            );
-            None
-        }
-    };
-    let rpc_url = settings.get_rpc_url(chain_id)?;
-    let (ws_provider, http_provider) =
-        ConnectionFactory::preferred(ipc_url.as_deref(), ws_url.as_deref(), &rpc_url).await?;
+    if settings.chains.is_empty() {
+        return Err(AppError::Config("No chains configured".into()));
+    }
 
     let wallet_address = settings.wallet_address;
-    let portfolio = Arc::new(PortfolioManager::new(http_provider.clone(), wallet_address));
-    let nonce_manager = NonceManager::new(http_provider.clone(), wallet_address);
-    let safety_guard = Arc::new(SafetyGuard::new());
-    let gas_oracle = GasOracle::new(http_provider.clone());
-
-    let chainlink_feeds = settings.chainlink_feeds_for_chain(chain_id)?;
-    if chainlink_feeds.is_empty() {
-        tracing::warn!("No Chainlink feeds configured for chain {}", chain_id);
-    }
-    let wrapped_native = oxidity_builder::common::constants::wrapped_native_for_chain(chain_id);
-    let price_feed = PriceFeed::new(http_provider.clone(), chainlink_feeds);
-    let simulator = Simulator::new(http_provider.clone());
+    let relay_url = settings.flashbots_relay_url();
+    let bundle_signer = PrivateKeySigner::from_str(&settings.bundle_signer_key())
+        .map_err(|e| AppError::Config(format!("Invalid bundle signer key: {}", e)))?;
+    let metrics_base: u16 = cli
+        .metrics_port
+        .or_else(|| {
+            std::env::var("METRICS_PORT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+        })
+        .unwrap_or(settings.metrics_port);
+    let slippage_bps = cli.slippage_bps.unwrap_or(settings.slippage_bps);
+    let strategy_enabled_flag = cli.strategy_enabled && settings.strategy_enabled;
     let tokenlist_path = settings.tokenlist_path();
     let token_manager = Arc::new(
         TokenManager::load_from_file(&tokenlist_path).unwrap_or_else(|e| {
@@ -98,60 +86,101 @@ async fn main() -> Result<(), AppError> {
             TokenManager::default()
         }),
     );
+    let profit_receiver = settings.profit_receiver_or_wallet();
 
-    let relay_url = settings.flashbots_relay_url();
-    let bundle_signer = PrivateKeySigner::from_str(&settings.bundle_signer_key())
-        .map_err(|e| AppError::Config(format!("Invalid bundle signer key: {}", e)))?;
-    let metrics_port: u16 = cli
-        .metrics_port
-        .or_else(|| {
-            std::env::var("METRICS_PORT")
-                .ok()
-                .and_then(|s| s.parse().ok())
-        })
-        .unwrap_or(settings.metrics_port);
-    let slippage_bps = cli.slippage_bps.unwrap_or(settings.slippage_bps);
-    let strategy_enabled = cli.strategy_enabled && settings.strategy_enabled;
-    let router_allowlist: HashSet<Address> = settings
-        .routers_for_chain(chain_id)?
-        .values()
-        .copied()
-        .collect();
-    if router_allowlist.is_empty() {
-        tracing::warn!("Router allowlist is empty for chain {}", chain_id);
+    let mut engine_tasks = Vec::new();
+
+    for (idx, chain_id) in settings.chains.iter().copied().enumerate() {
+        let ipc_url = settings.get_ipc_url(chain_id);
+        let ws_url = match settings.get_ws_url(chain_id) {
+            Ok(url) => Some(url),
+            Err(e) => {
+                tracing::warn!(
+                    target: "rpc",
+                    chain_id,
+                    error = %e,
+                    "WS URL unavailable; continuing without WS fallback"
+                );
+                None
+            }
+        };
+        let rpc_url = settings.get_rpc_url(chain_id)?;
+        let (ws_provider, http_provider) =
+            ConnectionFactory::preferred(ipc_url.as_deref(), ws_url.as_deref(), &rpc_url).await?;
+
+        let portfolio = Arc::new(PortfolioManager::new(http_provider.clone(), wallet_address));
+        let nonce_manager = NonceManager::new(http_provider.clone(), wallet_address);
+        let safety_guard = Arc::new(SafetyGuard::new());
+        let gas_oracle = GasOracle::new(http_provider.clone());
+
+        let chainlink_feeds = settings.chainlink_feeds_for_chain(chain_id)?;
+        if chainlink_feeds.is_empty() {
+            tracing::warn!("No Chainlink feeds configured for chain {}", chain_id);
+        }
+        let wrapped_native = oxidity_builder::common::constants::wrapped_native_for_chain(chain_id);
+        let price_feed = PriceFeed::new(http_provider.clone(), chainlink_feeds);
+        let simulator = Simulator::new(http_provider.clone());
+
+        let strategy_enabled = strategy_enabled_flag;
+        let router_allowlist: HashSet<Address> = settings
+            .routers_for_chain(chain_id)?
+            .values()
+            .copied()
+            .collect();
+        if router_allowlist.is_empty() {
+            tracing::warn!(target: "router", chain_id, "Router allowlist is empty");
+        }
+
+        let metrics_port = if settings.chains.len() > 1 {
+            metrics_base.saturating_add(idx as u16)
+        } else {
+            metrics_base
+        };
+
+        let engine = Engine::new(
+            http_provider,
+            ws_provider,
+            db.clone(),
+            nonce_manager,
+            portfolio,
+            safety_guard,
+            cli.dry_run,
+            gas_oracle,
+            price_feed,
+            chain_id,
+            relay_url.clone(),
+            bundle_signer.clone(),
+            settings.executor_address,
+            settings.executor_bribe_bps,
+            settings
+                .executor_bribe_recipient
+                .or(Some(profit_receiver)),
+            settings.flashloan_enabled,
+            settings
+                .gas_cap_for_chain(chain_id)
+                .unwrap_or(settings.max_gas_price_gwei),
+            simulator,
+            token_manager.clone(),
+            metrics_port,
+            strategy_enabled,
+            slippage_bps,
+            router_allowlist,
+            wrapped_native,
+            settings.mev_share_stream_url.clone(),
+            settings.mev_share_history_limit,
+            settings.mev_share_enabled,
+            settings.sandwich_attacks_enabled,
+            settings.simulation_backend.clone(),
+        );
+
+        engine_tasks.push(tokio::spawn(async move { engine.run().await }));
     }
 
-    let engine = Engine::new(
-        http_provider,
-        ws_provider,
-        db,
-        nonce_manager,
-        portfolio,
-        safety_guard,
-        cli.dry_run,
-        gas_oracle,
-        price_feed,
-        chain_id,
-        relay_url,
-        bundle_signer,
-        settings.executor_address,
-        settings.executor_bribe_bps,
-        settings.executor_bribe_recipient,
-        settings.flashloan_enabled,
-        settings
-            .gas_cap_for_chain(chain_id)
-            .unwrap_or(settings.max_gas_price_gwei),
-        simulator,
-        token_manager,
-        metrics_port,
-        strategy_enabled,
-        slippage_bps,
-        router_allowlist,
-        wrapped_native,
-        settings.mev_share_stream_url.clone(),
-        settings.mev_share_history_limit,
-        settings.mev_share_enabled,
-    );
-
-    engine.run().await
+    let results = try_join_all(engine_tasks)
+        .await
+        .map_err(|e| AppError::Strategy(format!("Engine task join failed: {e}")))?;
+    for res in results {
+        res?;
+    }
+    Ok(())
 }

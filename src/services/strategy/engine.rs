@@ -16,7 +16,7 @@ use crate::network::gas::GasOracle;
 use crate::network::mev_share::MevShareClient;
 use crate::network::price_feed::PriceFeed;
 use crate::network::provider::{HttpProvider, WsProvider};
-use crate::services::strategy::strategy::ReserveCache;
+use crate::services::strategy::reserves::ReserveCache;
 use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use std::collections::HashSet;
@@ -52,6 +52,8 @@ pub struct Engine {
     mev_share_stream_url: String,
     mev_share_history_limit: u32,
     mev_share_enabled: bool,
+    sandwich_attacks_enabled: bool,
+    simulation_backend: String,
 }
 
 impl Engine {
@@ -84,6 +86,8 @@ impl Engine {
         mev_share_stream_url: String,
         mev_share_history_limit: u32,
         mev_share_enabled: bool,
+        sandwich_attacks_enabled: bool,
+        simulation_backend: String,
     ) -> Self {
         Self {
             http_provider,
@@ -113,6 +117,8 @@ impl Engine {
             mev_share_stream_url,
             mev_share_history_limit,
             mev_share_enabled,
+            sandwich_attacks_enabled,
+            simulation_backend,
         }
     }
 
@@ -181,6 +187,8 @@ impl Engine {
                 self.executor_bribe_recipient,
                 self.flashloan_enabled,
                 reserve_cache.clone(),
+                self.sandwich_attacks_enabled,
+                self.simulation_backend.clone(),
             );
 
             if self.mev_share_enabled {
