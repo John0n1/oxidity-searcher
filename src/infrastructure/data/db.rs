@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@on1.no>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
 
 use crate::common::error::AppError;
 use crate::data::schema::TransactionRecord;

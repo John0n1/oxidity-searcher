@@ -1,22 +1,20 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@on1.no>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
 
-pub mod block_listener;
-pub mod engine;
-pub mod executor;
-pub mod mempool;
-pub mod nonce;
-pub mod portfolio;
-pub mod safety;
-pub mod simulation;
-pub mod strategy;
-pub mod time_utils;
-pub mod routers;
-pub mod decode;
-pub mod reserves;
-pub mod inventory;
-pub mod bundles;
-pub mod guards;
-pub mod swaps;
+pub mod execution;
+pub use execution::{engine, executor, strategy};
+
+pub mod ingest;
+pub use ingest::{decode, handlers};
+
 pub mod planning;
-pub mod handlers;
+pub use planning::{bundles, swaps};
+
+pub mod risk;
+pub use risk::{guards, safety, time_utils};
+
+pub mod state;
+pub use state::{inventory, portfolio};
+
+pub mod routers;
+pub mod simulation;

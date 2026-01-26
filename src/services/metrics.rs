@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@on1.no>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
 
 use crate::app::logging::{recent_logs, set_log_level};
 use crate::core::portfolio::PortfolioManager;
@@ -15,6 +15,13 @@ pub async fn spawn_metrics_server(
     stats: Arc<StrategyStats>,
     portfolio: Arc<PortfolioManager>,
 ) -> Option<SocketAddr> {
+    let token = match std::env::var("METRICS_TOKEN") {
+        Ok(t) if !t.is_empty() => t,
+        _ => {
+            tracing::warn!("METRICS_TOKEN is required; metrics server not started");
+            return None;
+        }
+    };
     let bind_addr = std::env::var("METRICS_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
     let addr: SocketAddr = match format!("{}:{}", bind_addr, port).parse() {
         Ok(a) => a,
@@ -42,43 +49,67 @@ pub async fn spawn_metrics_server(
         tracing::info!("Metrics server listening on {}", addr);
     }
 
+    let token = token.clone();
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
                 Ok((mut socket, _)) => {
-                    // Very small HTTP parser to switch between Prometheus text and JSON dashboard payloads.
-                    let mut buf = [0u8; 1024];
+                    const MAX_READ: usize = 2048;
+                    let mut buf = vec![0u8; MAX_READ];
                     let n = socket.read(&mut buf).await.unwrap_or(0);
-                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
-                    let path = req
-                        .lines()
-                        .next()
-                        .and_then(|l| l.split_whitespace().nth(1))
-                        .unwrap_or("/");
-                    let headers: Vec<&str> = req
-                        .lines()
-                        .skip(1)
-                        .take_while(|l| !l.is_empty())
-                        .collect();
-                    let auth_header = headers
-                        .iter()
-                        .find_map(|l| l.strip_prefix("Authorization:").map(|v| v.trim()));
-                    if let Some(token) = std::env::var("METRICS_TOKEN").ok() {
-                        let ok = auth_header
-                            .and_then(|v| v.strip_prefix("Bearer ").or(Some(v)))
-                            .map(|v| v.trim() == token)
-                            .unwrap_or(false);
-                        if !ok {
-                            let body = r#"{"status":"error","error":"unauthorized"}"#;
-                            let response = format!(
-                                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                                body.len(),
-                                body
-                            );
-                            let _ = socket.write_all(response.as_bytes()).await;
-                            continue;
-                        }
+                    if n == MAX_READ {
+                        let body = r#"{"status":"error","error":"request too large"}"#;
+                        let response = format!(
+                            "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(response.as_bytes()).await;
+                        continue;
                     }
+
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let mut lines = req.lines();
+                    let request_line = lines.next().unwrap_or_default();
+                    let mut parts = request_line.split_whitespace();
+                    let method = parts.next().unwrap_or("");
+                    if method != "GET" && method != "HEAD" {
+                        let body = r#"{"status":"error","error":"method not allowed"}"#;
+                        let response = format!(
+                            "HTTP/1.1 405 Method Not Allowed\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(response.as_bytes()).await;
+                        continue;
+                    }
+
+                    let path = parts.next().unwrap_or("/");
+                    let path = path.lines().next().unwrap_or("/");
+                    let headers: Vec<&str> = lines.take_while(|l| !l.is_empty()).collect();
+                    let auth_header = headers.iter().find_map(|l| {
+                        let (key, val) = l.split_once(':')?;
+                        if key.eq_ignore_ascii_case("authorization") {
+                            Some(val.trim())
+                        } else {
+                            None
+                        }
+                    });
+                    let ok = auth_header
+                        .and_then(|v| v.strip_prefix("Bearer ").or(Some(v)))
+                        .map(|v| v.trim() == token)
+                        .unwrap_or(false);
+                    if !ok {
+                        let body = r#"{"status":"error","error":"unauthorized"}"#;
+                        let response = format!(
+                            "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(response.as_bytes()).await;
+                        continue;
+                    }
+
                     let (route, query) = path.split_once('?').unwrap_or((path, ""));
 
                     if route.starts_with("/dashboard") {
@@ -90,7 +121,6 @@ pub async fn spawn_metrics_server(
                         );
                         let _ = socket.write_all(response.as_bytes()).await;
                     } else if route.starts_with("/bundles") {
-                        // Placeholder bundle payload; extend when bundle history is persisted.
                         let body = r#"{"history":[],"table":[]}"#;
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
@@ -140,10 +170,18 @@ pub async fn spawn_metrics_server(
                             body
                         );
                         let _ = socket.write_all(response.as_bytes()).await;
-                    } else {
+                    } else if route == "/" {
                         let body = render_metrics(&stats, &portfolio);
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(response.as_bytes()).await;
+                    } else {
+                        let body = r#"{"status":"error","error":"not found"}"#;
+                        let response = format!(
+                            "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                             body.len(),
                             body
                         );
@@ -247,6 +285,7 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_endpoint_serves() {
+        unsafe { std::env::set_var("METRICS_TOKEN", "testtoken") };
         let provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
         let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
         let stats = Arc::new(StrategyStats::default());
@@ -255,12 +294,17 @@ mod tests {
             .await
             .expect("bind metrics");
 
-        let body = reqwest::get(format!("http://{}", addr))
-            .await
-            .unwrap()
-            .text()
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{}", addr))
+            .bearer_auth("testtoken")
+            .send()
             .await
             .unwrap();
+        assert!(resp.status().is_success());
+        let body = resp.text().await.unwrap();
 
         assert!(body.contains("strategy_processed"));
     }

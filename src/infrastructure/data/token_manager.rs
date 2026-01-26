@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@on1.no>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
 
 use std::collections::HashMap;
 use std::fs;

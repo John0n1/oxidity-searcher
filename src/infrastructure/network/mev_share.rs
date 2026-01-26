@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@on1.no>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
 
 use crate::common::error::AppError;
 use alloy::primitives::{Address, B256, U256};
@@ -10,8 +10,8 @@ use serde::Deserialize;
 use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::{Duration, sleep};
 
 use crate::core::strategy::StrategyWork;

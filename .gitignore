@@ -7,7 +7,9 @@ node_modules
 .vscode/
 package-lock.json
 merge.py
-# Environment variables (secrets)
+dist-workspace.toml
+
+# Environment variables
 config.dev.toml
 config.prod.toml
 config.testnet.toml

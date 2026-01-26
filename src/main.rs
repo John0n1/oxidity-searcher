@@ -1,26 +1,26 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@on1.no>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
 
 use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
 use clap::Parser;
+use futures::future::try_join_all;
 use oxidity_builder::app::config::GlobalSettings;
 use oxidity_builder::app::logging::setup_logging;
 use oxidity_builder::domain::error::AppError;
 use oxidity_builder::infrastructure::data::db::Database;
 use oxidity_builder::infrastructure::data::token_manager::TokenManager;
 use oxidity_builder::infrastructure::network::gas::GasOracle;
+use oxidity_builder::infrastructure::network::nonce::NonceManager;
 use oxidity_builder::infrastructure::network::price_feed::PriceFeed;
 use oxidity_builder::infrastructure::network::provider::ConnectionFactory;
 use oxidity_builder::services::strategy::engine::Engine;
-use oxidity_builder::services::strategy::nonce::NonceManager;
 use oxidity_builder::services::strategy::portfolio::PortfolioManager;
 use oxidity_builder::services::strategy::safety::SafetyGuard;
 use oxidity_builder::services::strategy::simulation::Simulator;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
-use futures::future::try_join_all;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Oxidity Builder")]
@@ -53,6 +53,13 @@ async fn main() -> Result<(), AppError> {
     let settings = GlobalSettings::load_with_path(cli.config.as_deref())?;
     setup_logging(if settings.debug { "debug" } else { "info" }, false);
 
+    if let Some(bind) = settings.metrics_bind_value() {
+        unsafe { std::env::set_var("METRICS_BIND", bind) };
+    }
+    if let Some(token) = settings.metrics_token_value() {
+        unsafe { std::env::set_var("METRICS_TOKEN", token) };
+    }
+
     let database_url =
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://oxidity_builder.db".to_string());
     let db = Database::new(&database_url).await?;
@@ -75,6 +82,7 @@ async fn main() -> Result<(), AppError> {
         .unwrap_or(settings.metrics_port);
     let slippage_bps = cli.slippage_bps.unwrap_or(settings.slippage_bps);
     let strategy_enabled_flag = cli.strategy_enabled && settings.strategy_enabled;
+    let worker_limit = settings.strategy_worker_limit();
     let tokenlist_path = settings.tokenlist_path();
     let token_manager = Arc::new(
         TokenManager::load_from_file(&tokenlist_path).unwrap_or_else(|e| {
@@ -152,9 +160,7 @@ async fn main() -> Result<(), AppError> {
             bundle_signer.clone(),
             settings.executor_address,
             settings.executor_bribe_bps,
-            settings
-                .executor_bribe_recipient
-                .or(Some(profit_receiver)),
+            settings.executor_bribe_recipient.or(Some(profit_receiver)),
             settings.flashloan_enabled,
             settings
                 .gas_cap_for_chain(chain_id)
@@ -171,6 +177,7 @@ async fn main() -> Result<(), AppError> {
             settings.mev_share_enabled,
             settings.sandwich_attacks_enabled,
             settings.simulation_backend.clone(),
+            worker_limit,
         );
 
         engine_tasks.push(tokio::spawn(async move { engine.run().await }));

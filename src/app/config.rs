@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@on1.no>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
 
 use crate::domain::constants;
 use crate::domain::error::AppError;
 use alloy::primitives::Address;
 use config::{Config, Environment, File};
 use serde::{Deserialize, Deserializer};
+use serde_json;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -40,6 +41,7 @@ pub struct GlobalSettings {
     pub ws_urls: Option<HashMap<String, String>>,
     pub ipc_urls: Option<HashMap<String, String>>,
     pub chainlink_feeds: Option<HashMap<String, String>>, // Symbol -> aggregator address
+    pub chainlink_feeds_path: Option<String>,
     pub flashbots_relay_url: Option<String>,
     pub bundle_signer_key: Option<String>,
     #[serde(default = "default_bribe_bps")]
@@ -50,6 +52,9 @@ pub struct GlobalSettings {
     pub metrics_port: u16,
     #[serde(default = "default_true")]
     pub strategy_enabled: bool,
+    pub strategy_workers: Option<usize>,
+    pub metrics_bind: Option<String>,
+    pub metrics_token: Option<String>,
     #[serde(default = "default_slippage_bps")]
     pub slippage_bps: u64,
     pub gas_caps_gwei: Option<HashMap<String, u64>>,
@@ -288,6 +293,33 @@ impl GlobalSettings {
             .unwrap_or_else(|| self.wallet_key.clone())
     }
 
+    pub fn strategy_worker_limit(&self) -> usize {
+        if let Ok(v) = std::env::var("STRATEGY_WORKERS") {
+            if let Ok(parsed) = v.parse::<usize>() {
+                return parsed.max(1);
+            }
+        }
+        self.strategy_workers.unwrap_or(32).max(1)
+    }
+
+    pub fn metrics_bind_value(&self) -> Option<String> {
+        if let Ok(v) = std::env::var("METRICS_BIND") {
+            if !v.trim().is_empty() {
+                return Some(v);
+            }
+        }
+        self.metrics_bind.clone()
+    }
+
+    pub fn metrics_token_value(&self) -> Option<String> {
+        if let Ok(v) = std::env::var("METRICS_TOKEN") {
+            if !v.trim().is_empty() {
+                return Some(v);
+            }
+        }
+        self.metrics_token.clone()
+    }
+
     pub fn gas_cap_for_chain(&self, chain_id: u64) -> Option<u64> {
         self.gas_caps_gwei
             .as_ref()
@@ -322,7 +354,18 @@ impl GlobalSettings {
             return parse_address_map(map, "chainlink_feeds");
         }
 
+        if let Some(map) = load_chainlink_feeds_from_file(&self.chainlink_feeds_path(), chain_id)? {
+            return Ok(map);
+        }
+
         Ok(constants::default_chainlink_feeds(chain_id))
+    }
+
+    pub fn chainlink_feeds_path(&self) -> String {
+        std::env::var("CHAINLINK_FEEDS_PATH")
+            .ok()
+            .or_else(|| self.chainlink_feeds_path.clone())
+            .unwrap_or_else(|| "data/chainlink_feeds.json".to_string())
     }
 }
 
@@ -405,6 +448,81 @@ fn parse_address_map(
         .collect()
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChainlinkFeedEntry {
+    base: String,
+    quote: String,
+    chain_id: u64,
+    address: String,
+}
+
+fn alias_base_symbol(base: &str) -> String {
+    match base.to_uppercase().as_str() {
+        "WETH" => "ETH".to_string(),
+        "WBTC" => "BTC".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn quote_priority(quote: &str) -> usize {
+    match quote {
+        "USD" => 0,
+        "USDT" | "USDC" => 1,
+        "ETH" => 2,
+        _ => 3,
+    }
+}
+
+fn load_chainlink_feeds_from_file(
+    path: &str,
+    chain_id: u64,
+) -> Result<Option<HashMap<String, Address>>, AppError> {
+    let file_path = Path::new(path);
+    if !file_path.exists() {
+        return Ok(None);
+    }
+
+    let raw = fs::read_to_string(file_path)
+        .map_err(|e| AppError::Config(format!("chainlink_feeds json read failed: {}", e)))?;
+    let entries: Vec<ChainlinkFeedEntry> = serde_json::from_str(&raw)
+        .map_err(|e| AppError::Config(format!("chainlink_feeds json parse failed: {}", e)))?;
+
+    let mut selected: HashMap<String, (String, Address)> = HashMap::new();
+    for entry in entries {
+        if entry.chain_id != chain_id {
+            continue;
+        }
+
+        let base = alias_base_symbol(&entry.base);
+        let quote = entry.quote.to_uppercase();
+        let addr = Address::from_str(&entry.address).map_err(|_| {
+            AppError::InvalidAddress(format!("chainlink_feeds:{base} -> {}", entry.address))
+        })?;
+
+        let new_score = quote_priority(&quote);
+        let replace = match selected.get(&base) {
+            None => true,
+            Some((existing_quote, _)) => new_score < quote_priority(existing_quote),
+        };
+
+        if replace {
+            selected.insert(base, (quote, addr));
+        }
+    }
+
+    if selected.is_empty() {
+        return Ok(None);
+    }
+
+    let out = selected
+        .into_iter()
+        .map(|(base, (_, addr))| (base, addr))
+        .collect();
+
+    Ok(Some(out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,6 +545,7 @@ mod tests {
             ws_urls: None,
             ipc_urls: None,
             chainlink_feeds: None,
+            chainlink_feeds_path: None,
             flashbots_relay_url: None,
             bundle_signer_key: None,
             executor_bribe_bps: default_bribe_bps(),
@@ -434,6 +553,9 @@ mod tests {
             tokenlist_path: None,
             metrics_port: default_metrics_port(),
             strategy_enabled: default_true(),
+            strategy_workers: None,
+            metrics_bind: None,
+            metrics_token: None,
             slippage_bps: default_slippage_bps(),
             gas_caps_gwei: None,
             mev_share_stream_url: default_mev_share_url(),
