@@ -11,10 +11,10 @@ use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{Sender, error::TrySendError};
 use tokio::time::{Duration, sleep};
 
-use crate::core::strategy::StrategyWork;
+use crate::core::strategy::{StrategyStats, StrategyWork};
 
 #[derive(Debug, Clone)]
 pub struct MevShareHint {
@@ -66,7 +66,9 @@ pub struct MevShareClient {
     chain_id: u64,
     seen: Arc<DashSet<B256>>,
     seen_order: Arc<Mutex<VecDeque<B256>>>,
-    tx_sender: UnboundedSender<StrategyWork>,
+    tx_sender: Sender<StrategyWork>,
+    stats: Arc<StrategyStats>,
+    capacity: usize,
     history_limit: u32,
 }
 
@@ -76,7 +78,9 @@ impl MevShareClient {
     pub fn new(
         base_url: String,
         chain_id: u64,
-        tx_sender: UnboundedSender<StrategyWork>,
+        tx_sender: Sender<StrategyWork>,
+        stats: Arc<StrategyStats>,
+        capacity: usize,
         history_limit: u32,
     ) -> Self {
         let history_url = format!("{}/api/v1/history", base_url.trim_end_matches('/'));
@@ -91,6 +95,8 @@ impl MevShareClient {
             seen: Arc::new(DashSet::new()),
             seen_order: Arc::new(Mutex::new(VecDeque::new())),
             tx_sender,
+            stats,
+            capacity,
             history_limit,
         }
     }
@@ -221,8 +227,37 @@ impl MevShareClient {
                 let key = hint.tx_hash;
                 if self.seen.insert(key) {
                     self.record_seen(key).await;
-                    let _ = self.tx_sender.send(StrategyWork::MevShareHint(hint));
+                    self.enqueue(StrategyWork::MevShareHint(hint));
                 }
+            }
+        }
+    }
+
+    fn enqueue(&self, work: StrategyWork) {
+        match self.tx_sender.try_send(work) {
+            Ok(()) => {
+                self.stats
+                    .ingest_queue_depth
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            Err(TrySendError::Full(_)) => {
+                self.stats
+                    .ingest_queue_full
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.stats
+                    .ingest_queue_dropped
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.stats
+                    .ingest_backpressure
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!(
+                    target: "mev_share",
+                    capacity = self.capacity,
+                    "ingest channel full; dropped hint"
+                );
+            }
+            Err(TrySendError::Closed(_)) => {
+                tracing::warn!(target: "mev_share", "ingest channel closed; dropping hint");
             }
         }
     }

@@ -41,6 +41,7 @@ pub struct ReserveCache {
     v2_reserves: DashSet<(Address, V2Reserves)>,
     v2_pairs_by_tokens: DashSet<((Address, Address), Address)>,
     inflight_pairs: DashSet<Address>,
+    lookup_permits: std::sync::Arc<tokio::sync::Semaphore>,
 }
 
 impl ReserveCache {
@@ -50,6 +51,7 @@ impl ReserveCache {
             v2_reserves: DashSet::new(),
             v2_pairs_by_tokens: DashSet::new(),
             inflight_pairs: DashSet::new(),
+            lookup_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
         }
     }
 
@@ -225,6 +227,14 @@ impl ReserveCache {
         if !self.inflight_pairs.insert(pair) {
             return;
         }
+        // Bound concurrent lookups to avoid runaway task spawning on noisy chains.
+        let permit = match self.lookup_permits.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                self.inflight_pairs.remove(&pair);
+                return;
+            }
+        };
         let provider = self.http_provider.clone();
         let pairs_map = self.v2_pairs_by_tokens.clone();
         let reserves_map = self.v2_reserves.clone();
@@ -248,6 +258,7 @@ impl ReserveCache {
                 ));
             }
             inflight.remove(&pair);
+            drop(permit);
         });
     }
 

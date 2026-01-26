@@ -7,8 +7,10 @@ use crate::core::strategy::StrategyStats;
 use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::Mutex as TokioMutex;
 
 pub async fn spawn_metrics_server(
     port: u16,
@@ -50,6 +52,7 @@ pub async fn spawn_metrics_server(
     }
 
     let token = token.clone();
+    let limiter = Arc::new(TokioMutex::new(RateLimiter::default()));
     tokio::spawn(async move {
         loop {
             match listener.accept().await {
@@ -71,6 +74,19 @@ pub async fn spawn_metrics_server(
                     let req = String::from_utf8_lossy(&buf[..n]).to_string();
                     let mut lines = req.lines();
                     let request_line = lines.next().unwrap_or_default();
+                    {
+                        let mut guard = limiter.lock().await;
+                        if !guard.allow(60) {
+                            let body = r#"{"status":"error","error":"rate_limited"}"#;
+                            let response = format!(
+                                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                                body.len(),
+                                body
+                            );
+                            let _ = socket.write_all(response.as_bytes()).await;
+                            continue;
+                        }
+                    }
                     let mut parts = request_line.split_whitespace();
                     let method = parts.next().unwrap_or("");
                     if method != "GET" && method != "HEAD" {
@@ -121,7 +137,7 @@ pub async fn spawn_metrics_server(
                         );
                         let _ = socket.write_all(response.as_bytes()).await;
                     } else if route.starts_with("/bundles") {
-                        let body = r#"{"history":[],"table":[]}"#;
+                        let body = render_bundles_json(&stats);
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                             body.len(),
@@ -204,14 +220,44 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
     let submitted = stats.submitted.load(std::sync::atomic::Ordering::Relaxed);
     let skipped = stats.skipped.load(std::sync::atomic::Ordering::Relaxed);
     let failed = stats.failed.load(std::sync::atomic::Ordering::Relaxed);
+    let skip_decode = stats.skip_decode_failed.load(std::sync::atomic::Ordering::Relaxed);
+    let skip_unknown = stats.skip_unknown_router.load(std::sync::atomic::Ordering::Relaxed);
+    let skip_gas_cap = stats.skip_gas_cap.load(std::sync::atomic::Ordering::Relaxed);
+    let skip_sim_failed = stats.skip_sim_failed.load(std::sync::atomic::Ordering::Relaxed);
+    let skip_profit_guard = stats.skip_profit_guard.load(std::sync::atomic::Ordering::Relaxed);
+    let queue_depth = stats.ingest_queue_depth.load(std::sync::atomic::Ordering::Relaxed);
+    let queue_dropped = stats.ingest_queue_dropped.load(std::sync::atomic::Ordering::Relaxed);
+    let queue_full = stats.ingest_queue_full.load(std::sync::atomic::Ordering::Relaxed);
+    let queue_backpressure = stats.ingest_backpressure.load(std::sync::atomic::Ordering::Relaxed);
     let mut body = format!(
         concat!(
             "# TYPE strategy_processed counter\nstrategy_processed {}\n",
             "# TYPE strategy_submitted counter\nstrategy_submitted {}\n",
             "# TYPE strategy_skipped counter\nstrategy_skipped {}\n",
-            "# TYPE strategy_failed counter\nstrategy_failed {}\n"
+            "# TYPE strategy_failed counter\nstrategy_failed {}\n",
+            "# TYPE strategy_skip_decode counter\nstrategy_skip_decode {}\n",
+            "# TYPE strategy_skip_unknown_router counter\nstrategy_skip_unknown_router {}\n",
+            "# TYPE strategy_skip_gas_cap counter\nstrategy_skip_gas_cap {}\n",
+            "# TYPE strategy_skip_sim_failed counter\nstrategy_skip_sim_failed {}\n",
+            "# TYPE strategy_skip_profit_guard counter\nstrategy_skip_profit_guard {}\n",
+            "# TYPE ingest_queue_depth gauge\ningest_queue_depth {}\n",
+            "# TYPE ingest_queue_dropped counter\ningest_queue_dropped {}\n",
+            "# TYPE ingest_queue_full counter\ningest_queue_full {}\n",
+            "# TYPE ingest_queue_backpressure counter\ningest_queue_backpressure {}\n"
         ),
-        processed, submitted, skipped, failed
+        processed,
+        submitted,
+        skipped,
+        failed,
+        skip_decode,
+        skip_unknown,
+        skip_gas_cap,
+        skip_sim_failed,
+        skip_profit_guard,
+        queue_depth,
+        queue_dropped,
+        queue_full,
+        queue_backpressure
     );
 
     for (chain, profit) in portfolio.net_profit_all() {
@@ -236,6 +282,15 @@ fn render_dashboard_json(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioMa
     let submitted = stats.submitted.load(std::sync::atomic::Ordering::Relaxed);
     let skipped = stats.skipped.load(std::sync::atomic::Ordering::Relaxed);
     let failed = stats.failed.load(std::sync::atomic::Ordering::Relaxed);
+    let queue_depth = stats.ingest_queue_depth.load(std::sync::atomic::Ordering::Relaxed);
+    let queue_dropped = stats.ingest_queue_dropped.load(std::sync::atomic::Ordering::Relaxed);
+    let queue_full = stats.ingest_queue_full.load(std::sync::atomic::Ordering::Relaxed);
+    let queue_backpressure = stats.ingest_backpressure.load(std::sync::atomic::Ordering::Relaxed);
+    let skip_decode = stats.skip_decode_failed.load(std::sync::atomic::Ordering::Relaxed);
+    let skip_unknown = stats.skip_unknown_router.load(std::sync::atomic::Ordering::Relaxed);
+    let skip_gas_cap = stats.skip_gas_cap.load(std::sync::atomic::Ordering::Relaxed);
+    let skip_sim_failed = stats.skip_sim_failed.load(std::sync::atomic::Ordering::Relaxed);
+    let skip_profit_guard = stats.skip_profit_guard.load(std::sync::atomic::Ordering::Relaxed);
     let success_rate = if submitted > 0 {
         ((submitted.saturating_sub(failed)) as f64) / (submitted as f64) * 100.0
     } else {
@@ -264,15 +319,90 @@ fn render_dashboard_json(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioMa
         "skipped": skipped,
         "failed": failed,
         "successRate": success_rate,
+        "queueDepth": queue_depth,
+        "queueDropped": queue_dropped,
+        "queueFull": queue_full,
+        "queueBackpressure": queue_backpressure,
+        "skipDecode": skip_decode,
+        "skipUnknownRouter": skip_unknown,
+        "skipGasCap": skip_gas_cap,
+        "skipSimulation": skip_sim_failed,
+        "skipProfitGuard": skip_profit_guard,
         "netProfitEth": total_profit,
         "netProfitByChain": net_profit_by_chain,
         "tokenProfit": token_profit,
-        "history": [], // reserved for future bundle history wiring
-        "table": []    // reserved for future bundle table wiring
+        "history": render_bundle_history(stats),
+        "table": render_bundle_history(stats)
     });
 
     payload.to_string()
 }
+
+fn render_bundle_history(stats: &Arc<StrategyStats>) -> serde_json::Value {
+    let guard = stats
+        .bundles
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let rows: Vec<serde_json::Value> = guard
+        .iter()
+        .rev()
+        .map(|b| {
+            json!({
+                "tx": b.tx_hash,
+                "source": b.source,
+                "profitEth": b.profit_eth,
+                "gasEth": b.gas_cost_eth,
+                "netEth": b.net_eth,
+                "timestampMs": b.timestamp_ms,
+            })
+        })
+        .collect();
+    serde_json::Value::Array(rows)
+}
+
+fn render_bundles_json(stats: &Arc<StrategyStats>) -> String {
+    let history = render_bundle_history(stats);
+    json!({ "history": history }).to_string()
+}
+
+struct RateLimiter {
+    window_start: Instant,
+    count: u32,
+}
+
+impl RateLimiter {
+    fn new() -> Self {
+        Self {
+            window_start: Instant::now(),
+            count: 0,
+        }
+    }
+
+    fn allow(&mut self, max_per_second: u32) -> bool {
+        let now = Instant::now();
+        if now
+            .duration_since(self.window_start)
+            .as_secs_f64()
+            .ge(&1.0)
+        {
+            self.window_start = now;
+            self.count = 0;
+        }
+        if self.count >= max_per_second {
+            return false;
+        }
+        self.count += 1;
+        true
+    }
+}
+
+impl Default for RateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

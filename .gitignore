@@ -1,26 +1,11 @@
-# Development/Production
-/target
-.venv/
-Cargo.lock
-.cargo
-node_modules
-.vscode/
-package-lock.json
-merge.py
-dist-workspace.toml
-
-# Environment variables
-config.dev.toml
-config.prod.toml
-config.testnet.toml
-config.toml
-.env
-
-# DB
+# Local configs and secrets
+config*.toml
 *.db
-*.db-shm
-*.db-wal
+
+# Build artifacts
+target/
+dist/
+
+# Editor / OS
 .DS_Store
-
-# Frontend
-
+*.log

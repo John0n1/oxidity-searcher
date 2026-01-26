@@ -122,7 +122,8 @@ impl StrategyExecutor {
             .await
             .unwrap_or(true);
         let reserved_nonces = 1u64 + if needs_approval { 1 } else { 0 };
-        let mut nonce_cursor = self.lease_nonces(reserved_nonces).await?;
+        let lease = self.lease_nonces(reserved_nonces).await?;
+        let mut nonce_cursor = lease.base;
 
         if needs_approval {
             let nonce = nonce_cursor;

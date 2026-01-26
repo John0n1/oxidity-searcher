@@ -29,8 +29,9 @@ use dashmap::{DashMap, DashSet};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex as StdMutex;
 use std::time::Instant;
-use tokio::sync::{Mutex, Semaphore, broadcast::Receiver, mpsc::UnboundedReceiver};
+use tokio::sync::{Mutex, Semaphore, broadcast::Receiver as BroadcastReceiver, mpsc::Receiver};
 
 #[derive(Debug)]
 pub enum StrategyWork {
@@ -58,11 +59,36 @@ pub struct StrategyStats {
     pub skip_unsupported_router: AtomicU64,
     pub skip_token_call: AtomicU64,
     pub skip_toxic_token: AtomicU64,
+    pub ingest_queue_depth: AtomicU64,
+    pub ingest_queue_dropped: AtomicU64,
+    pub ingest_queue_full: AtomicU64,
+    pub ingest_backpressure: AtomicU64,
+    pub bundles: StdMutex<Vec<BundleTelemetry>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BundleTelemetry {
+    pub tx_hash: String,
+    pub source: String,
+    pub profit_eth: f64,
+    pub gas_cost_eth: f64,
+    pub net_eth: f64,
+    pub timestamp_ms: i64,
+}
+
+impl StrategyStats {
+    pub fn record_bundle(&self, entry: BundleTelemetry) {
+        let mut guard = self.bundles.lock().unwrap_or_else(|e| e.into_inner());
+        guard.push(entry);
+        if guard.len() > 50 {
+            guard.remove(0);
+        }
+    }
 }
 
 pub struct StrategyExecutor {
-    pub(in crate::services::strategy) tx_rx: Mutex<UnboundedReceiver<StrategyWork>>,
-    pub(in crate::services::strategy) mut_block_rx: Mutex<Receiver<Header>>,
+    pub(in crate::services::strategy) tx_rx: Mutex<Receiver<StrategyWork>>,
+    pub(in crate::services::strategy) mut_block_rx: Mutex<BroadcastReceiver<Header>>,
     pub(in crate::services::strategy) safety_guard: Arc<SafetyGuard>,
     pub(in crate::services::strategy) bundle_sender: SharedBundleSender,
     pub(in crate::services::strategy) db: Database,
@@ -178,8 +204,8 @@ impl StrategyExecutor {
     }
 
     pub fn new(
-        tx_rx: UnboundedReceiver<StrategyWork>,
-        block_rx: Receiver<Header>,
+        tx_rx: Receiver<StrategyWork>,
+        block_rx: BroadcastReceiver<Header>,
         safety_guard: Arc<SafetyGuard>,
         bundle_sender: SharedBundleSender,
         db: Database,
@@ -272,6 +298,13 @@ impl StrategyExecutor {
 
             match work_opt {
                 Some(work) => {
+                    executor
+                        .stats
+                        .ingest_queue_depth
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                            Some(v.saturating_sub(1))
+                        })
+                        .ok();
                     let permit = executor
                         .worker_semaphore
                         .clone()
@@ -653,8 +686,8 @@ mod tests {
             });
         }
 
-        let start = exec.lease_nonces(3).await.expect("lease");
-        assert_eq!(start, 5);
+        let lease = exec.lease_nonces(3).await.expect("lease");
+        assert_eq!(lease.base, 5);
         let peek = exec.peek_nonce_for_sim().await.expect("peek");
         assert_eq!(peek, 8);
     }
@@ -716,14 +749,37 @@ mod tests {
             });
         }
 
-        let start = exec.lease_nonces(2).await.expect("lease");
-        assert_eq!(start, 5);
+        let lease = exec.lease_nonces(2).await.expect("lease");
+        assert_eq!(lease.base, 5);
         let guard = exec.bundle_state.lock().await;
         assert_eq!(guard.as_ref().unwrap().next_nonce, 7);
     }
 
+    #[tokio::test]
+    async fn gas_ratio_rejects_thin_margin() {
+        let exec = dummy_executor_for_nonces().await;
+        assert!(
+            !exec.gas_ratio_ok(
+                U256::from(1_000u64),
+                U256::from(1_050u64),
+                U256::from(1_000_000u64)
+            ),
+            "margin below 12% should be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn gas_ratio_accepts_healthy_margin() {
+        let exec = dummy_executor_for_nonces().await;
+        assert!(exec.gas_ratio_ok(
+            U256::from(1_000u64),
+            U256::from(3_000u64),
+            U256::from(1_000_000u64)
+        ));
+    }
+
     async fn dummy_executor_for_nonces() -> StrategyExecutor {
-        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_tx, rx) = tokio::sync::mpsc::channel(8);
         let (_block_tx, block_rx) = tokio::sync::broadcast::channel::<Header>(1);
         let http = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
         let safety_guard = Arc::new(SafetyGuard::new());

@@ -233,9 +233,7 @@ impl StrategyExecutor {
         executor: Address,
         asset: Address,
         amount: U256,
-        router: Address,
-        swap_payload: Vec<u8>,
-        approve_token: Option<Address>,
+        callbacks: Vec<(Address, Bytes, U256)>,
         gas_limit_hint: u64,
         gas_fees: &crate::network::gas::GasFees,
         nonce: u64,
@@ -244,19 +242,11 @@ impl StrategyExecutor {
         let mut values = Vec::new();
         let mut payloads = Vec::new();
 
-        if let Some(tok) = approve_token {
-            let approve = ERC20::approveCall {
-                spender: router,
-                amount: U256::MAX,
-            };
-            targets.push(tok);
-            values.push(U256::ZERO);
-            payloads.push(Bytes::from(approve.abi_encode()));
+        for (t, p, v) in callbacks {
+            targets.push(t);
+            payloads.push(p);
+            values.push(v);
         }
-
-        targets.push(router);
-        values.push(U256::ZERO);
-        payloads.push(Bytes::from(swap_payload));
 
         let callback = FlashCallbackData {
             targets,
@@ -511,14 +501,59 @@ impl StrategyExecutor {
                         let executor = self.executor.ok_or_else(|| {
                             AppError::Strategy("Missing flashloan executor".into())
                         })?;
+                        // Build forward swap (WETH -> target) and reverse (target -> WETH) to repay the loan.
+                        let forward_payload = Bytes::from(calldata);
+                        let rev_path = vec![target_token, self.wrapped_native];
+                        let rev_min_out = tokens_out
+                            .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+                            / U256::from(10_000u64);
+                        let rev_calldata = self.reserve_cache.build_v2_swap_payload(
+                            rev_path.clone(),
+                            tokens_out,
+                            rev_min_out,
+                            executor,
+                            true,
+                            self.wrapped_native,
+                        );
+                        let rev_payload = Bytes::from(rev_calldata);
+                        // Keep allowances tight to reduce long-lived exposure.
+                        let approve_weth = ERC20::approveCall {
+                            spender: observed.router,
+                            amount: value,
+                        }
+                        .abi_encode();
+                        let approve_target = ERC20::approveCall {
+                            spender: observed.router,
+                            amount: tokens_out,
+                        }
+                        .abi_encode();
+                        // Zero approvals after the round-trip completes.
+                        let reset_weth = UnifiedHardenedExecutor::safeApproveCall {
+                            token: self.wrapped_native,
+                            spender: observed.router,
+                            amount: U256::ZERO,
+                        }
+                        .abi_encode();
+                        let reset_target = UnifiedHardenedExecutor::safeApproveCall {
+                            token: target_token,
+                            spender: observed.router,
+                            amount: U256::ZERO,
+                        }
+                        .abi_encode();
+                        let callbacks = vec![
+                            (self.wrapped_native, Bytes::from(approve_weth), U256::ZERO),
+                            (target_token, Bytes::from(approve_target), U256::ZERO),
+                            (observed.router, forward_payload, U256::ZERO),
+                            (observed.router, rev_payload, U256::ZERO),
+                            (self.executor.unwrap_or(executor), Bytes::from(reset_weth), U256::ZERO),
+                            (self.executor.unwrap_or(executor), Bytes::from(reset_target), U256::ZERO),
+                        ];
                         let (raw, req, hash) = self
                             .build_flashloan_transaction(
                                 executor,
                                 path[0],
                                 value,
-                                observed.router,
-                                calldata,
-                                Some(target_token),
+                                callbacks,
                                 gas_limit_hint,
                                 &crate::network::gas::GasFees {
                                     max_fee_per_gas,
@@ -528,14 +563,18 @@ impl StrategyExecutor {
                                 nonce,
                             )
                             .await?;
+                        let expected_out = self
+                            .reserve_cache
+                            .quote_v2_path(&rev_path, tokens_out)
+                            .unwrap_or(rev_min_out);
                         return Ok(BackrunTx {
                             raw,
                             hash,
                             to: executor,
                             value: U256::ZERO,
                             request: req,
-                            expected_out: tokens_out,
-                            expected_out_token,
+                            expected_out,
+                            expected_out_token: self.wrapped_native,
                             unwrap_to_native: false,
                             uses_flashloan: true,
                             router_kind: observed.router_kind,

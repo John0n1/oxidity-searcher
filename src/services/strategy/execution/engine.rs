@@ -6,7 +6,7 @@ use crate::core::executor::{BundleSender, SharedBundleSender};
 use crate::core::portfolio::PortfolioManager;
 use crate::core::safety::SafetyGuard;
 use crate::core::simulation::Simulator;
-use crate::core::strategy::{StrategyExecutor, StrategyStats};
+use crate::core::strategy::{StrategyExecutor, StrategyStats, StrategyWork};
 use crate::data::db::Database;
 use crate::infrastructure::data::token_manager::TokenManager;
 use crate::network::block_listener::BlockListener;
@@ -23,6 +23,8 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
+
+const INGEST_QUEUE_BOUND: usize = 2048;
 
 pub struct Engine {
     http_provider: HttpProvider,
@@ -126,10 +128,16 @@ impl Engine {
     }
 
     pub async fn run(self) -> Result<(), AppError> {
-        let (tx_sender, tx_receiver) = mpsc::unbounded_channel();
+        let stats = Arc::new(StrategyStats::default());
+        let (tx_sender, tx_receiver) = mpsc::channel::<StrategyWork>(INGEST_QUEUE_BOUND);
         let (block_sender, block_receiver) = broadcast::channel(32);
 
-        let mempool = MempoolScanner::new(self.ws_provider.clone(), tx_sender.clone());
+        let mempool = MempoolScanner::new(
+            self.ws_provider.clone(),
+            tx_sender.clone(),
+            stats.clone(),
+            INGEST_QUEUE_BOUND,
+        );
         let block_listener = BlockListener::new(
             self.ws_provider.clone(),
             block_sender.clone(),
@@ -156,7 +164,6 @@ impl Engine {
                 cache.run_v2_log_listener(ws_for_cache).await;
             });
         }
-        let stats = Arc::new(StrategyStats::default());
         let _metrics_addr = crate::common::metrics::spawn_metrics_server(
             self.metrics_port,
             stats.clone(),
@@ -177,7 +184,7 @@ impl Engine {
                 self.max_gas_price_gwei,
                 self.simulator,
                 self.token_manager.clone(),
-                stats,
+                stats.clone(),
                 self.bundle_signer.clone(),
                 self.nonce_manager.clone(),
                 self.slippage_bps,
@@ -200,6 +207,8 @@ impl Engine {
                     self.mev_share_stream_url.clone(),
                     self.chain_id,
                     tx_sender.clone(),
+                    stats.clone(),
+                    INGEST_QUEUE_BOUND,
                     self.mev_share_history_limit,
                 );
                 tokio::try_join!(

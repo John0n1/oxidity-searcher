@@ -3,6 +3,7 @@
 
 use crate::common::error::AppError;
 use crate::core::strategy::StrategyWork;
+use crate::core::strategy::StrategyStats;
 use crate::network::provider::WsProvider;
 use alloy::consensus::Transaction as _;
 use alloy::network::TransactionResponse;
@@ -12,12 +13,15 @@ use alloy::rpc::types::Transaction;
 use dashmap::DashSet;
 use futures::StreamExt;
 use std::collections::VecDeque;
-use tokio::sync::mpsc::UnboundedSender;
+use std::sync::Arc;
+use tokio::sync::mpsc::{Sender, error::TrySendError};
 use tokio::time::{Duration, sleep};
 
 pub struct MempoolScanner {
     provider: WsProvider,
-    tx_sender: UnboundedSender<StrategyWork>,
+    tx_sender: Sender<StrategyWork>,
+    stats: Arc<StrategyStats>,
+    capacity: usize,
     seen: DashSet<B256>,
     seen_order: tokio::sync::Mutex<VecDeque<B256>>,
 }
@@ -28,10 +32,17 @@ const SEEN_MAX: usize = 4;
 const SEEN_MAX: usize = 50_000;
 
 impl MempoolScanner {
-    pub fn new(provider: WsProvider, tx_sender: UnboundedSender<StrategyWork>) -> Self {
+    pub fn new(
+        provider: WsProvider,
+        tx_sender: Sender<StrategyWork>,
+        stats: Arc<StrategyStats>,
+        capacity: usize,
+    ) -> Self {
         Self {
             provider,
             tx_sender,
+            stats,
+            capacity,
             seen: DashSet::new(),
             seen_order: tokio::sync::Mutex::new(VecDeque::new()),
         }
@@ -47,7 +58,7 @@ impl MempoolScanner {
                     let mut stream = sub.into_stream();
                     while let Some(tx) = stream.next().await {
                         if tx.input().len() > 4 && self.mark_seen(tx.tx_hash()).await {
-                            let _ = self.tx_sender.send(StrategyWork::Mempool(tx));
+                            self.enqueue(StrategyWork::Mempool(tx));
                         }
                     }
                     tracing::warn!(target: "mempool", "Pending tx subscription ended, retrying after backoff");
@@ -84,7 +95,7 @@ impl MempoolScanner {
                 Ok(txs) => {
                     for tx in txs {
                         if tx.input().len() > 4 && self.mark_seen(tx.tx_hash()).await {
-                            let _ = self.tx_sender.send(StrategyWork::Mempool(tx));
+                            self.enqueue(StrategyWork::Mempool(tx));
                         }
                     }
                 }
@@ -116,12 +127,41 @@ impl MempoolScanner {
         }
         true
     }
+
+    fn enqueue(&self, work: StrategyWork) {
+        match self.tx_sender.try_send(work) {
+            Ok(()) => {
+                self.stats
+                    .ingest_queue_depth
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            Err(TrySendError::Full(_)) => {
+                self.stats
+                    .ingest_queue_full
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.stats
+                    .ingest_queue_dropped
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.stats
+                    .ingest_backpressure
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!(
+                    target: "mempool",
+                    capacity = self.capacity,
+                    "ingest channel full; dropped work item"
+                );
+            }
+            Err(TrySendError::Closed(_)) => {
+                tracing::warn!(target: "mempool", "ingest channel closed; dropping work");
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::mpsc::unbounded_channel;
+    use tokio::sync::mpsc::channel;
     use url::Url;
 
     #[tokio::test]
@@ -144,8 +184,9 @@ mod tests {
     #[tokio::test]
     async fn dedup_marks_and_bounds() {
         let provider = WsProvider::new_http(Url::parse("http://localhost:8545").unwrap());
-        let (tx, _rx) = unbounded_channel();
-        let scanner = MempoolScanner::new(provider, tx);
+        let (tx, _rx) = channel(4);
+        let stats = Arc::new(StrategyStats::default());
+        let scanner = MempoolScanner::new(provider, tx, stats, 4);
 
         let h1 = B256::from_slice(&[1u8; 32]);
         let h2 = B256::from_slice(&[2u8; 32]);

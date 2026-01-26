@@ -34,6 +34,19 @@ pub struct PlanHashes {
     pub main: B256,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NonceLease {
+    pub block: u64,
+    pub base: u64,
+    pub count: u64,
+}
+
+impl NonceLease {
+    pub fn end(&self) -> u64 {
+        self.base.saturating_add(self.count)
+    }
+}
+
 pub struct BundleState {
     pub block: u64,
     pub next_nonce: u64,
@@ -169,6 +182,7 @@ impl StrategyExecutor {
         &self,
         plan: BundlePlan,
         touched_pools: Vec<Address>,
+        lease: NonceLease,
     ) -> Result<Option<PlanHashes>, AppError> {
         let mut state_guard = self.bundle_state.lock().await;
         let mut block = self.current_block.load(Ordering::Relaxed);
@@ -185,14 +199,15 @@ impl StrategyExecutor {
             .map(|s| s.block != block)
             .unwrap_or(true)
         {
-            let base_nonce = self.nonce_manager.get_base_nonce(block).await?;
             *state_guard = Some(BundleState {
                 block,
-                next_nonce: base_nonce,
+                next_nonce: lease.end(),
                 raw: Vec::new(),
                 touched_pools: HashSet::new(),
                 send_pending: false,
             });
+        } else if let Some(state) = state_guard.as_mut() {
+            state.next_nonce = state.next_nonce.max(lease.end());
         }
 
         let state = state_guard.as_mut().unwrap();
@@ -204,11 +219,17 @@ impl StrategyExecutor {
             }
         }
 
-        let mut nonce = state.next_nonce;
+        let mut nonce = lease.base;
+        let lease_end = lease.end();
         let mut hashes = PlanHashes::default();
         let mut new_raw: Vec<Vec<u8>> = Vec::new();
 
         if let Some(mut fr) = plan.front_run {
+            let next = fr.nonce.unwrap_or(nonce);
+            if next < nonce || next >= lease_end {
+                return Err(AppError::Strategy("front-run nonce outside lease".into()));
+            }
+            nonce = next;
             fr.nonce = Some(nonce);
             let fallback = fr.access_list.clone().unwrap_or_default();
             let (raw, _, hash) = self.sign_with_access_list(fr, fallback).await?;
@@ -222,6 +243,11 @@ impl StrategyExecutor {
         }
 
         if let Some(mut approval) = plan.approval {
+            let next = approval.nonce.unwrap_or(nonce);
+            if next < nonce || next >= lease_end {
+                return Err(AppError::Strategy("approval nonce outside lease".into()));
+            }
+            nonce = next;
             approval.nonce = Some(nonce);
             let fallback = approval.access_list.clone().unwrap_or_default();
             let (raw, _, hash) = self.sign_with_access_list(approval, fallback).await?;
@@ -231,14 +257,25 @@ impl StrategyExecutor {
         }
 
         let mut main = plan.main;
-        main.nonce = Some(nonce);
+        let next = main.nonce.unwrap_or(nonce);
+        if next < nonce || next >= lease_end {
+            return Err(AppError::Strategy("main nonce outside lease".into()));
+        }
+        main.nonce = Some(next);
+        nonce = next;
         let fallback = main.access_list.clone().unwrap_or_default();
         let (raw, _, hash) = self.sign_with_access_list(main, fallback).await?;
         hashes.main = hash;
         nonce = nonce.saturating_add(1);
         new_raw.push(raw);
 
-        state.next_nonce = nonce;
+        if nonce > lease_end {
+            return Err(AppError::Strategy(
+                "nonce lease exhausted while building bundle".into(),
+            ));
+        }
+
+        state.next_nonce = state.next_nonce.max(nonce.max(lease_end));
         state.raw.extend(new_raw);
         for pool in touched_pools {
             state.touched_pools.insert(pool);
@@ -329,10 +366,7 @@ impl StrategyExecutor {
         self.nonce_manager.get_base_nonce(block).await
     }
 
-    pub async fn lease_nonces(&self, count: u64) -> Result<u64, AppError> {
-        if count == 0 {
-            return self.peek_nonce_for_sim().await;
-        }
+    pub async fn lease_nonces(&self, count: u64) -> Result<NonceLease, AppError> {
         let mut block = self.current_block.load(Ordering::Relaxed);
         if block == 0 {
             block = self
@@ -354,7 +388,13 @@ impl StrategyExecutor {
         }
         let state = guard.as_mut().unwrap();
         let start = state.next_nonce;
-        state.next_nonce = state.next_nonce.saturating_add(count);
-        Ok(start)
+        if count > 0 {
+            state.next_nonce = state.next_nonce.saturating_add(count);
+        }
+        Ok(NonceLease {
+            block,
+            base: start,
+            count,
+        })
     }
 }

@@ -17,6 +17,7 @@ pub struct SimulationOutcome {
     pub success: bool,
     pub gas_used: u64,
     pub return_data: Vec<u8>,
+    pub reason: Option<String>,
 }
 
 #[derive(Clone)]
@@ -68,6 +69,20 @@ impl Simulator {
                         success,
                         gas_used: call.gas_used,
                         return_data: call.return_data.to_vec(),
+                        reason: if success {
+                            None
+                        } else {
+                            call.error
+                                .as_ref()
+                                .map(|e| format!("{:?}", e))
+                                .or_else(|| {
+                                    if call.return_data.is_empty() {
+                                        None
+                                    } else {
+                                        Some(decode_flashloan_revert(&call.return_data))
+                                    }
+                                })
+                        },
                     });
                 }
             }
@@ -76,10 +91,12 @@ impl Simulator {
         let gas_used = match self.provider.estimate_gas(req.clone()).await {
             Ok(g) => g,
             Err(e) => {
+                let msg = format!("estimate_gas failed: {e}");
                 return Ok(SimulationOutcome {
                     success: false,
                     gas_used: 0,
-                    return_data: format!("estimate_gas failed: {e}").into_bytes(),
+                    return_data: msg.clone().into_bytes(),
+                    reason: Some(msg),
                 });
             }
         };
@@ -88,13 +105,20 @@ impl Simulator {
 
         let (success, return_data) = match call_res {
             Ok(bytes) => (true, bytes.to_vec()),
-            Err(_) => (false, Vec::new()),
+            Err(e) => (false, format!("eth_call failed: {e}").into_bytes()),
+        };
+
+        let reason = if success {
+            None
+        } else {
+            Some(decode_flashloan_revert(&return_data))
         };
 
         Ok(SimulationOutcome {
             success,
             gas_used,
             return_data,
+            reason,
         })
     }
 
@@ -145,6 +169,20 @@ impl Simulator {
                             success,
                             gas_used: tx.gas_used,
                             return_data: tx.return_data.to_vec(),
+                            reason: if success {
+                                None
+                            } else {
+                                tx.error
+                                    .as_ref()
+                                    .map(|e| format!("{:?}", e))
+                                    .or_else(|| {
+                                        if tx.return_data.is_empty() {
+                                            None
+                                        } else {
+                                            Some(decode_flashloan_revert(&tx.return_data))
+                                        }
+                                    })
+                            },
                         });
                     }
                 }

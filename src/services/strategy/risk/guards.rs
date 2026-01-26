@@ -97,6 +97,19 @@ impl StrategyExecutor {
         gross_profit_wei: U256,
         wallet_balance: U256,
     ) -> bool {
+        if gas_cost_wei.is_zero() {
+            return !gross_profit_wei.is_zero();
+        }
+        if gross_profit_wei <= gas_cost_wei {
+            return false;
+        }
+        let margin = gross_profit_wei.saturating_sub(gas_cost_wei);
+        let min_margin = gas_cost_wei
+            .saturating_mul(U256::from(1_200u64))
+            / U256::from(10_000u64);
+        if margin < min_margin {
+            return false;
+        }
         if gross_profit_wei.is_zero() {
             return false;
         }
