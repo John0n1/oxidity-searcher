@@ -228,7 +228,8 @@ impl StrategyExecutor {
         remaining < overhead_cost
     }
 
-    pub(crate) async fn build_flashloan_transaction(
+    // Exposed for integration testing of encoded flashloan callbacks.
+    pub async fn build_flashloan_transaction(
         &self,
         executor: Address,
         asset: Address,

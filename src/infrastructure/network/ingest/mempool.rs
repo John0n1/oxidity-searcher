@@ -58,7 +58,10 @@ impl MempoolScanner {
                     let mut stream = sub.into_stream();
                     while let Some(tx) = stream.next().await {
                         if tx.input().len() > 4 && self.mark_seen(tx.tx_hash()).await {
-                            self.enqueue(StrategyWork::Mempool(tx));
+                            self.enqueue(StrategyWork::Mempool {
+                                tx,
+                                received_at: std::time::Instant::now(),
+                            });
                         }
                     }
                     tracing::warn!(target: "mempool", "Pending tx subscription ended, retrying after backoff");
@@ -95,7 +98,10 @@ impl MempoolScanner {
                 Ok(txs) => {
                     for tx in txs {
                         if tx.input().len() > 4 && self.mark_seen(tx.tx_hash()).await {
-                            self.enqueue(StrategyWork::Mempool(tx));
+                            self.enqueue(StrategyWork::Mempool {
+                                tx,
+                                received_at: std::time::Instant::now(),
+                            });
                         }
                     }
                 }

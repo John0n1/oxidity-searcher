@@ -10,6 +10,7 @@
 // 3) cargo test --test pipeline_mev_share_v3 -- --ignored
 
 use alloy::primitives::{Address, Bytes, B256, U256, aliases::U24, U160};
+use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolCall;
 use oxidity_builder::common::constants::WETH_MAINNET;
@@ -34,23 +35,25 @@ use tokio::sync::{broadcast, mpsc};
 use url::Url;
 
 #[tokio::test]
-#[ignore]
 async fn mev_share_v3_pipeline_manual() {
-    let rpc = match std::env::var("RPC_URL_1") {
+    use std::env;
+
+    let rpc = match env::var("RPC_URL_1") {
         Ok(v) => v,
         Err(_) => {
-            eprintln!("set RPC_URL_1 / WEBSOCKET_URL_1 to run this harness");
+            eprintln!("skipping: set RPC_URL_1 / WEBSOCKET_URL_1 (Nethermind/Anvil)");
             return;
         }
     };
-    let _ws = match std::env::var("WEBSOCKET_URL_1") {
+    let _ws = match env::var("WEBSOCKET_URL_1") {
         Ok(v) => v,
         Err(_) => {
-            eprintln!("set WEBSOCKET_URL_1 to run this harness");
+            eprintln!("skipping: set WEBSOCKET_URL_1 (Nethermind/Anvil)");
             return;
         }
     };
-    let wallet_key = std::env::var("WALLET_KEY").unwrap_or_else(|_| {
+    let wallet_key = env::var("WALLET_KEY").unwrap_or_else(|_| {
+        // dev key funded by most test nodes; change via env for production‑like runs.
         "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d".to_string()
     });
 
@@ -83,6 +86,9 @@ async fn mev_share_v3_pipeline_manual() {
         Address::from_str("E592427A0AEce92De3Edee1F18E0157C05861564").expect("router addr");
     router_allowlist.insert(uni_v3_router);
 
+    // Discover chain id from the node so we don't assume mainnet.
+    let chain_id = http.get_chain_id().await.unwrap_or(1u64);
+
     let exec = StrategyExecutor::new(
         rx,
         block_rx,
@@ -92,7 +98,7 @@ async fn mev_share_v3_pipeline_manual() {
         portfolio,
         gas_oracle,
         price_feed,
-        1,
+        chain_id,
         200,
         simulator,
         token_manager,
@@ -141,6 +147,9 @@ async fn mev_share_v3_pipeline_manual() {
 
     let exec = Arc::new(exec);
     exec.clone()
-        .process_work(StrategyWork::MevShareHint(hint))
+        .process_work(StrategyWork::MevShareHint {
+            hint,
+            received_at: std::time::Instant::now(),
+        })
         .await;
 }

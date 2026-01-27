@@ -225,6 +225,32 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
     let skip_gas_cap = stats.skip_gas_cap.load(std::sync::atomic::Ordering::Relaxed);
     let skip_sim_failed = stats.skip_sim_failed.load(std::sync::atomic::Ordering::Relaxed);
     let skip_profit_guard = stats.skip_profit_guard.load(std::sync::atomic::Ordering::Relaxed);
+    let nonce_loads = stats
+        .nonce_state_loads
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let nonce_load_fail = stats
+        .nonce_state_load_fail
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let nonce_persist = stats
+        .nonce_state_persist
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let nonce_persist_fail = stats
+        .nonce_state_persist_fail
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let sim_sum = stats.sim_latency_ms_sum.load(std::sync::atomic::Ordering::Relaxed);
+    let sim_count = stats.sim_latency_ms_count.load(std::sync::atomic::Ordering::Relaxed);
+    let sim_sum_mem = stats
+        .sim_latency_ms_sum_mempool
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let sim_count_mem = stats
+        .sim_latency_ms_count_mempool
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let sim_sum_mev = stats
+        .sim_latency_ms_sum_mevshare
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let sim_count_mev = stats
+        .sim_latency_ms_count_mevshare
+        .load(std::sync::atomic::Ordering::Relaxed);
     let queue_depth = stats.ingest_queue_depth.load(std::sync::atomic::Ordering::Relaxed);
     let queue_dropped = stats.ingest_queue_dropped.load(std::sync::atomic::Ordering::Relaxed);
     let queue_full = stats.ingest_queue_full.load(std::sync::atomic::Ordering::Relaxed);
@@ -240,6 +266,16 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
             "# TYPE strategy_skip_gas_cap counter\nstrategy_skip_gas_cap {}\n",
             "# TYPE strategy_skip_sim_failed counter\nstrategy_skip_sim_failed {}\n",
             "# TYPE strategy_skip_profit_guard counter\nstrategy_skip_profit_guard {}\n",
+            "# TYPE nonce_state_loads counter\nnonce_state_loads {}\n",
+            "# TYPE nonce_state_load_fail counter\nnonce_state_load_fail {}\n",
+            "# TYPE nonce_state_persist counter\nnonce_state_persist {}\n",
+            "# TYPE nonce_state_persist_fail counter\nnonce_state_persist_fail {}\n",
+            "# TYPE sim_latency_ms_sum counter\nsim_latency_ms_sum {}\n",
+            "# TYPE sim_latency_ms_count counter\nsim_latency_ms_count {}\n",
+            "# TYPE sim_latency_ms_sum_mempool counter\nsim_latency_ms_sum_mempool {}\n",
+            "# TYPE sim_latency_ms_count_mempool counter\nsim_latency_ms_count_mempool {}\n",
+            "# TYPE sim_latency_ms_sum_mevshare counter\nsim_latency_ms_sum_mevshare {}\n",
+            "# TYPE sim_latency_ms_count_mevshare counter\nsim_latency_ms_count_mevshare {}\n",
             "# TYPE ingest_queue_depth gauge\ningest_queue_depth {}\n",
             "# TYPE ingest_queue_dropped counter\ningest_queue_dropped {}\n",
             "# TYPE ingest_queue_full counter\ningest_queue_full {}\n",
@@ -254,6 +290,16 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
         skip_gas_cap,
         skip_sim_failed,
         skip_profit_guard,
+        nonce_loads,
+        nonce_load_fail,
+        nonce_persist,
+        nonce_persist_fail,
+        sim_sum,
+        sim_count,
+        sim_sum_mem,
+        sim_count_mem,
+        sim_sum_mev,
+        sim_count_mev,
         queue_depth,
         queue_dropped,
         queue_full,
@@ -291,6 +337,32 @@ fn render_dashboard_json(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioMa
     let skip_gas_cap = stats.skip_gas_cap.load(std::sync::atomic::Ordering::Relaxed);
     let skip_sim_failed = stats.skip_sim_failed.load(std::sync::atomic::Ordering::Relaxed);
     let skip_profit_guard = stats.skip_profit_guard.load(std::sync::atomic::Ordering::Relaxed);
+    let nonce_loads = stats
+        .nonce_state_loads
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let nonce_load_fail = stats
+        .nonce_state_load_fail
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let nonce_persist = stats
+        .nonce_state_persist
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let nonce_persist_fail = stats
+        .nonce_state_persist_fail
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let sim_sum = stats.sim_latency_ms_sum.load(std::sync::atomic::Ordering::Relaxed);
+    let sim_count = stats.sim_latency_ms_count.load(std::sync::atomic::Ordering::Relaxed);
+    let sim_sum_mem = stats
+        .sim_latency_ms_sum_mempool
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let sim_count_mem = stats
+        .sim_latency_ms_count_mempool
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let sim_sum_mev = stats
+        .sim_latency_ms_sum_mevshare
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let sim_count_mev = stats
+        .sim_latency_ms_count_mevshare
+        .load(std::sync::atomic::Ordering::Relaxed);
     let success_rate = if submitted > 0 {
         ((submitted.saturating_sub(failed)) as f64) / (submitted as f64) * 100.0
     } else {
@@ -328,6 +400,16 @@ fn render_dashboard_json(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioMa
         "skipGasCap": skip_gas_cap,
         "skipSimulation": skip_sim_failed,
         "skipProfitGuard": skip_profit_guard,
+        "nonceStateLoads": nonce_loads,
+        "nonceStateLoadFail": nonce_load_fail,
+        "nonceStatePersist": nonce_persist,
+        "nonceStatePersistFail": nonce_persist_fail,
+        "simLatencyMsSum": sim_sum,
+        "simLatencyMsCount": sim_count,
+        "simLatencyMsSumMempool": sim_sum_mem,
+        "simLatencyMsCountMempool": sim_count_mem,
+        "simLatencyMsSumMevShare": sim_sum_mev,
+        "simLatencyMsCountMevShare": sim_count_mev,
         "netProfitEth": total_profit,
         "netProfitByChain": net_profit_by_chain,
         "tokenProfit": token_profit,

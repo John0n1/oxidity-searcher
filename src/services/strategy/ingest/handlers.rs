@@ -35,13 +35,13 @@ impl StrategyExecutor {
         self.safety_guard.check()?;
 
         let outcome = match work {
-            StrategyWork::Mempool(tx) => {
+            StrategyWork::Mempool { tx, received_at } => {
                 let from = tx.from();
-                let res = self.evaluate_mempool_tx(&tx).await;
+                let res = self.evaluate_mempool_tx(&tx, received_at).await;
                 (res, Some(from), Some(tx.tx_hash()))
             }
-            StrategyWork::MevShareHint(hint) => {
-                let res = self.evaluate_mev_share_hint(&hint).await;
+            StrategyWork::MevShareHint { hint, received_at } => {
+                let res = self.evaluate_mev_share_hint(&hint, received_at).await;
                 (res, hint.from, Some(hint.tx_hash))
             }
         };
@@ -145,7 +145,11 @@ impl StrategyExecutor {
         Some((direction, target_token))
     }
 
-    async fn evaluate_mempool_tx(&self, tx: &Transaction) -> Result<Option<String>, AppError> {
+    async fn evaluate_mempool_tx(
+        &self,
+        tx: &Transaction,
+        received_at: std::time::Instant,
+    ) -> Result<Option<String>, AppError> {
         let to_addr = match tx.kind() {
             TxKind::Call(addr) => addr,
             TxKind::Create => return Ok(None),
@@ -218,6 +222,7 @@ impl StrategyExecutor {
             .with_balance(self.signer.address(), parts.sim_balance)
             .with_nonce(self.signer.address(), lease.base);
 
+        let sim_start = received_at;
         let profit = match self
             .simulate_and_score(
                 bundle_requests,
@@ -233,6 +238,8 @@ impl StrategyExecutor {
             Some(p) => p,
             None => return Ok(None),
         };
+        let sim_ms = sim_start.elapsed().as_millis() as u64;
+        self.stats.record_sim_latency("mempool", sim_ms);
 
         tracing::info!(
             target: "strategy",
@@ -382,6 +389,7 @@ impl StrategyExecutor {
 async fn evaluate_mev_share_hint(
     &self,
     hint: &MevShareHint,
+    received_at: std::time::Instant,
 ) -> Result<Option<String>, AppError> {
     if !self.router_allowlist.contains(&hint.router) {
         self.log_skip("unknown_router", &format!("to={:#x}", hint.router));
@@ -463,6 +471,7 @@ async fn evaluate_mev_share_hint(
         .with_balance(self.signer.address(), parts.sim_balance)
         .with_nonce(self.signer.address(), lease.base);
 
+    let sim_start = received_at;
     let profit = match self
         .simulate_and_score(
             bundle_requests,
@@ -478,6 +487,8 @@ async fn evaluate_mev_share_hint(
         Some(p) => p,
         None => return Ok(None),
     };
+    let sim_ms = sim_start.elapsed().as_millis() as u64;
+    self.stats.record_sim_latency("mev_share", sim_ms);
 
     tracing::info!(
         target: "strategy",

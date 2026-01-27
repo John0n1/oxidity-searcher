@@ -35,8 +35,14 @@ use tokio::sync::{Mutex, Semaphore, broadcast::Receiver as BroadcastReceiver, mp
 
 #[derive(Debug)]
 pub enum StrategyWork {
-    Mempool(Transaction),
-    MevShareHint(MevShareHint),
+    Mempool {
+        tx: Transaction,
+        received_at: std::time::Instant,
+    },
+    MevShareHint {
+        hint: MevShareHint,
+        received_at: std::time::Instant,
+    },
 }
 
 pub(crate) const VICTIM_FEE_BUMP_BPS: u64 = 11_000;
@@ -64,6 +70,16 @@ pub struct StrategyStats {
     pub ingest_queue_full: AtomicU64,
     pub ingest_backpressure: AtomicU64,
     pub bundles: StdMutex<Vec<BundleTelemetry>>,
+    pub nonce_state_loads: AtomicU64,
+    pub nonce_state_load_fail: AtomicU64,
+    pub nonce_state_persist: AtomicU64,
+    pub nonce_state_persist_fail: AtomicU64,
+    pub sim_latency_ms_sum: AtomicU64,
+    pub sim_latency_ms_count: AtomicU64,
+    pub sim_latency_ms_sum_mempool: AtomicU64,
+    pub sim_latency_ms_count_mempool: AtomicU64,
+    pub sim_latency_ms_sum_mevshare: AtomicU64,
+    pub sim_latency_ms_count_mevshare: AtomicU64,
 }
 
 #[derive(Clone, Debug)]
@@ -82,6 +98,28 @@ impl StrategyStats {
         guard.push(entry);
         if guard.len() > 50 {
             guard.remove(0);
+        }
+    }
+
+    pub fn record_sim_latency(&self, source: &str, ms: u64) {
+        self.sim_latency_ms_sum
+            .fetch_add(ms, Ordering::Relaxed);
+        self.sim_latency_ms_count
+            .fetch_add(1, Ordering::Relaxed);
+        match source {
+            "mempool" => {
+                self.sim_latency_ms_sum_mempool
+                    .fetch_add(ms, Ordering::Relaxed);
+                self.sim_latency_ms_count_mempool
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            "mev_share" => {
+                self.sim_latency_ms_sum_mevshare
+                    .fetch_add(ms, Ordering::Relaxed);
+                self.sim_latency_ms_count_mevshare
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
         }
     }
 }
@@ -124,6 +162,90 @@ pub struct StrategyExecutor {
 }
 
 impl StrategyExecutor {
+    fn serialize_pools(pools: &HashSet<Address>) -> String {
+        pools
+            .iter()
+            .map(|a| format!("{:#x}", a))
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    fn deserialize_pools(s: &str) -> HashSet<Address> {
+        s.split(',')
+            .filter_map(|p| {
+                if p.is_empty() {
+                    None
+                } else {
+                    p.parse::<Address>().ok()
+                }
+            })
+            .collect()
+    }
+
+    pub(crate) async fn persist_nonce_state(
+        &self,
+        block: u64,
+        next_nonce: u64,
+        touched: &HashSet<Address>,
+    ) {
+        let pools = Self::serialize_pools(touched);
+        match self
+            .db
+            .upsert_nonce_state(self.chain_id, block, next_nonce, &pools)
+            .await
+        {
+            Ok(_) => {
+                self.stats
+                    .nonce_state_persist
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            Err(e) => {
+                self.stats
+                    .nonce_state_persist_fail
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(target: "bundle_state", error=%e, "Persist nonce state failed");
+            }
+        }
+    }
+
+    async fn restore_bundle_state(&self) -> Result<(), AppError> {
+        let loaded = self.db.load_nonce_state(self.chain_id).await;
+        if let Ok(Some((block, next, touched_raw))) = loaded {
+            let touched = Self::deserialize_pools(&touched_raw);
+            {
+                let mut guard = self.bundle_state.lock().await;
+                *guard = Some(BundleState {
+                    block,
+                    next_nonce: next,
+                    raw: Vec::new(),
+                    touched_pools: touched,
+                    send_pending: false,
+                });
+            }
+            self.current_block.store(block, Ordering::Relaxed);
+            self.stats
+                .nonce_state_loads
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::info!(
+                target: "bundle_state",
+                block,
+                next_nonce = next,
+                "Restored nonce state from DB"
+            );
+        } else if let Ok(None) = loaded {
+            self.stats
+                .nonce_state_loads
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::debug!(target: "bundle_state", "No persisted nonce state found");
+        } else if let Err(e) = loaded {
+            self.stats
+                .nonce_state_load_fail
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(target: "bundle_state", error=%e, "Failed to load nonce state");
+        }
+        Ok(())
+    }
+
     pub(in crate::services::strategy) fn is_nonce_gap_error(err: &AppError) -> bool {
         let msg = err.to_string().to_lowercase();
         msg.contains("nonce too high")
@@ -284,6 +406,9 @@ impl StrategyExecutor {
 
         let executor = Arc::new(self);
 
+        // Attempt to restore persisted nonce state before processing work.
+        let _ = executor.restore_bundle_state().await;
+
         // Spawn a lightweight block watcher so work processing never waits on block stream.
         let block_exec = executor.clone();
         tokio::spawn(async move {
@@ -339,6 +464,11 @@ impl StrategyExecutor {
                     if prev != number as u64 {
                         let mut guard = self.bundle_state.lock().await;
                         *guard = None;
+                        // Persist fresh state baseline for the new block.
+                        if let Ok(base) = self.nonce_manager.get_base_nonce(number as u64).await {
+                            self.persist_nonce_state(number as u64, base, &HashSet::new())
+                                .await;
+                        }
                     }
                     let _ = self.maybe_rebalance_inventory().await;
                 }
@@ -829,5 +959,49 @@ mod tests {
             "revm".to_string(),
             8,
         )
+    }
+
+    #[test]
+    fn records_simulation_latency_metrics() {
+        let stats = StrategyStats::default();
+        stats.record_sim_latency("mempool", 42);
+        stats.record_sim_latency("mev_share", 58);
+
+        assert_eq!(
+            stats
+                .sim_latency_ms_sum
+                .load(std::sync::atomic::Ordering::Relaxed),
+            100
+        );
+        assert_eq!(
+            stats
+                .sim_latency_ms_count
+                .load(std::sync::atomic::Ordering::Relaxed),
+            2
+        );
+        assert_eq!(
+            stats
+                .sim_latency_ms_sum_mempool
+                .load(std::sync::atomic::Ordering::Relaxed),
+            42
+        );
+        assert_eq!(
+            stats
+                .sim_latency_ms_count_mempool
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            stats
+                .sim_latency_ms_sum_mevshare
+                .load(std::sync::atomic::Ordering::Relaxed),
+            58
+        );
+        assert_eq!(
+            stats
+                .sim_latency_ms_count_mevshare
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 }

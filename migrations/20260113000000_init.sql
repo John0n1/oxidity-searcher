@@ -37,6 +37,15 @@ CREATE TABLE IF NOT EXISTS market_prices (
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Persisted bundle state to avoid nonce reuse after restarts
+CREATE TABLE IF NOT EXISTS nonce_state (
+    chain_id INTEGER PRIMARY KEY,
+    block_number INTEGER NOT NULL,
+    next_nonce INTEGER NOT NULL,
+    touched_pools TEXT NOT NULL,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_tx_hash ON transactions(tx_hash);
 CREATE INDEX IF NOT EXISTS idx_profit_strategy ON profit_records(strategy);

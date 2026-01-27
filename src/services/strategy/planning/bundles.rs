@@ -280,6 +280,9 @@ impl StrategyExecutor {
         for pool in touched_pools {
             state.touched_pools.insert(pool);
         }
+        // Persist state so a restart does not re-use nonces or pools.
+        self.persist_nonce_state(state.block, state.next_nonce, &state.touched_pools)
+            .await;
         let bundle_len = state.raw.len();
         drop(state_guard);
 
@@ -391,6 +394,9 @@ impl StrategyExecutor {
         if count > 0 {
             state.next_nonce = state.next_nonce.saturating_add(count);
         }
+        // Persist reservation so restart does not double-spend nonces.
+        self.persist_nonce_state(state.block, state.next_nonce, &state.touched_pools)
+            .await;
         Ok(NonceLease {
             block,
             base: start,

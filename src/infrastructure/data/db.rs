@@ -61,6 +61,59 @@ impl Database {
         Ok(id)
     }
 
+    pub async fn upsert_nonce_state(
+        &self,
+        chain_id: u64,
+        block_number: u64,
+        next_nonce: u64,
+        touched_pools: &str,
+    ) -> Result<(), AppError> {
+        let chain_id_i64 = chain_id as i64;
+        let block_i64 = block_number as i64;
+        let next_i64 = next_nonce as i64;
+        sqlx::query(
+            r#"
+            INSERT INTO nonce_state (chain_id, block_number, next_nonce, touched_pools)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(chain_id) DO UPDATE SET
+                block_number=excluded.block_number,
+                next_nonce=excluded.next_nonce,
+                touched_pools=excluded.touched_pools,
+                updated_at=CURRENT_TIMESTAMP
+            "#,
+        )
+        .bind(chain_id_i64)
+        .bind(block_i64)
+        .bind(next_i64)
+        .bind(touched_pools)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Initialization(format!("Nonce state upsert failed: {}", e)))?;
+        Ok(())
+    }
+
+    pub async fn load_nonce_state(
+        &self,
+        chain_id: u64,
+    ) -> Result<Option<(u64, u64, String)>, AppError> {
+        let chain_id_i64 = chain_id as i64;
+        let row = sqlx::query(
+            "SELECT block_number, next_nonce, touched_pools FROM nonce_state WHERE chain_id = ?",
+        )
+        .bind(chain_id_i64)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| AppError::Initialization(format!("Nonce state load failed: {}", e)))?;
+
+        if let Some(row) = row {
+            let block: i64 = row.get("block_number");
+            let next: i64 = row.get("next_nonce");
+            let touched: String = row.get("touched_pools");
+            return Ok(Some((block as u64, next as u64, touched)));
+        }
+        Ok(None)
+    }
+
     pub async fn get_recent_txs(&self, limit: i64) -> Result<Vec<TransactionRecord>, AppError> {
         let recs = sqlx::query_as::<_, TransactionRecord>(
             "SELECT * FROM transactions ORDER BY timestamp DESC LIMIT ?",

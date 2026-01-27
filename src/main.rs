@@ -100,21 +100,36 @@ async fn main() -> Result<(), AppError> {
 
     for (idx, chain_id) in settings.chains.iter().copied().enumerate() {
         let ipc_url = settings.get_ipc_url(chain_id);
-        let ws_url = match settings.get_ws_url(chain_id) {
-            Ok(url) => Some(url),
-            Err(e) => {
-                tracing::warn!(
-                    target: "rpc",
-                    chain_id,
-                    error = %e,
-                    "WS URL unavailable; continuing without WS fallback"
-                );
-                None
-            }
+        let (ws_provider, http_provider) = if let Some(ipc_path) = ipc_url {
+            let ipc = ConnectionFactory::ipc(&ipc_path).await.map_err(|e| {
+                AppError::Connection(format!(
+                    "IPC required for chain {chain_id} at {ipc_path} but failed: {e}"
+                ))
+            })?;
+            let ws_provider = match settings.get_ws_url(chain_id) {
+                Ok(url) => ConnectionFactory::ws(&url).await.unwrap_or_else(|e| {
+                    tracing::warn!(target: "rpc", chain_id, error=%e, "WS unavailable, using IPC for streaming");
+                    ipc.clone()
+                }),
+                Err(_) => ipc.clone(),
+            };
+            (ws_provider, ipc)
+        } else {
+            let ws_url = match settings.get_ws_url(chain_id) {
+                Ok(url) => Some(url),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "rpc",
+                        chain_id,
+                        error = %e,
+                        "WS URL unavailable; continuing without WS fallback"
+                    );
+                    None
+                }
+            };
+            let rpc_url = settings.get_rpc_url(chain_id)?;
+            ConnectionFactory::preferred(None, ws_url.as_deref(), &rpc_url).await?
         };
-        let rpc_url = settings.get_rpc_url(chain_id)?;
-        let (ws_provider, http_provider) =
-            ConnectionFactory::preferred(ipc_url.as_deref(), ws_url.as_deref(), &rpc_url).await?;
 
         let portfolio = Arc::new(PortfolioManager::new(http_provider.clone(), wallet_address));
         let nonce_manager = NonceManager::new(http_provider.clone(), wallet_address);

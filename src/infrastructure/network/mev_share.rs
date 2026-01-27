@@ -227,7 +227,10 @@ impl MevShareClient {
                 let key = hint.tx_hash;
                 if self.seen.insert(key) {
                     self.record_seen(key).await;
-                    self.enqueue(StrategyWork::MevShareHint(hint));
+                    self.enqueue(StrategyWork::MevShareHint {
+                        hint,
+                        received_at: std::time::Instant::now(),
+                    });
                 }
             }
         }
