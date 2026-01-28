@@ -155,10 +155,20 @@ impl MevShareClient {
         let resp = self
             .client
             .get(&self.base_url)
+            .header("Accept", "text/event-stream")
             .send()
             .await
             .map_err(|e| AppError::Connection(format!("SSE connect failed: {}", e)))?;
         if !resp.status().is_success() {
+            if let Some(delay) = retry_after_delay(&resp) {
+                tracing::warn!(
+                    target: "mev_share",
+                    delay_secs = %delay.as_secs(),
+                    status = %resp.status(),
+                    "SSE returned non-success; honoring Retry-After"
+                );
+                sleep(delay).await;
+            }
             return Err(AppError::Connection(format!(
                 "SSE returned status {}",
                 resp.status()
@@ -364,4 +374,12 @@ fn parse_u128_hex(s: &str) -> Option<u128> {
 
 fn parse_u64_hex(s: &str) -> Option<u64> {
     u64::from_str_radix(strip_0x(s), 16).ok()
+}
+
+fn retry_after_delay(resp: &reqwest::Response) -> Option<Duration> {
+    resp.headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_secs)
 }

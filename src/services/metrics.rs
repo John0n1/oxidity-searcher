@@ -220,11 +220,21 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
     let submitted = stats.submitted.load(std::sync::atomic::Ordering::Relaxed);
     let skipped = stats.skipped.load(std::sync::atomic::Ordering::Relaxed);
     let failed = stats.failed.load(std::sync::atomic::Ordering::Relaxed);
-    let skip_decode = stats.skip_decode_failed.load(std::sync::atomic::Ordering::Relaxed);
-    let skip_unknown = stats.skip_unknown_router.load(std::sync::atomic::Ordering::Relaxed);
-    let skip_gas_cap = stats.skip_gas_cap.load(std::sync::atomic::Ordering::Relaxed);
-    let skip_sim_failed = stats.skip_sim_failed.load(std::sync::atomic::Ordering::Relaxed);
-    let skip_profit_guard = stats.skip_profit_guard.load(std::sync::atomic::Ordering::Relaxed);
+    let skip_decode = stats
+        .skip_decode_failed
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let skip_unknown = stats
+        .skip_unknown_router
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let skip_gas_cap = stats
+        .skip_gas_cap
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let skip_sim_failed = stats
+        .skip_sim_failed
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let skip_profit_guard = stats
+        .skip_profit_guard
+        .load(std::sync::atomic::Ordering::Relaxed);
     let nonce_loads = stats
         .nonce_state_loads
         .load(std::sync::atomic::Ordering::Relaxed);
@@ -237,8 +247,12 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
     let nonce_persist_fail = stats
         .nonce_state_persist_fail
         .load(std::sync::atomic::Ordering::Relaxed);
-    let sim_sum = stats.sim_latency_ms_sum.load(std::sync::atomic::Ordering::Relaxed);
-    let sim_count = stats.sim_latency_ms_count.load(std::sync::atomic::Ordering::Relaxed);
+    let sim_sum = stats
+        .sim_latency_ms_sum
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let sim_count = stats
+        .sim_latency_ms_count
+        .load(std::sync::atomic::Ordering::Relaxed);
     let sim_sum_mem = stats
         .sim_latency_ms_sum_mempool
         .load(std::sync::atomic::Ordering::Relaxed);
@@ -251,10 +265,18 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
     let sim_count_mev = stats
         .sim_latency_ms_count_mevshare
         .load(std::sync::atomic::Ordering::Relaxed);
-    let queue_depth = stats.ingest_queue_depth.load(std::sync::atomic::Ordering::Relaxed);
-    let queue_dropped = stats.ingest_queue_dropped.load(std::sync::atomic::Ordering::Relaxed);
-    let queue_full = stats.ingest_queue_full.load(std::sync::atomic::Ordering::Relaxed);
-    let queue_backpressure = stats.ingest_backpressure.load(std::sync::atomic::Ordering::Relaxed);
+    let queue_depth = stats
+        .ingest_queue_depth
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let queue_dropped = stats
+        .ingest_queue_dropped
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let queue_full = stats
+        .ingest_queue_full
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let queue_backpressure = stats
+        .ingest_backpressure
+        .load(std::sync::atomic::Ordering::Relaxed);
     let mut body = format!(
         concat!(
             "# TYPE strategy_processed counter\nstrategy_processed {}\n",
@@ -328,15 +350,33 @@ fn render_dashboard_json(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioMa
     let submitted = stats.submitted.load(std::sync::atomic::Ordering::Relaxed);
     let skipped = stats.skipped.load(std::sync::atomic::Ordering::Relaxed);
     let failed = stats.failed.load(std::sync::atomic::Ordering::Relaxed);
-    let queue_depth = stats.ingest_queue_depth.load(std::sync::atomic::Ordering::Relaxed);
-    let queue_dropped = stats.ingest_queue_dropped.load(std::sync::atomic::Ordering::Relaxed);
-    let queue_full = stats.ingest_queue_full.load(std::sync::atomic::Ordering::Relaxed);
-    let queue_backpressure = stats.ingest_backpressure.load(std::sync::atomic::Ordering::Relaxed);
-    let skip_decode = stats.skip_decode_failed.load(std::sync::atomic::Ordering::Relaxed);
-    let skip_unknown = stats.skip_unknown_router.load(std::sync::atomic::Ordering::Relaxed);
-    let skip_gas_cap = stats.skip_gas_cap.load(std::sync::atomic::Ordering::Relaxed);
-    let skip_sim_failed = stats.skip_sim_failed.load(std::sync::atomic::Ordering::Relaxed);
-    let skip_profit_guard = stats.skip_profit_guard.load(std::sync::atomic::Ordering::Relaxed);
+    let queue_depth = stats
+        .ingest_queue_depth
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let queue_dropped = stats
+        .ingest_queue_dropped
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let queue_full = stats
+        .ingest_queue_full
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let queue_backpressure = stats
+        .ingest_backpressure
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let skip_decode = stats
+        .skip_decode_failed
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let skip_unknown = stats
+        .skip_unknown_router
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let skip_gas_cap = stats
+        .skip_gas_cap
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let skip_sim_failed = stats
+        .skip_sim_failed
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let skip_profit_guard = stats
+        .skip_profit_guard
+        .load(std::sync::atomic::Ordering::Relaxed);
     let nonce_loads = stats
         .nonce_state_loads
         .load(std::sync::atomic::Ordering::Relaxed);
@@ -349,8 +389,12 @@ fn render_dashboard_json(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioMa
     let nonce_persist_fail = stats
         .nonce_state_persist_fail
         .load(std::sync::atomic::Ordering::Relaxed);
-    let sim_sum = stats.sim_latency_ms_sum.load(std::sync::atomic::Ordering::Relaxed);
-    let sim_count = stats.sim_latency_ms_count.load(std::sync::atomic::Ordering::Relaxed);
+    let sim_sum = stats
+        .sim_latency_ms_sum
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let sim_count = stats
+        .sim_latency_ms_count
+        .load(std::sync::atomic::Ordering::Relaxed);
     let sim_sum_mem = stats
         .sim_latency_ms_sum_mempool
         .load(std::sync::atomic::Ordering::Relaxed);
@@ -463,11 +507,7 @@ impl RateLimiter {
 
     fn allow(&mut self, max_per_second: u32) -> bool {
         let now = Instant::now();
-        if now
-            .duration_since(self.window_start)
-            .as_secs_f64()
-            .ge(&1.0)
-        {
+        if now.duration_since(self.window_start).as_secs_f64().ge(&1.0) {
             self.window_start = now;
             self.count = 0;
         }
@@ -484,7 +524,6 @@ impl Default for RateLimiter {
         Self::new()
     }
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -11,10 +11,10 @@ use crate::services::strategy::bundles::BundlePlan;
 use crate::services::strategy::decode::{
     ObservedSwap, SwapDirection, decode_swap, decode_swap_input, direction, target_token,
 };
-use crate::services::strategy::planning::{ApproveTx, BackrunTx, FrontRunTx};
 use crate::services::strategy::planning::bundles::NonceLease;
-use crate::services::strategy::strategy::{StrategyExecutor, StrategyWork};
+use crate::services::strategy::planning::{ApproveTx, BackrunTx, FrontRunTx};
 use crate::services::strategy::strategy::BundleTelemetry;
+use crate::services::strategy::strategy::{StrategyExecutor, StrategyWork};
 use alloy::consensus::Transaction as ConsensusTx;
 use alloy::eips::eip2718::Encodable2718;
 use alloy::network::TransactionResponse;
@@ -351,6 +351,9 @@ impl StrategyExecutor {
                 profit.profit_eth_f64,
                 profit.gas_cost_eth_f64,
                 profit.net_profit_eth_f64,
+                &profit.gross_profit_wei.to_string(),
+                &profit.gas_cost_wei.to_string(),
+                &profit.net_profit_wei.to_string(),
             )
             .await?;
 
@@ -385,184 +388,185 @@ impl StrategyExecutor {
         Ok(Some(format!("{tx_hash:#x}")))
     }
 
+    async fn evaluate_mev_share_hint(
+        &self,
+        hint: &MevShareHint,
+        received_at: std::time::Instant,
+    ) -> Result<Option<String>, AppError> {
+        if !self.router_allowlist.contains(&hint.router) {
+            self.log_skip("unknown_router", &format!("to={:#x}", hint.router));
+            return Ok(None);
+        }
 
-async fn evaluate_mev_share_hint(
-    &self,
-    hint: &MevShareHint,
-    received_at: std::time::Instant,
-) -> Result<Option<String>, AppError> {
-    if !self.router_allowlist.contains(&hint.router) {
-        self.log_skip("unknown_router", &format!("to={:#x}", hint.router));
-        return Ok(None);
-    }
+        let Some(observed_swap) = decode_swap_input(hint.router, &hint.call_data, hint.value)
+        else {
+            self.log_skip("decode_failed", "unable to decode swap input");
+            return Ok(None);
+        };
+        let (direction, target_token) = match self.validate_swap(hint.router, &observed_swap) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let gas_limit_hint = hint.gas_limit.unwrap_or(220_000);
 
-    let Some(observed_swap) = decode_swap_input(hint.router, &hint.call_data, hint.value) else {
-        self.log_skip("decode_failed", "unable to decode swap input");
-        return Ok(None);
-    };
-    let (direction, target_token) = match self.validate_swap(hint.router, &observed_swap) {
-        Some(v) => v,
-        None => return Ok(None),
-    };
-    let gas_limit_hint = hint.gas_limit.unwrap_or(220_000);
+        let parts = match self
+            .build_components(
+                &observed_swap,
+                direction,
+                target_token,
+                gas_limit_hint,
+                hint.value,
+                (hint.max_fee_per_gas, hint.max_priority_fee_per_gas),
+            )
+            .await?
+        {
+            Some(p) => p,
+            None => return Ok(None),
+        };
 
-    let parts = match self
-        .build_components(
-            &observed_swap,
-            direction,
-            target_token,
-            gas_limit_hint,
-            hint.value,
-            (hint.max_fee_per_gas, hint.max_priority_fee_per_gas),
-        )
-        .await?
-    {
-        Some(p) => p,
-        None => return Ok(None),
-    };
+        let needed_nonces =
+            1u64 + parts.front_run.is_some() as u64 + parts.approval.is_some() as u64;
+        let lease = self.lease_nonces(needed_nonces).await?;
 
-    let needed_nonces = 1u64 + parts.front_run.is_some() as u64 + parts.approval.is_some() as u64;
-    let lease = self.lease_nonces(needed_nonces).await?;
+        let mut front_run = parts.front_run;
+        let mut approval = parts.approval;
+        let mut backrun = parts.backrun;
+        let mut executor_request = parts.executor_request;
+        let mut main_request = executor_request
+            .clone()
+            .unwrap_or_else(|| backrun.request.clone());
 
-    let mut front_run = parts.front_run;
-    let mut approval = parts.approval;
-    let mut backrun = parts.backrun;
-    let mut executor_request = parts.executor_request;
-    let mut main_request = executor_request
-        .clone()
-        .unwrap_or_else(|| backrun.request.clone());
+        Self::apply_nonce_plan(&lease, &mut front_run, &mut approval, &mut main_request)?;
+        if let Some(exec) = executor_request.as_mut() {
+            exec.nonce = main_request.nonce;
+        }
+        backrun.request.nonce = main_request.nonce;
 
-    Self::apply_nonce_plan(&lease, &mut front_run, &mut approval, &mut main_request)?;
-    if let Some(exec) = executor_request.as_mut() {
-        exec.nonce = main_request.nonce;
-    }
-    backrun.request.nonce = main_request.nonce;
+        let max_fee_hint = hint
+            .max_fee_per_gas
+            .unwrap_or(parts.gas_fees.max_fee_per_gas);
+        let max_prio_hint = hint
+            .max_priority_fee_per_gas
+            .unwrap_or(parts.gas_fees.max_priority_fee_per_gas);
+        let victim_request = TransactionRequest {
+            from: hint.from,
+            to: Some(TxKind::Call(hint.router)),
+            max_fee_per_gas: Some(max_fee_hint),
+            max_priority_fee_per_gas: Some(max_prio_hint),
+            gas: Some(gas_limit_hint),
+            value: Some(hint.value),
+            input: TransactionInput::new(hint.call_data.clone().into()),
+            nonce: None,
+            chain_id: Some(self.chain_id),
+            ..Default::default()
+        };
 
-    let max_fee_hint = hint
-        .max_fee_per_gas
-        .unwrap_or(parts.gas_fees.max_fee_per_gas);
-    let max_prio_hint = hint
-        .max_priority_fee_per_gas
-        .unwrap_or(parts.gas_fees.max_priority_fee_per_gas);
-    let victim_request = TransactionRequest {
-        from: hint.from,
-        to: Some(TxKind::Call(hint.router)),
-        max_fee_per_gas: Some(max_fee_hint),
-        max_priority_fee_per_gas: Some(max_prio_hint),
-        gas: Some(gas_limit_hint),
-        value: Some(hint.value),
-        input: TransactionInput::new(hint.call_data.clone().into()),
-        nonce: None,
-        chain_id: Some(self.chain_id),
-        ..Default::default()
-    };
+        let mut bundle_requests: Vec<TransactionRequest> = Vec::new();
+        if let Some(f) = &front_run {
+            bundle_requests.push(f.request.clone());
+        }
+        if let Some(a) = &approval {
+            bundle_requests.push(a.request.clone());
+        }
+        bundle_requests.push(victim_request.clone());
+        bundle_requests.push(main_request.clone());
 
-    let mut bundle_requests: Vec<TransactionRequest> = Vec::new();
-    if let Some(f) = &front_run {
-        bundle_requests.push(f.request.clone());
-    }
-    if let Some(a) = &approval {
-        bundle_requests.push(a.request.clone());
-    }
-    bundle_requests.push(victim_request.clone());
-    bundle_requests.push(main_request.clone());
+        let overrides = StateOverridesBuilder::default()
+            .with_balance(self.signer.address(), parts.sim_balance)
+            .with_nonce(self.signer.address(), lease.base);
 
-    let overrides = StateOverridesBuilder::default()
-        .with_balance(self.signer.address(), parts.sim_balance)
-        .with_nonce(self.signer.address(), lease.base);
+        let sim_start = received_at;
+        let profit = match self
+            .simulate_and_score(
+                bundle_requests,
+                overrides,
+                &backrun,
+                parts.attack_value_eth,
+                parts.wallet_balance,
+                gas_limit_hint,
+                &parts.gas_fees,
+            )
+            .await?
+        {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let sim_ms = sim_start.elapsed().as_millis() as u64;
+        self.stats.record_sim_latency("mev_share", sim_ms);
 
-    let sim_start = received_at;
-    let profit = match self
-        .simulate_and_score(
-            bundle_requests,
-            overrides,
-            &backrun,
-            parts.attack_value_eth,
-            parts.wallet_balance,
-            gas_limit_hint,
-            &parts.gas_fees,
-        )
-        .await?
-    {
-        Some(p) => p,
-        None => return Ok(None),
-    };
-    let sim_ms = sim_start.elapsed().as_millis() as u64;
-    self.stats.record_sim_latency("mev_share", sim_ms);
-
-    tracing::info!(
-        target: "strategy",
-        gas_limit = profit.bundle_gas_limit,
-        max_fee_per_gas = parts.gas_fees.max_fee_per_gas,
-        gas_cost_wei = %profit.gas_cost_wei,
-        net_profit_wei = %profit.net_profit_wei,
-        net_profit_eth = profit.net_profit_eth_f64,
-        wallet_eth = self.amount_to_display(parts.wallet_balance, self.wrapped_native),
-        price_source = %profit.eth_quote.source,
-        price = profit.eth_quote.price,
-        victim_min_out = ?observed_swap.min_out,
-        victim_recipient = ?observed_swap.recipient,
-        path_len = observed_swap.path.len(),
-        path = ?observed_swap.path,
-        router = ?observed_swap.router,
-        used_mock_balance = self.dry_run,
-        profit_floor_wei = %StrategyExecutor::dynamic_profit_floor(parts.wallet_balance),
-        sandwich = front_run.is_some(),
-        "MEV-Share strategy evaluation"
-    );
-
-    let tx_hash = format!("{:#x}", hint.tx_hash);
-
-    if self.dry_run {
         tracing::info!(
-            target: "strategy_dry_run",
-            tx_hash = %tx_hash,
+            target: "strategy",
+            gas_limit = profit.bundle_gas_limit,
+            max_fee_per_gas = parts.gas_fees.max_fee_per_gas,
+            gas_cost_wei = %profit.gas_cost_wei,
+            net_profit_wei = %profit.net_profit_wei,
             net_profit_eth = profit.net_profit_eth_f64,
-            gross_profit_eth = profit.profit_eth_f64,
-            gas_cost_eth = profit.gas_cost_eth_f64,
-            front_run_value_eth = self.amount_to_display(parts.attack_value_eth, self.wrapped_native),
             wallet_eth = self.amount_to_display(parts.wallet_balance, self.wrapped_native),
+            price_source = %profit.eth_quote.source,
+            price = profit.eth_quote.price,
+            victim_min_out = ?observed_swap.min_out,
+            victim_recipient = ?observed_swap.recipient,
             path_len = observed_swap.path.len(),
+            path = ?observed_swap.path,
             router = ?observed_swap.router,
             used_mock_balance = self.dry_run,
             profit_floor_wei = %StrategyExecutor::dynamic_profit_floor(parts.wallet_balance),
             sandwich = front_run.is_some(),
-            "Dry-run only: simulated profitable MEV-Share bundle (not sent)"
+            "MEV-Share strategy evaluation"
         );
-        return Ok(Some(tx_hash));
-    }
 
-    let mut bundle_body: Vec<BundleItem> = Vec::new();
-    bundle_body.push(BundleItem::Hash {
-        hash: tx_hash.clone(),
-    });
+        let tx_hash = format!("{:#x}", hint.tx_hash);
 
-    let mut executor_hash: Option<B256> = None;
+        if self.dry_run {
+            tracing::info!(
+                target: "strategy_dry_run",
+                tx_hash = %tx_hash,
+                net_profit_eth = profit.net_profit_eth_f64,
+                gross_profit_eth = profit.profit_eth_f64,
+                gas_cost_eth = profit.gas_cost_eth_f64,
+                front_run_value_eth = self.amount_to_display(parts.attack_value_eth, self.wrapped_native),
+                wallet_eth = self.amount_to_display(parts.wallet_balance, self.wrapped_native),
+                path_len = observed_swap.path.len(),
+                router = ?observed_swap.router,
+                used_mock_balance = self.dry_run,
+                profit_floor_wei = %StrategyExecutor::dynamic_profit_floor(parts.wallet_balance),
+                sandwich = front_run.is_some(),
+                "Dry-run only: simulated profitable MEV-Share bundle (not sent)"
+            );
+            return Ok(Some(tx_hash));
+        }
 
-    if let Some(f) = front_run.as_mut() {
-        let fallback = f.request.access_list.clone().unwrap_or_default();
-        let req = f.request.clone();
-        let (raw, signed_req, hash) = self.sign_with_access_list(req, fallback).await?;
-        f.raw = raw.clone();
-        f.request = signed_req;
-        f.hash = hash;
-        bundle_body.push(BundleItem::Tx {
-            tx: format!("0x{}", hex::encode(&raw)),
-            can_revert: false,
+        let mut bundle_body: Vec<BundleItem> = Vec::new();
+        bundle_body.push(BundleItem::Hash {
+            hash: tx_hash.clone(),
         });
-    }
 
-    if let Some(app) = approval.as_mut() {
-        let fallback = app.request.access_list.clone().unwrap_or_default();
-        let req = app.request.clone();
-        let (raw, signed_req, _) = self.sign_with_access_list(req, fallback).await?;
-        app.raw = raw.clone();
-        app.request = signed_req;
-        bundle_body.push(BundleItem::Tx {
-            tx: format!("0x{}", hex::encode(&raw)),
-            can_revert: false,
-        });
-    }
+        let mut executor_hash: Option<B256> = None;
+
+        if let Some(f) = front_run.as_mut() {
+            let fallback = f.request.access_list.clone().unwrap_or_default();
+            let req = f.request.clone();
+            let (raw, signed_req, hash) = self.sign_with_access_list(req, fallback).await?;
+            f.raw = raw.clone();
+            f.request = signed_req;
+            f.hash = hash;
+            bundle_body.push(BundleItem::Tx {
+                tx: format!("0x{}", hex::encode(&raw)),
+                can_revert: false,
+            });
+        }
+
+        if let Some(app) = approval.as_mut() {
+            let fallback = app.request.access_list.clone().unwrap_or_default();
+            let req = app.request.clone();
+            let (raw, signed_req, _) = self.sign_with_access_list(req, fallback).await?;
+            app.raw = raw.clone();
+            app.request = signed_req;
+            bundle_body.push(BundleItem::Tx {
+                tx: format!("0x{}", hex::encode(&raw)),
+                can_revert: false,
+            });
+        }
 
         if let Some(req) = executor_request.take() {
             let fallback = req.access_list.clone().unwrap_or_default();
@@ -570,105 +574,108 @@ async fn evaluate_mev_share_hint(
             executor_hash = Some(hash);
             bundle_body.push(BundleItem::Tx {
                 tx: format!("0x{}", hex::encode(&raw)),
-            can_revert: false,
-        });
-    } else {
-        let fallback = backrun.request.access_list.clone().unwrap_or_default();
-        let req = backrun.request.clone();
-        let (raw, signed_req, hash) = self.sign_with_access_list(req, fallback).await?;
-        backrun.raw = raw.clone();
-        backrun.request = signed_req;
-        backrun.hash = hash;
-        bundle_body.push(BundleItem::Tx {
-            tx: format!("0x{}", hex::encode(&raw)),
-            can_revert: false,
-        });
-    }
+                can_revert: false,
+            });
+        } else {
+            let fallback = backrun.request.access_list.clone().unwrap_or_default();
+            let req = backrun.request.clone();
+            let (raw, signed_req, hash) = self.sign_with_access_list(req, fallback).await?;
+            backrun.raw = raw.clone();
+            backrun.request = signed_req;
+            backrun.hash = hash;
+            bundle_body.push(BundleItem::Tx {
+                tx: format!("0x{}", hex::encode(&raw)),
+                can_revert: false,
+            });
+        }
 
-    let _ = self.db.update_status(&tx_hash, None, Some(false)).await;
+        let _ = self.db.update_status(&tx_hash, None, Some(false)).await;
 
-    if let Err(e) = self.bundle_sender.send_mev_share_bundle(&bundle_body).await {
-        self.emergency_exit_inventory("mev_share bundle send failed")
-            .await;
-        return Err(e);
-    }
+        if let Err(e) = self.bundle_sender.send_mev_share_bundle(&bundle_body).await {
+            self.emergency_exit_inventory("mev_share bundle send failed")
+                .await;
+            return Err(e);
+        }
 
-    let from_addr = hint.from.unwrap_or(Address::ZERO);
-    self.db
-        .save_transaction(
-            &tx_hash,
-            self.chain_id,
-            &format!("{:#x}", from_addr),
-            Some(format!("{:#x}", hint.router)).as_deref(),
-            hint.value.to_string().as_str(),
-            Some("strategy_mev_share"),
-        )
-        .await?;
-
-    self.db
-        .save_transaction(
-            &format!("{:#x}", backrun.hash),
-            self.chain_id,
-            &format!("{:#x}", self.signer.address()),
-            Some(format!("{:#x}", backrun.to)).as_deref(),
-            backrun.value.to_string().as_str(),
-            Some("strategy_backrun"),
-        )
-        .await?;
-    if let Some(f) = &front_run {
+        let from_addr = hint.from.unwrap_or(Address::ZERO);
         self.db
             .save_transaction(
-                &format!("{:#x}", f.hash),
+                &tx_hash,
                 self.chain_id,
-                &format!("{:#x}", self.signer.address()),
-                Some(format!("{:#x}", f.to)).as_deref(),
-                f.value.to_string().as_str(),
-                Some("strategy_front_run"),
+                &format!("{:#x}", from_addr),
+                Some(format!("{:#x}", hint.router)).as_deref(),
+                hint.value.to_string().as_str(),
+                Some("strategy_mev_share"),
             )
             .await?;
-    }
 
-    self.db
-        .save_profit_record(
-            &tx_hash,
-            self.chain_id,
-            "strategy_mev_share",
-            profit.profit_eth_f64,
-            profit.gas_cost_eth_f64,
-            profit.net_profit_eth_f64,
-        )
-        .await?;
+        self.db
+            .save_transaction(
+                &format!("{:#x}", backrun.hash),
+                self.chain_id,
+                &format!("{:#x}", self.signer.address()),
+                Some(format!("{:#x}", backrun.to)).as_deref(),
+                backrun.value.to_string().as_str(),
+                Some("strategy_backrun"),
+            )
+            .await?;
+        if let Some(f) = &front_run {
+            self.db
+                .save_transaction(
+                    &format!("{:#x}", f.hash),
+                    self.chain_id,
+                    &format!("{:#x}", self.signer.address()),
+                    Some(format!("{:#x}", f.to)).as_deref(),
+                    f.value.to_string().as_str(),
+                    Some("strategy_front_run"),
+                )
+                .await?;
+        }
 
-    self.portfolio
-        .record_profit(self.chain_id, profit.gross_profit_wei, profit.gas_cost_wei);
+        self.db
+            .save_profit_record(
+                &tx_hash,
+                self.chain_id,
+                "strategy_mev_share",
+                profit.profit_eth_f64,
+                profit.gas_cost_eth_f64,
+                profit.net_profit_eth_f64,
+                &profit.gross_profit_wei.to_string(),
+                &profit.gas_cost_wei.to_string(),
+                &profit.net_profit_wei.to_string(),
+            )
+            .await?;
 
-    let _ = self
-        .db
-        .save_market_price(
-            self.chain_id,
-            "ETHUSD",
-            profit.eth_quote.price,
-            &profit.eth_quote.source,
-        )
-        .await;
+        self.portfolio
+            .record_profit(self.chain_id, profit.gross_profit_wei, profit.gas_cost_wei);
 
-    let receipt_target = executor_hash.unwrap_or(backrun.hash);
-    if !self.await_receipt(&receipt_target).await? {
-        self.emergency_exit_inventory("mev_share receipt missing/failed")
+        let _ = self
+            .db
+            .save_market_price(
+                self.chain_id,
+                "ETHUSD",
+                profit.eth_quote.price,
+                &profit.eth_quote.source,
+            )
             .await;
+
+        let receipt_target = executor_hash.unwrap_or(backrun.hash);
+        if !self.await_receipt(&receipt_target).await? {
+            self.emergency_exit_inventory("mev_share receipt missing/failed")
+                .await;
+        }
+
+        self.stats.record_bundle(BundleTelemetry {
+            tx_hash: tx_hash.clone(),
+            source: "mev_share".to_string(),
+            profit_eth: profit.profit_eth_f64,
+            gas_cost_eth: profit.gas_cost_eth_f64,
+            net_eth: profit.net_profit_eth_f64,
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+        });
+
+        Ok(Some(tx_hash))
     }
-
-    self.stats.record_bundle(BundleTelemetry {
-        tx_hash: tx_hash.clone(),
-        source: "mev_share".to_string(),
-        profit_eth: profit.profit_eth_f64,
-        gas_cost_eth: profit.gas_cost_eth_f64,
-        net_eth: profit.net_profit_eth_f64,
-        timestamp_ms: chrono::Utc::now().timestamp_millis(),
-    });
-
-    Ok(Some(tx_hash))
-}
 
     async fn build_components(
         &self,
@@ -782,13 +789,7 @@ async fn evaluate_mev_share_hint(
         };
 
         let executor_request = self
-            .build_executor_wrapper(
-                approval.as_ref(),
-                &backrun,
-                &gas_fees,
-                gas_limit_hint,
-                0,
-            )
+            .build_executor_wrapper(approval.as_ref(), &backrun, &gas_fees, gas_limit_hint, 0)
             .await?;
 
         Ok(Some(BundleParts {
@@ -869,7 +870,11 @@ async fn evaluate_mev_share_hint(
             gas_used_total = gas_used_total.saturating_add(sim.gas_used);
         }
         let bundle_gas_limit = gas_used_total.max(gas_limit_hint);
-        let gas_cost_wei = U256::from(bundle_gas_limit) * U256::from(gas_fees.max_fee_per_gas);
+        let effective_fee = gas_fees
+            .next_base_fee_per_gas
+            .max(gas_fees.base_fee_per_gas)
+            .saturating_add(gas_fees.max_priority_fee_per_gas);
+        let gas_cost_wei = U256::from(gas_used_total).saturating_mul(U256::from(effective_fee));
 
         let total_eth_in = backrun.value.saturating_add(attack_value_eth);
         let Some(native_out) =

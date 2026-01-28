@@ -546,8 +546,16 @@ impl StrategyExecutor {
                             (target_token, Bytes::from(approve_target), U256::ZERO),
                             (observed.router, forward_payload, U256::ZERO),
                             (observed.router, rev_payload, U256::ZERO),
-                            (self.executor.unwrap_or(executor), Bytes::from(reset_weth), U256::ZERO),
-                            (self.executor.unwrap_or(executor), Bytes::from(reset_target), U256::ZERO),
+                            (
+                                self.executor.unwrap_or(executor),
+                                Bytes::from(reset_weth),
+                                U256::ZERO,
+                            ),
+                            (
+                                self.executor.unwrap_or(executor),
+                                Bytes::from(reset_target),
+                                U256::ZERO,
+                            ),
                         ];
                         let (raw, req, hash) = self
                             .build_flashloan_transaction(
@@ -559,6 +567,7 @@ impl StrategyExecutor {
                                 &crate::network::gas::GasFees {
                                     max_fee_per_gas,
                                     max_priority_fee_per_gas,
+                                    next_base_fee_per_gas: 0,
                                     base_fee_per_gas: 0,
                                 },
                                 nonce,

@@ -39,14 +39,13 @@ async fn flashloan_builder_encodes_callbacks() {
         "https://relay.flashbots.net".to_string(),
         bundle_signer.clone(),
     ));
-    let db = Database::new("sqlite::memory:")
-        .await
-        .expect("db");
+    let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), bundle_signer.address()));
     let gas_oracle = oxidity_builder::network::gas::GasOracle::new(http.clone());
     let price_feed = PriceFeed::new(http.clone(), std::collections::HashMap::new());
     let simulator = Simulator::new(http.clone());
-    let token_manager = Arc::new(oxidity_builder::infrastructure::data::token_manager::TokenManager::default());
+    let token_manager =
+        Arc::new(oxidity_builder::infrastructure::data::token_manager::TokenManager::default());
     let stats = Arc::new(StrategyStats::default());
     let nonce_manager = NonceManager::new(http.clone(), bundle_signer.address());
     let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
@@ -90,12 +89,17 @@ async fn flashloan_builder_encodes_callbacks() {
     // Two-step callback: approve + dummy swap payload; include reset approvals.
     let callbacks = vec![
         (WETH_MAINNET, Bytes::from(vec![0x01, 0x02]), U256::ZERO),
-        (Address::from([0x22; 20]), Bytes::from(vec![0x03]), U256::from(7u64)),
+        (
+            Address::from([0x22; 20]),
+            Bytes::from(vec![0x03]),
+            U256::from(7u64),
+        ),
     ];
 
     let gas_fees = GasFees {
         max_fee_per_gas: 30_000_000_000,
         max_priority_fee_per_gas: 2_000_000_000,
+        next_base_fee_per_gas: 28_000_000_000,
         base_fee_per_gas: 28_000_000_000,
     };
 
@@ -123,11 +127,7 @@ async fn flashloan_builder_encodes_callbacks() {
 
     // Decode the calldata back to FlashCallbackData to ensure layout is correct.
     let decoded = UnifiedHardenedExecutor::executeFlashLoanCall::abi_decode(
-        &request
-            .input
-            .clone()
-            .into_input()
-            .expect("input bytes"),
+        &request.input.clone().into_input().expect("input bytes"),
     )
     .expect("decode envelope");
 

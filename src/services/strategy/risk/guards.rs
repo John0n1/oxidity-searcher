@@ -104,9 +104,7 @@ impl StrategyExecutor {
             return false;
         }
         let margin = gross_profit_wei.saturating_sub(gas_cost_wei);
-        let min_margin = gas_cost_wei
-            .saturating_mul(U256::from(1_200u64))
-            / U256::from(10_000u64);
+        let min_margin = gas_cost_wei.saturating_mul(U256::from(1_200u64)) / U256::from(10_000u64);
         if margin < min_margin {
             return false;
         }

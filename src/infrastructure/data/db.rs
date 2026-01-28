@@ -134,12 +134,15 @@ impl Database {
         profit_eth: f64,
         gas_cost_eth: f64,
         net_profit_eth: f64,
+        profit_wei: &str,
+        gas_cost_wei: &str,
+        net_profit_wei: &str,
     ) -> Result<i64, AppError> {
         let chain_id_i64 = chain_id as i64;
         let row = sqlx::query(
             r#"
-            INSERT INTO profit_records (tx_hash, chain_id, strategy, profit_eth, gas_cost_eth, net_profit_eth)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO profit_records (tx_hash, chain_id, strategy, profit_eth, gas_cost_eth, net_profit_eth, profit_wei, gas_cost_wei, net_profit_wei)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING id
             "#,
         )
@@ -149,6 +152,9 @@ impl Database {
         .bind(profit_eth)
         .bind(gas_cost_eth)
         .bind(net_profit_eth)
+        .bind(profit_wei)
+        .bind(gas_cost_wei)
+        .bind(net_profit_wei)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| AppError::Initialization(format!("Profit insert failed: {}", e)))?;
@@ -217,7 +223,17 @@ mod tests {
     async fn profit_and_price_inserts() {
         let db = Database::new("sqlite::memory:").await.expect("db");
         let profit_id = db
-            .save_profit_record("0xabc", 1, "test", 0.2, 0.05, 0.15)
+            .save_profit_record(
+                "0xabc",
+                1,
+                "test",
+                0.2,
+                0.05,
+                0.15,
+                "200000000000000000",
+                "50000000000000000",
+                "150000000000000000",
+            )
             .await
             .unwrap();
         assert!(profit_id > 0);

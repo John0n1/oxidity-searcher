@@ -68,6 +68,7 @@ pub struct GlobalSettings {
     // Per-chain maps
     pub router_allowlist_by_chain: Option<HashMap<String, HashMap<String, String>>>,
     pub chainlink_feeds_by_chain: Option<HashMap<String, HashMap<String, String>>>,
+    pub chainlink_feeds_by_chain_eth: Option<HashMap<String, HashMap<String, String>>>,
 }
 
 // Defaults
@@ -342,23 +343,46 @@ impl GlobalSettings {
         &self,
         chain_id: u64,
     ) -> Result<HashMap<String, Address>, AppError> {
+        let mut out: HashMap<String, Address> = HashMap::new();
+
         if let Some(map) = self
             .chainlink_feeds_by_chain
             .as_ref()
             .and_then(|m| m.get(&chain_id.to_string()))
         {
-            return parse_address_map(map, "chainlink_feeds_by_chain");
+            out.extend(parse_address_map(map, "chainlink_feeds_by_chain")?);
         }
 
-        if let Some(map) = &self.chainlink_feeds {
-            return parse_address_map(map, "chainlink_feeds");
+        if let Some(map) = self
+            .chainlink_feeds_by_chain_eth
+            .as_ref()
+            .and_then(|m| m.get(&chain_id.to_string()))
+        {
+            let parsed = parse_address_map(map, "chainlink_feeds_by_chain_eth")?;
+            for (k, v) in parsed {
+                out.insert(format!("{}_ETH", k), v);
+            }
         }
 
-        if let Some(map) = load_chainlink_feeds_from_file(&self.chainlink_feeds_path(), chain_id)? {
-            return Ok(map);
+        if out.is_empty() {
+            if let Some(map) = &self.chainlink_feeds {
+                out.extend(parse_address_map(map, "chainlink_feeds")?);
+            }
         }
 
-        Ok(constants::default_chainlink_feeds(chain_id))
+        if out.is_empty() {
+            if let Some(map) =
+                load_chainlink_feeds_from_file(&self.chainlink_feeds_path(), chain_id)?
+            {
+                out.extend(map);
+            }
+        }
+
+        if out.is_empty() {
+            out = constants::default_chainlink_feeds(chain_id);
+        }
+
+        Ok(out)
     }
 
     pub fn chainlink_feeds_path(&self) -> String {
@@ -563,6 +587,7 @@ mod tests {
             mev_share_enabled: default_true(),
             router_allowlist_by_chain: None,
             chainlink_feeds_by_chain: None,
+            chainlink_feeds_by_chain_eth: None,
         }
     }
 

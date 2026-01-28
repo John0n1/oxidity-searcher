@@ -72,16 +72,13 @@ impl Simulator {
                         reason: if success {
                             None
                         } else {
-                            call.error
-                                .as_ref()
-                                .map(|e| format!("{:?}", e))
-                                .or_else(|| {
-                                    if call.return_data.is_empty() {
-                                        None
-                                    } else {
-                                        Some(decode_flashloan_revert(&call.return_data))
-                                    }
-                                })
+                            call.error.as_ref().map(|e| format!("{:?}", e)).or_else(|| {
+                                if call.return_data.is_empty() {
+                                    None
+                                } else {
+                                    Some(decode_flashloan_revert(&call.return_data))
+                                }
+                            })
                         },
                     });
                 }
@@ -172,16 +169,13 @@ impl Simulator {
                             reason: if success {
                                 None
                             } else {
-                                tx.error
-                                    .as_ref()
-                                    .map(|e| format!("{:?}", e))
-                                    .or_else(|| {
-                                        if tx.return_data.is_empty() {
-                                            None
-                                        } else {
-                                            Some(decode_flashloan_revert(&tx.return_data))
-                                        }
-                                    })
+                                tx.error.as_ref().map(|e| format!("{:?}", e)).or_else(|| {
+                                    if tx.return_data.is_empty() {
+                                        None
+                                    } else {
+                                        Some(decode_flashloan_revert(&tx.return_data))
+                                    }
+                                })
                             },
                         });
                     }

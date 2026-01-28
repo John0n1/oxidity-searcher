@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
 
 use crate::common::error::AppError;
-use crate::core::strategy::StrategyWork;
 use crate::core::strategy::StrategyStats;
+use crate::core::strategy::StrategyWork;
 use crate::network::provider::WsProvider;
 use alloy::consensus::Transaction as _;
 use alloy::network::TransactionResponse;

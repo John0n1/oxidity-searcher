@@ -31,8 +31,8 @@ anyhow = "1.0"
 alloy = { version = "1.4.3", features = ["full", "node-bindings", "serde"] }
 alloy-consensus = { version = "1.4.3", features = ["serde"] } 
 alloy-primitives = { version = "1.5.2", features = ["serde"] } 
-alloy-json-abi = "1.5.2" 
-alloy-sol-types = { version = "1.5.2"}
+alloy-json-abi = "1.5.3" 
+alloy-sol-types = { version = "1.5.3"}
 alloy-rpc-client = "1.5.2"
 
 # --- DATA ---
@@ -60,27 +60,6 @@ crypto-common = "0.1.7"
 
 [package.metadata.deb]
 name = "oxidity-builder"
-version = "0.1.1-delta"
-maintainer = "oxidity.com | John Hauger Mitander"
-description = "Oxidity MEV Searcher"
-homepage = "https://build.oxidity.com/"
-depends = "$auto"
-section = "net"
-priority = "optional"
-
-assets = [
-  ["target/release/oxidity-builder", "usr/bin/", "755"],
-  ["README.md", "usr/share/doc/oxidity-builder/README.md", "644"],
-]
 
 [package.metadata.wix]
 product-name = "oxidity-builder"
-manufacturer = "oxidity.com <john@oxidity.com"
-upgrade-guid = "00700700-7007-4007-8007-007007007007"
-path-guid = "0B00B1E5-0F5E-4007-9007-00C0FFEEBEEF"
-product-icon = "docs/logo/oxidity_logo.ico"
-banner = "docs/logo/oxidity_logo_1024.png"
-dialog = "docs/logo/oxidity_logo_1024.png"
-help-url = "https://builder.oxidity.com/help"
-license = true
-eula = true

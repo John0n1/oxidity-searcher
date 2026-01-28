@@ -1,15 +1,7 @@
 // SPDX-License-Identifier: MIT
-// MEV-Share V3 dry-run harness using a live dev node (Anvil/Nethermind/Geth).
-//
-// To run:
-// 1) Start a node with RPC+WS+eth_simulate/eth_call enabled (Anvil works).
-// 2) Export env vars:
-//      RPC_URL_1=http://127.0.0.1:8545
-//      WEBSOCKET_URL_1=ws://127.0.0.1:8546
-//      WALLET_KEY=0x... (any funded key; dry_run=true so minimal balance is fine)
-// 3) cargo test --test pipeline_mev_share_v3 -- --ignored
 
-use alloy::primitives::{Address, Bytes, B256, U256, aliases::U24, U160};
+
+use alloy::primitives::{Address, B256, Bytes, U160, U256, aliases::U24};
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolCall;
@@ -67,9 +59,7 @@ async fn mev_share_v3_pipeline_manual() {
         "https://relay.flashbots.net".to_string(),
         bundle_signer.clone(),
     ));
-    let db = Database::new("sqlite::memory:")
-        .await
-        .expect("db");
+    let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), signer.address()));
     let gas_oracle = GasOracle::new(http.clone());
     let price_feed = PriceFeed::new(http.clone(), std::collections::HashMap::new());

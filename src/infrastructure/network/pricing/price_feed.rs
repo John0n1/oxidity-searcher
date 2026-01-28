@@ -7,14 +7,17 @@ use crate::network::provider::HttpProvider;
 use alloy::primitives::Address;
 use alloy::sol;
 use reqwest::Client;
+use reqwest::header;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 const CACHE_TTL: u64 = 60; // Cache prices for 60 seconds
 const CHAINLINK_STALENESS_SECS: u64 = 600;
+const STALE_CACHE_GRACE_SECS: u64 = 900; // Accept up to 15m old cache on failures
 
 #[derive(Deserialize, Debug)]
 struct BinanceTicker {
@@ -64,18 +67,19 @@ impl PriceFeed {
     pub async fn get_price(&self, symbol: &str) -> Result<PriceQuote, AppError> {
         let normalized = normalize_symbol(symbol);
 
-        // 1. Check Cache
-        {
-            let read_guard = self.cache.read().await;
-            if let Some((quote, timestamp)) = read_guard.get(&normalized.cache_key) {
-                if timestamp.elapsed().as_secs() < CACHE_TTL {
-                    return Ok(quote.clone());
-                }
-            }
+        // 1. Check fresh cache
+        if let Some(quote) = self.cached_if_fresh(&normalized.cache_key).await {
+            return Ok(quote);
         }
 
         // 2. Try Chainlink on-chain feed
         if let Some(price) = self.try_chainlink(&normalized.chainlink_symbol).await? {
+            self.store_cache(&normalized.cache_key, price.clone()).await;
+            return Ok(price);
+        }
+
+        // 2b. Etherscan stats fallback for ETHUSD
+        if let Some(price) = self.try_etherscan(&normalized.chainlink_symbol).await? {
             self.store_cache(&normalized.cache_key, price.clone()).await;
             return Ok(price);
         }
@@ -111,6 +115,13 @@ impl PriceFeed {
             self.store_cache(&normalized.cache_key, quote.clone()).await;
 
             return Ok(quote);
+        }
+
+        // 4. Soft-fail: serve stale cache if available instead of hard error
+        if let Some((quote, age)) = self.cached_any(&normalized.cache_key).await {
+            let mut stale = quote.clone();
+            stale.source = format!("cache_stale_{}s", age.as_secs());
+            return Ok(stale);
         }
 
         Err(AppError::ApiCall {
@@ -195,14 +206,16 @@ impl PriceFeed {
             .try_into()
             .ok()
             .or_else(|| latest.updatedAt.to_string().parse().ok());
+        let mut stale = false;
         if let Some(ts) = updated_at_secs {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            if now.saturating_sub(ts) > CHAINLINK_STALENESS_SECS {
-                tracing::warn!(target: "price_feed", "Chainlink price stale for {}", symbol);
-                return Ok(None);
+            let age = now.saturating_sub(ts);
+            if age > CHAINLINK_STALENESS_SECS {
+                stale = true;
+                tracing::warn!(target: "price_feed", age, "Chainlink price stale for {}", symbol);
             }
         }
         let raw: i128 = latest
@@ -210,9 +223,55 @@ impl PriceFeed {
             .try_into()
             .map_err(|e| AppError::Connection(format!("Chainlink answer convert failed: {}", e)))?;
         let price = (raw as f64) / 10f64.powi(decimals);
+        let source = if stale {
+            "chainlink_stale".into()
+        } else {
+            "chainlink".into()
+        };
+        Ok(Some(PriceQuote { price, source }))
+    }
+
+    async fn try_etherscan(&self, symbol: &str) -> Result<Option<PriceQuote>, AppError> {
+        // Only ETH price is available via etherscan stats; gate accordingly.
+        if symbol.to_uppercase() != "ETH" {
+            return Ok(None);
+        }
+        let api_key = match env::var("ETHERSCAN_API_KEY") {
+            Ok(k) if !k.is_empty() => k,
+            _ => return Ok(None),
+        };
+        let url =
+            format!("https://api.etherscan.io/api?module=stats&action=ethprice&apikey={api_key}");
+        let resp = self
+            .client
+            .get(&url)
+            .header(header::ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(|e| AppError::Connection(format!("Etherscan price failed: {}", e)))?;
+        if !resp.status().is_success() {
+            return Err(AppError::ApiCall {
+                provider: "Etherscan price".into(),
+                status: resp.status().as_u16(),
+            });
+        }
+        let parsed: EtherscanPriceResponse = resp
+            .json()
+            .await
+            .map_err(|e| AppError::Initialization(format!("Etherscan price decode failed: {e}")))?;
+
+        let result = parsed
+            .result
+            .ok_or_else(|| AppError::Initialization("Etherscan price missing result".into()))?;
+
+        let price: f64 = result
+            .ethusd
+            .parse()
+            .map_err(|_| AppError::Initialization("Invalid ethusd from Etherscan".into()))?;
+
         Ok(Some(PriceQuote {
             price,
-            source: "chainlink".into(),
+            source: "etherscan".into(),
         }))
     }
 
@@ -220,6 +279,31 @@ impl PriceFeed {
         let mut write_guard = self.cache.write().await;
         write_guard.insert(symbol.to_string(), (price, Instant::now()));
     }
+
+    async fn cached_if_fresh(&self, key: &str) -> Option<PriceQuote> {
+        let read_guard = self.cache.read().await;
+        read_guard
+            .get(key)
+            .and_then(|(quote, ts)| (ts.elapsed().as_secs() < CACHE_TTL).then(|| quote.clone()))
+    }
+
+    async fn cached_any(&self, key: &str) -> Option<(PriceQuote, std::time::Duration)> {
+        let read_guard = self.cache.read().await;
+        read_guard
+            .get(key)
+            .and_then(|(quote, ts)| Some((quote.clone(), ts.elapsed())))
+            .filter(|(_, age)| age.as_secs() < STALE_CACHE_GRACE_SECS)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct EtherscanPriceResponse {
+    result: Option<EtherscanPriceResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EtherscanPriceResult {
+    ethusd: String,
 }
 
 fn normalize_symbol(symbol: &str) -> NormalizedSymbols {

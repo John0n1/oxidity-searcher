@@ -1,6 +1,10 @@
 # Local configs and secrets
 config*.toml
 *.db
+.cargo
+Cargo.lock
+.venv
+merge.py
 
 # Build artifacts
 target/

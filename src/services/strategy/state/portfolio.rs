@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
 
-use crate::common::constants::LOW_BALANCE_THRESHOLD_WEI;
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
 use crate::network::provider::HttpProvider;
@@ -12,11 +11,16 @@ use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BalanceTier {
-    Emergency, // < 0.01 ETH
-    Low,       // < 0.05 ETH
-    Medium,    // < 1.0 ETH
-    Healthy,   // Normal
-    Whale,     // > 5.0 ETH
+    Dust,         // < 0.005 ETH
+    Tiny,         // < 0.01 ETH
+    VeryLow,      // < 0.05 ETH
+    Low,          // < 0.09 ETH
+    SubTenth,     // < 0.10 ETH
+    SubTwoTenths, // < 0.20 ETH
+    SubHalf,      // < 0.50 ETH
+    SubOne,       // < 1.00 ETH
+    Healthy,      // 1–5 ETH
+    Whale,        // > 5.0 ETH
 }
 
 pub struct PortfolioManager {
@@ -73,17 +77,36 @@ impl PortfolioManager {
             .map(|v| *v)
             .unwrap_or(U256::ZERO);
 
-        let emergency = U256::from(10_000_000_000_000_000u64); // 0.01 ETH
-        let whale = U256::from(5_000_000_000_000_000_000u64); // 5.0 ETH
+        let t_dust = U256::from(5_000_000_000_000_000u64); // 0.005
+        let t_tiny = U256::from(10_000_000_000_000_000u64); // 0.01
+        let t_vlow = U256::from(50_000_000_000_000_000u64); // 0.05
+        let t_low = U256::from(90_000_000_000_000_000u64); // 0.09
+        let t_sub_tenth = U256::from(100_000_000_000_000_000u64); // 0.10
+        let t_sub_two_tenths = U256::from(200_000_000_000_000_000u64); // 0.20
+        let t_sub_half = U256::from(500_000_000_000_000_000u64); // 0.50
+        let t_sub_one = U256::from(1_000_000_000_000_000_000u64); // 1.00
+        let t_whale = U256::from(5_000_000_000_000_000_000u64); // 5.00
 
-        if bal < emergency {
-            BalanceTier::Emergency
-        } else if bal < *LOW_BALANCE_THRESHOLD_WEI {
+        if bal < t_dust {
+            BalanceTier::Dust
+        } else if bal < t_tiny {
+            BalanceTier::Tiny
+        } else if bal < t_vlow {
+            BalanceTier::VeryLow
+        } else if bal < t_low {
             BalanceTier::Low
-        } else if bal > whale {
-            BalanceTier::Whale
-        } else {
+        } else if bal < t_sub_tenth {
+            BalanceTier::SubTenth
+        } else if bal < t_sub_two_tenths {
+            BalanceTier::SubTwoTenths
+        } else if bal < t_sub_half {
+            BalanceTier::SubHalf
+        } else if bal < t_sub_one {
+            BalanceTier::SubOne
+        } else if bal < t_whale {
             BalanceTier::Healthy
+        } else {
+            BalanceTier::Whale
         }
     }
 

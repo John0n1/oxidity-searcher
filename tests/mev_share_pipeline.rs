@@ -3,8 +3,9 @@
 // and mock payloads to drive the pipeline through simulate_and_score and bundle
 // assembly without sending to a real relay.
 
-use alloy::primitives::{Address, Bytes, B256, U256};
+use alloy::primitives::{Address, B256, Bytes, U256};
 use alloy::signers::local::PrivateKeySigner;
+use alloy_sol_types::SolCall;
 use oxidity_builder::common::constants::WETH_MAINNET;
 use oxidity_builder::core::executor::BundleSender;
 use oxidity_builder::core::portfolio::PortfolioManager;
@@ -21,7 +22,6 @@ use oxidity_builder::network::provider::HttpProvider;
 use oxidity_builder::network::reserves::ReserveCache;
 use oxidity_builder::services::strategy::routers::UniV2Router;
 use oxidity_builder::services::strategy::strategy::StrategyStats as Stats;
-use alloy_sol_types::SolCall;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;

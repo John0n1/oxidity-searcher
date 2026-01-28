@@ -28,8 +28,8 @@ use alloy::sol_types::SolCall;
 use dashmap::{DashMap, DashSet};
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::sync::{Mutex, Semaphore, broadcast::Receiver as BroadcastReceiver, mpsc::Receiver};
 
@@ -102,10 +102,8 @@ impl StrategyStats {
     }
 
     pub fn record_sim_latency(&self, source: &str, ms: u64) {
-        self.sim_latency_ms_sum
-            .fetch_add(ms, Ordering::Relaxed);
-        self.sim_latency_ms_count
-            .fetch_add(1, Ordering::Relaxed);
+        self.sim_latency_ms_sum.fetch_add(ms, Ordering::Relaxed);
+        self.sim_latency_ms_count.fetch_add(1, Ordering::Relaxed);
         match source {
             "mempool" => {
                 self.sim_latency_ms_sum_mempool
@@ -223,9 +221,7 @@ impl StrategyExecutor {
                 });
             }
             self.current_block.store(block, Ordering::Relaxed);
-            self.stats
-                .nonce_state_loads
-                .fetch_add(1, Ordering::Relaxed);
+            self.stats.nonce_state_loads.fetch_add(1, Ordering::Relaxed);
             tracing::info!(
                 target: "bundle_state",
                 block,
@@ -233,9 +229,7 @@ impl StrategyExecutor {
                 "Restored nonce state from DB"
             );
         } else if let Ok(None) = loaded {
-            self.stats
-                .nonce_state_loads
-                .fetch_add(1, Ordering::Relaxed);
+            self.stats.nonce_state_loads.fetch_add(1, Ordering::Relaxed);
             tracing::debug!(target: "bundle_state", "No persisted nonce state found");
         } else if let Err(e) = loaded {
             self.stats
@@ -827,6 +821,7 @@ mod tests {
         let gas_fees = GasFees {
             max_fee_per_gas: 100,
             max_priority_fee_per_gas: 5,
+            next_base_fee_per_gas: 0,
             base_fee_per_gas: 0,
         };
         let calldata = vec![0x01, 0x02];
