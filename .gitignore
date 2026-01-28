@@ -1,15 +1,12 @@
 # Local configs and secrets
-config*.toml
+config.toml
+.env
 *.db
 .cargo
-Cargo.lock
 .venv
 merge.py
-
-# Build artifacts
 target/
 dist/
-
-# Editor / OS
 .DS_Store
 *.log
+
