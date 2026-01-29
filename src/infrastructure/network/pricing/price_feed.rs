@@ -18,6 +18,7 @@ use tokio::sync::RwLock;
 const CACHE_TTL: u64 = 60; // Cache prices for 60 seconds
 const CHAINLINK_STALENESS_SECS: u64 = 600;
 const STALE_CACHE_GRACE_SECS: u64 = 900; // Accept up to 15m old cache on failures
+const PROVIDER_WINDOW_SECS: u64 = 60; // per-provider RPM window
 
 #[derive(Deserialize, Debug)]
 struct BinanceTicker {
@@ -34,6 +35,21 @@ struct NormalizedSymbols {
 }
 
 #[derive(Clone)]
+struct RateState {
+    window_start: Instant,
+    count: u32,
+}
+
+impl RateState {
+    fn new() -> Self {
+        Self {
+            window_start: Instant::now(),
+            count: 0,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct PriceFeed {
     client: Client,
     // Map: Symbol -> (Price, Timestamp)
@@ -41,6 +57,8 @@ pub struct PriceFeed {
     chainlink_feeds: HashMap<String, Address>,
     provider: HttpProvider,
     decimals_cache: Arc<Mutex<HashMap<Address, u8>>>,
+    api_keys: PriceApiKeys,
+    rate: Arc<Mutex<HashMap<&'static str, RateState>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -49,8 +67,21 @@ pub struct PriceQuote {
     pub source: String,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct PriceApiKeys {
+    pub binance: Option<String>,
+    pub coingecko: Option<String>,
+    pub coinmarketcap: Option<String>,
+    pub cryptocompare: Option<String>,
+    pub coindesk: Option<String>,
+}
+
 impl PriceFeed {
-    pub fn new(provider: HttpProvider, chainlink_feeds: HashMap<String, Address>) -> Self {
+    pub fn new(
+        provider: HttpProvider,
+        chainlink_feeds: HashMap<String, Address>,
+        api_keys: PriceApiKeys,
+    ) -> Self {
         Self {
             client: Client::builder()
                 .timeout(Duration::from_secs(5))
@@ -60,6 +91,8 @@ impl PriceFeed {
             chainlink_feeds,
             provider,
             decimals_cache: Arc::new(Mutex::new(HashMap::new())),
+            api_keys,
+            rate: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -84,40 +117,45 @@ impl PriceFeed {
             return Ok(price);
         }
 
-        // 3. Fallback to Binance API
-        let mut last_status = 0u16;
-        for binance_symbol in &normalized.binance_symbols {
-            let url = format!(
-                "https://api.binance.com/api/v3/ticker/price?symbol={}",
-                binance_symbol
-            );
-            let resp = match self.client.get(&url).send().await {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-
-            if !resp.status().is_success() {
-                last_status = resp.status().as_u16();
-                continue;
-            }
-
-            let ticker: BinanceTicker = resp.json().await.map_err(|_| AppError::ApiCall {
-                provider: "Binance JSON".into(),
-                status: 0,
-            })?;
-
-            let price = ticker.price.parse().unwrap_or(0.0);
-            let quote = PriceQuote {
-                price,
-                source: "binance".into(),
-            };
-
-            self.store_cache(&normalized.cache_key, quote.clone()).await;
-
-            return Ok(quote);
+        // 3. Binance (with API key if provided; then anonymous)
+        if let Some(q) = self.try_binance(&normalized).await? {
+            self.store_cache(&normalized.cache_key, q.clone()).await;
+            return Ok(q);
         }
 
-        // 4. Soft-fail: serve stale cache if available instead of hard error
+        // 4. CoinMarketCap (API key)
+        if let Some(q) = self.try_coinmarketcap(&normalized).await? {
+            self.store_cache(&normalized.cache_key, q.clone()).await;
+            return Ok(q);
+        }
+
+        // 5. CoinGecko (API key or keyless)
+        if let Some(q) = self.try_coingecko(&normalized).await? {
+            self.store_cache(&normalized.cache_key, q.clone()).await;
+            return Ok(q);
+        }
+
+        // 6. CryptoCompare (API key)
+        if let Some(q) = self.try_cryptocompare(&normalized).await? {
+            self.store_cache(&normalized.cache_key, q.clone()).await;
+            return Ok(q);
+        }
+
+        // 7. CoinPaprika (keyless)
+        if let Some(q) = self.try_coinpaprika(&normalized).await? {
+            self.store_cache(&normalized.cache_key, q.clone()).await;
+            return Ok(q);
+        }
+
+        // 8. CoinDesk (BTC only, optional key)
+        if normalized.chainlink_symbol == "BTC" {
+            if let Some(q) = self.try_coindesk().await? {
+                self.store_cache(&normalized.cache_key, q.clone()).await;
+                return Ok(q);
+            }
+        }
+
+        // 9. Soft-fail: serve stale cache if available instead of hard error
         if let Some((quote, age)) = self.cached_any(&normalized.cache_key).await {
             let mut stale = quote.clone();
             stale.source = format!("cache_stale_{}s", age.as_secs());
@@ -126,10 +164,279 @@ impl PriceFeed {
 
         Err(AppError::ApiCall {
             provider: "Binance".into(),
-            status: last_status,
+            status: 429,
         })
     }
 
+    async fn try_binance(
+        &self,
+        normalized: &NormalizedSymbols,
+    ) -> Result<Option<PriceQuote>, AppError> {
+        for binance_symbol in &normalized.binance_symbols {
+            let url = format!(
+                "https://api.binance.com/api/v3/ticker/price?symbol={}",
+                binance_symbol
+            );
+
+            // Try with API key header if provided
+            if let Some(key) = &self.api_keys.binance {
+                if self.allow("binance", 120).await {
+                    let resp = self
+                        .client
+                        .get(&url)
+                        .header("X-MBX-APIKEY", key)
+                        .send()
+                        .await;
+                    if let Ok(ok_resp) = resp {
+                        if ok_resp.status().is_success() {
+                            return Self::parse_binance(ok_resp).await;
+                        }
+                    }
+                }
+            }
+
+            // Fallback without API key
+            if self.allow("binance_anon", 60).await {
+                if let Ok(resp) = self.client.get(&url).send().await {
+                    if resp.status().is_success() {
+                        return Self::parse_binance(resp).await;
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    async fn parse_binance(resp: reqwest::Response) -> Result<Option<PriceQuote>, AppError> {
+        let ticker: BinanceTicker = resp.json().await.map_err(|_| AppError::ApiCall {
+            provider: "Binance JSON".into(),
+            status: 0,
+        })?;
+
+        let price = ticker.price.parse().unwrap_or(0.0);
+        Ok(Some(PriceQuote {
+            price,
+            source: "binance".into(),
+        }))
+    }
+
+    async fn try_coinmarketcap(
+        &self,
+        normalized: &NormalizedSymbols,
+    ) -> Result<Option<PriceQuote>, AppError> {
+        let Some(key) = &self.api_keys.coinmarketcap else {
+            return Ok(None);
+        };
+        if !self.allow("cmc", 30).await {
+            return Ok(None);
+        }
+        let url = format!(
+            "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest?symbol={}&convert=USD",
+            normalized.chainlink_symbol
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .header("X-CMC_PRO_API_KEY", key)
+            .send()
+            .await
+            .map_err(|e| AppError::Connection(format!("CMC request failed: {}", e)))?;
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+        #[derive(Deserialize)]
+        struct Quote {
+            price: f64,
+        }
+        #[derive(Deserialize)]
+        struct DataQuote {
+            #[serde(rename = "quote")]
+            quote: HashMap<String, Quote>,
+        }
+        #[derive(Deserialize)]
+        struct CmcResp {
+            data: HashMap<String, DataQuote>,
+        }
+        let parsed: CmcResp = resp
+            .json()
+            .await
+            .map_err(|e| AppError::Initialization(format!("CMC decode failed: {}", e)))?;
+        if let Some(entry) = parsed.data.get(&normalized.chainlink_symbol) {
+            if let Some(usd) = entry.quote.get("USD") {
+                return Ok(Some(PriceQuote {
+                    price: usd.price,
+                    source: "coinmarketcap".into(),
+                }));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn try_coingecko(
+        &self,
+        normalized: &NormalizedSymbols,
+    ) -> Result<Option<PriceQuote>, AppError> {
+        let id = match normalized.chainlink_symbol.as_str() {
+            "ETH" => "ethereum",
+            "BTC" => "bitcoin",
+            "BNB" => "binancecoin",
+            "ARB" => "arbitrum",
+            "OP" => "optimism",
+            _ => return Ok(None),
+        };
+        let url =
+            format!("https://api.coingecko.com/api/v3/simple/price?ids={id}&vs_currencies=usd");
+        if !self.allow("coingecko", 30).await {
+            return Ok(None);
+        }
+        let mut req = self.client.get(&url);
+        if let Some(key) = &self.api_keys.coingecko {
+            req = req.header("x-cg-pro-api-key", key);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| AppError::Connection(format!("CoinGecko request failed: {}", e)))?;
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+        let parsed: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| AppError::Initialization(format!("CoinGecko decode failed: {}", e)))?;
+        if let Some(price) = parsed
+            .get(id)
+            .and_then(|v| v.get("usd"))
+            .and_then(|v| v.as_f64())
+        {
+            return Ok(Some(PriceQuote {
+                price,
+                source: "coingecko".into(),
+            }));
+        }
+        Ok(None)
+    }
+
+    async fn try_cryptocompare(
+        &self,
+        normalized: &NormalizedSymbols,
+    ) -> Result<Option<PriceQuote>, AppError> {
+        let Some(key) = &self.api_keys.cryptocompare else {
+            return Ok(None);
+        };
+        if !self.allow("cryptocompare", 20).await {
+            return Ok(None);
+        }
+        let url = format!(
+            "https://min-api.cryptocompare.com/data/price?fsym={}&tsyms=USD&api_key={}",
+            normalized.chainlink_symbol, key
+        );
+        let resp =
+            self.client.get(&url).send().await.map_err(|e| {
+                AppError::Connection(format!("CryptoCompare request failed: {}", e))
+            })?;
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+        let parsed: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| AppError::Initialization(format!("CryptoCompare decode failed: {}", e)))?;
+        if let Some(price) = parsed.get("USD").and_then(|v| v.as_f64()) {
+            return Ok(Some(PriceQuote {
+                price,
+                source: "cryptocompare".into(),
+            }));
+        }
+        Ok(None)
+    }
+
+    async fn try_coinpaprika(
+        &self,
+        normalized: &NormalizedSymbols,
+    ) -> Result<Option<PriceQuote>, AppError> {
+        if !self.allow("coinpaprika", 600).await {
+            return Ok(None);
+        }
+        let id = match normalized.chainlink_symbol.as_str() {
+            "BTC" => "btc-bitcoin",
+            "ETH" => "eth-ethereum",
+            "BNB" => "bnb-binance-coin",
+            _ => return Ok(None),
+        };
+        let url = format!("https://api.coinpaprika.com/v1/tickers/{id}");
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| AppError::Connection(format!("CoinPaprika request failed: {}", e)))?;
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+        let parsed: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| AppError::Initialization(format!("CoinPaprika decode failed: {}", e)))?;
+        if let Some(price) = parsed
+            .get("quotes")
+            .and_then(|q| q.get("USD"))
+            .and_then(|u| u.get("price"))
+            .and_then(|p| p.as_f64())
+        {
+            return Ok(Some(PriceQuote {
+                price,
+                source: "coinpaprika".into(),
+            }));
+        }
+        Ok(None)
+    }
+
+    async fn try_coindesk(&self) -> Result<Option<PriceQuote>, AppError> {
+        // User noted Coindesk price now proxies CryptoCompare endpoint.
+        // We respect coindesk API key if present, but the endpoint is public.
+        if !self.allow("coindesk", 30).await {
+            return Ok(None);
+        }
+        let url = "https://min-api.cryptocompare.com/data/price?fsym=BTC&tsyms=USD,JPY,EUR";
+        let mut req = self.client.get(url);
+        if let Some(key) = &self.api_keys.coindesk {
+            req = req.header("X-API-KEY", key);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| AppError::Connection(format!("Coindesk request failed: {}", e)))?;
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+        let parsed: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| AppError::Initialization(format!("Coindesk decode failed: {}", e)))?;
+        if let Some(price) = parsed.get("USD").and_then(|v| v.as_f64()) {
+            return Ok(Some(PriceQuote {
+                price,
+                source: "coindesk".into(),
+            }));
+        }
+        Ok(None)
+    }
+
+    async fn allow(&self, provider: &'static str, rpm: u32) -> bool {
+        let mut guard = self.rate.lock().unwrap_or_else(|e| e.into_inner());
+        let state = guard.entry(provider).or_insert_with(RateState::new);
+        let now = Instant::now();
+        if now.duration_since(state.window_start).as_secs() >= PROVIDER_WINDOW_SECS {
+            state.window_start = now;
+            state.count = 0;
+        }
+        if state.count >= rpm {
+            return false;
+        }
+        state.count += 1;
+        true
+    }
     async fn try_chainlink(&self, symbol: &str) -> Result<Option<PriceQuote>, AppError> {
         let key = symbol.to_uppercase();
         let fallback_keys = [

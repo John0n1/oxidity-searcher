@@ -20,8 +20,9 @@ pub async fn spawn_metrics_server(
     let token = match std::env::var("METRICS_TOKEN") {
         Ok(t) if !t.is_empty() => t,
         _ => {
-            tracing::warn!("METRICS_TOKEN is required; metrics server not started");
-            return None;
+            // Fail fast: metrics are required for observability / health.
+            tracing::error!("METRICS_TOKEN missing or empty; aborting startup.");
+            std::process::exit(1);
         }
     };
     let bind_addr = std::env::var("METRICS_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());

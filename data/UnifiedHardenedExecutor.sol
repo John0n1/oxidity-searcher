@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
+
+pragma solidity ^0.8.33;
 
 // ==========================================
 // INTERFACES
 // ==========================================
+// Minimal surfaces to avoid pulling full ABIs; keeps bytecode small.
 
 interface IERC20 {
     function balanceOf(address account) external view returns (uint256);
@@ -57,23 +60,30 @@ interface IAaveFlashLoanSimpleReceiver {
 // ==========================================
 // UNIFIED EXECUTOR (HARDENED)
 // ==========================================
+/// @title UnifiedHardenedExecutor
+/// @notice Single-owner helper for MEV bundles and Balancer/Aave flashloans. Intended to be driven
+///         by an off-chain searcher via private relay (Flashbots / builder). Ownership must remain
+///         with that off-chain signer; no shared custody assumed.
+/// @dev Hardened for low-level token quirks (USDT-style approvals) and tolerant profit sweeping.
 
 contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleReceiver {
     // --- Constants & State ---
+    // Mainnet Balancer vault; change on non-mainnet deployments.
     address private constant BALANCER_VAULT = 0xBA12222222228d8Ba445958a75a0704d566BF2C8;
     
     address public immutable owner;
-    address public immutable WETH;
+    // Mainnet WETH (hardcoded to avoid misconfiguration). Change and redeploy if using another chain.
+    address public constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
     address public profitReceiver;
     bool public sweepProfitToEth;
     address private activeAavePool;
 
     // --- Events ---
-    event ArbitrageExecuted(uint256 surplus, address token);
+    event ArbitrageExecuted(uint256 surplus, address indexed token);
     event BundleExecuted(uint256 bribePaid);
     event ProfitReceiverUpdated(address indexed newReceiver);
     event SweepPreferenceUpdated(bool sweepToEth);
-    event DistributeFailed(address token, uint256 amount); // Funds left in contract
+    event DistributeFailed(address indexed token, uint256 amount); // Funds left in contract
     event CallFailed(uint256 index, bytes reason);
 
     // --- Errors ---
@@ -93,14 +103,14 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
     error InvalidPool();
     error InvalidAsset();
 
-    constructor(address _profitReceiver, address _weth) {
+    /// @param _profitReceiver address to receive residual profits/ETH sweeps.
+    constructor(address _profitReceiver) {
         if (_profitReceiver == address(0)) revert InvalidProfitReceiver();
-        // Harden WETH check: ensure it is actually a contract
-        if (_weth == address(0) || _weth.code.length == 0) revert InvalidWETHAddress();
+        // Harden WETH check: ensure hardcoded WETH is actually a contract
+        if (WETH == address(0) || WETH.code.length == 0) revert InvalidWETHAddress();
         
         owner = msg.sender;
         profitReceiver = _profitReceiver;
-        WETH = _weth;
         sweepProfitToEth = true; 
     }
 
@@ -111,7 +121,7 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
         _;
     }
 
-    // Allow the contract to call itself (essential for setting approvals mid-bundle)
+    // Allow the contract to call itself (needed for mid-bundle approvals).
     modifier onlySelfOrOwner() {
         if (msg.sender != owner && msg.sender != address(this)) revert OnlyOwner();
         _;
@@ -121,6 +131,14 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
     // MODE 1: MEV BUNDLE EXECUTION (Direct)
     // ==========================================
 
+    /// @notice Execute a multicall bundle and optional bribe. Owner-only.
+    /// @param targets ordered list of call targets
+    /// @param payloads calldata blobs matching each target
+    /// @param values msg.value per call (in wei)
+    /// @param bribeRecipient optional bribe recipient (zero => block.coinbase)
+    /// @param bribeAmount bribe value in wei
+    /// @param allowPartial if true, continue on individual call failure and emit CallFailed
+    /// @param balanceCheckToken optional ERC20 to enforce non-decreasing balance
     function executeBundle(
         address[] calldata targets,
         bytes[] calldata payloads,
@@ -133,13 +151,13 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
         if (targets.length != payloads.length || targets.length != values.length) {
             revert LengthMismatch();
         }
+        if (targets.length == 0) revert LengthMismatch();
 
         uint256 tokenBalanceBefore = balanceCheckToken == address(0)
             ? 0
             : IERC20(balanceCheckToken).balanceOf(address(this));
 
-        // 1. Execute all calls
-        // msg.value is already credited to address(this).balance
+        // 1. Execute all calls. msg.value already sits on this contract.
         for (uint256 i = 0; i < targets.length; i++) {
             (bool success, bytes memory result) = targets[i].call{value: values[i]}(payloads[i]);
             if (!success) {
@@ -152,10 +170,8 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
             }
         }
 
-        // 2. Handle Bribe (Miner Tip)
+        // 2. Optional bribe. Check balance after calls to avoid underpay.
         if (bribeAmount > 0) {
-            // FIX: Check current balance AFTER calls. 
-            // We don't need to subtract callsTotalValue because those funds are already gone.
             if (address(this).balance < bribeAmount) revert BribeFailed();
             
             address actualRecipient = bribeRecipient == address(0) ? block.coinbase : bribeRecipient;
@@ -166,15 +182,14 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
             emit BundleExecuted(bribeAmount);
         }
 
-        // 3. Refund / Sweep
-        // If profitReceiver rejects ETH, we leave it here to prevent reverting the bundle.
+        // 3. Refund / Sweep. If receiver rejects, keep funds to avoid reverting bundle.
         uint256 remaining = address(this).balance;
         if (remaining > 0) {
             (bool success, ) = profitReceiver.call{value: remaining}("");
             if (!success) emit DistributeFailed(address(0), remaining);
         }
 
-        // 4. Balance invariant (optional)
+        // 4. Optional balance invariant for a specified token.
         if (balanceCheckToken != address(0)) {
             uint256 tokenBalanceAfter = IERC20(balanceCheckToken).balanceOf(address(this));
             if (tokenBalanceAfter < tokenBalanceBefore) {
@@ -187,6 +202,10 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
     // MODE 2: FLASH LOAN EXECUTION (Balancer)
     // ==========================================
 
+    /// @notice Initiate a Balancer flashloan with arbitrary callback payload.
+    /// @param assets loan tokens
+    /// @param amounts loan amounts (must be >0)
+    /// @param params abi.encode(targets, values, payloads) for callback execution
     function executeFlashLoan(
         IERC20[] calldata assets,
         uint256[] calldata amounts,
@@ -194,6 +213,9 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
     ) external onlyOwner {
         if (assets.length == 0) revert ZeroAssets();
         if (assets.length != amounts.length) revert LengthMismatch();
+        for (uint256 i = 0; i < amounts.length; i++) {
+            if (amounts[i] == 0) revert ZeroAssets();
+        }
 
         IBalancerVault(BALANCER_VAULT).flashLoan(
             address(this),
@@ -204,6 +226,11 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
     }
 
     /// @notice Initiate an Aave V3 simple flashloan. Params encoding matches Balancer path.
+    /// @notice Initiate an Aave V3 simple flashloan.
+    /// @param pool Aave pool address
+    /// @param asset loan token
+    /// @param amount loan amount (must be >0)
+    /// @param params abi.encode(targets, values, payloads) for callback execution
     function executeAaveFlashLoanSimple(
         address pool,
         address asset,
@@ -212,11 +239,13 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
     ) external onlyOwner {
         if (pool == address(0)) revert InvalidPool();
         if (asset == address(0)) revert InvalidAsset();
+        if (amount == 0) revert ZeroAssets();
         activeAavePool = pool;
         IAavePool(pool).flashLoanSimple(address(this), asset, amount, params, 0);
         activeAavePool = address(0);
     }
 
+    /// @inheritdoc IFlashLoanRecipient
     function receiveFlashLoan(
         IERC20[] memory tokens,
         uint256[] memory amounts,
@@ -236,7 +265,7 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
             revert LengthMismatch();
         }
 
-        // 1. Execute Arbitrage Logic
+        // 1. Arbitrage logic supplied by off-chain driver.
         for (uint256 i = 0; i < targets.length; i++) {
             (bool success, bytes memory result) = targets[i].call{value: values[i]}(payloads[i]);
             if (!success) {
@@ -244,7 +273,7 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
             }
         }
 
-        // 2. Repay Vault & Take Profit
+        // 2. Repay vault; distribute surplus if any.
         for (uint256 i = 0; i < tokens.length; i++) {
             uint256 amountOwing = amounts[i] + feeAmounts[i];
             if (amountOwing == 0) continue;
@@ -268,7 +297,7 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
             _safeTransfer(tokenAddr, BALANCER_VAULT, amountOwing);
         }
 
-        // 3. Sweep loose ETH (e.g. from WETH unwrapping or pure ETH arb)
+        // 3. Sweep loose ETH from unwrapped WETH or native profits.
         uint256 ethBal = address(this).balance;
         if (ethBal > 0) {
             (bool success, ) = profitReceiver.call{value: ethBal}("");
@@ -277,6 +306,7 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
     }
 
     // Aave V3 simple flashloan callback
+    /// @inheritdoc IAaveFlashLoanSimpleReceiver
     function executeOperation(
         address asset,
         uint256 amount,
@@ -354,7 +384,7 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
     /// @notice USDT-Safe Approval. 
     /// @dev Can be called by Owner OR by this contract (via flashloan payload).
     function safeApprove(address token, address spender, uint256 amount) external onlySelfOrOwner {
-        // Check current allowance first to save gas or handle USDT reset
+        // Check current allowance first to save gas and handle USDT-style reset rules.
         uint256 currentAllowance = IERC20(token).allowance(address(this), spender);
         
         // If we need to increase/change and allowance is already non-zero, reset to 0 first
@@ -373,6 +403,8 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
     // ==========================================
 
     function _distributeProfit(address tokenAddr, uint256 profit) internal {
+        // Keep USDT/USDC safety: low-level call + bool decode. Swallow failures to avoid
+        // reverting flashloan flow; funds stay on contract for manual recovery.
         if (tokenAddr == WETH && sweepProfitToEth) {
             IWETH(WETH).withdraw(profit);
             // ETH transfer happens at end of function or next step
@@ -394,7 +426,7 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
         (bool success, bytes memory data) = token.call(
             abi.encodeWithSelector(0x095ea7b3, spender, amount) // approve(spender, amount)
         );
-        // Check success AND decode result if data exists
+        // USDT-safe approve: must reset to zero first in some tokens.
         if (!success || (data.length != 0 && !abi.decode(data, (bool)))) {
             revert ApprovalFailed();
         }

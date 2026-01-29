@@ -18,6 +18,13 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 pub const BUNDLE_DEBOUNCE_MS: u64 = 5;
+// Flashbots documented limits: <=100 txs and < ~500 kB per bundle.
+const MAX_FLASHBOTS_TXS: usize = 100;
+const MAX_FLASHBOTS_BYTES: usize = 500_000;
+
+fn bundle_bytes(bundle: &[Vec<u8>]) -> usize {
+    bundle.iter().map(|b| b.len()).sum()
+}
 
 #[derive(Clone)]
 pub struct BundlePlan {
@@ -274,6 +281,56 @@ impl StrategyExecutor {
                 "nonce lease exhausted while building bundle".into(),
             ));
         }
+
+        let new_raw_bytes = bundle_bytes(&new_raw);
+        if new_raw.len() > MAX_FLASHBOTS_TXS || new_raw_bytes > MAX_FLASHBOTS_BYTES {
+            return Err(AppError::Strategy(
+                "Single merge would exceed Flashbots bundle limits".into(),
+            ));
+        }
+
+        // If adding this plan would overflow builder limits, flush existing bundle first.
+        let combined_txs = state.raw.len().saturating_add(new_raw.len());
+        let combined_bytes = bundle_bytes(&state.raw).saturating_add(new_raw_bytes);
+        if (combined_txs > MAX_FLASHBOTS_TXS || combined_bytes > MAX_FLASHBOTS_BYTES)
+            && !state.raw.is_empty()
+        {
+            let flush_bundle = state.raw.clone();
+            let chain_id = self.chain_id;
+            let block_for_flush = state.block;
+            let next_nonce_flush = state.next_nonce;
+            // clear current buffer before releasing lock to avoid double-send via schedule.
+            state.raw.clear();
+            state.touched_pools.clear();
+            state.send_pending = false;
+            drop(state_guard);
+
+            if self.dry_run {
+                tracing::info!(
+                    target: "bundle_merge",
+                    txs = flush_bundle.len(),
+                    bytes = flush_bundle.iter().map(|b| b.len()).sum::<usize>(),
+                    "Dry-run: would flush bundle before exceeding limits"
+                );
+            } else {
+                self.bundle_sender
+                    .send_bundle(&flush_bundle, chain_id)
+                    .await
+                    .map_err(|e| AppError::Strategy(format!("Flush bundle failed: {e}")))?;
+            }
+
+            // Re-establish state after flush
+            state_guard = self.bundle_state.lock().await;
+            *state_guard = Some(BundleState {
+                block: block_for_flush,
+                next_nonce: next_nonce_flush,
+                raw: Vec::new(),
+                touched_pools: HashSet::new(),
+                send_pending: false,
+            });
+        }
+
+        let state = state_guard.as_mut().unwrap();
 
         state.next_nonce = state.next_nonce.max(nonce.max(lease_end));
         state.raw.extend(new_raw);

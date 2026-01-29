@@ -9,8 +9,8 @@ repository = "https://github.com/John0n1/oxidity-builder"
 license = "MIT"
 
 [dependencies]
-# Async Runtime
-tokio = { version = "1.35", features = ["full"] }
+# Async Runtime (updated to patched release Jan 2026)
+tokio = { version = "1.49", features = ["full"] }
 
 # Serialization (PINNED to fix build error)
 serde = { version = "=1.0.228", features = ["derive"] }
@@ -31,8 +31,8 @@ anyhow = "1.0"
 alloy = { version = "1.4.3", features = ["full", "node-bindings", "serde"] }
 alloy-consensus = { version = "1.4.3", features = ["serde"] } 
 alloy-primitives = { version = "1.5.2", features = ["serde"] } 
-alloy-json-abi = "1.5.3" 
-alloy-sol-types = { version = "1.5.3"}
+alloy-json-abi = "1.5.4" 
+alloy-sol-types = { version = "1.5.4"}
 alloy-rpc-client = "1.5.2"
 
 # --- DATA ---

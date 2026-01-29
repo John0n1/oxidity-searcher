@@ -40,7 +40,7 @@ impl NonceManager {
         let on_chain_nonce: u64 = retry_async(
             move |_| {
                 let provider = provider.clone();
-                async move { provider.get_transaction_count(address).await }
+                async move { provider.get_transaction_count(address).pending().await }
             },
             3,
             Duration::from_millis(100),
@@ -67,7 +67,7 @@ impl NonceManager {
         let on_chain_nonce: u64 = retry_async(
             move |_| {
                 let provider = provider.clone();
-                async move { provider.get_transaction_count(address).await }
+                async move { provider.get_transaction_count(address).pending().await }
             },
             3,
             Duration::from_millis(100),

@@ -141,7 +141,11 @@ async fn main() -> Result<(), AppError> {
             tracing::warn!("No Chainlink feeds configured for chain {}", chain_id);
         }
         let wrapped_native = oxidity_builder::common::constants::wrapped_native_for_chain(chain_id);
-        let price_feed = PriceFeed::new(http_provider.clone(), chainlink_feeds);
+        let price_feed = PriceFeed::new(
+            http_provider.clone(),
+            chainlink_feeds,
+            settings.price_api_keys(),
+        );
         let simulator = Simulator::new(http_provider.clone());
 
         let strategy_enabled = strategy_enabled_flag;

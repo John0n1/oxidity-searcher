@@ -199,16 +199,16 @@ impl Engine {
                 self.router_allowlist.clone(),
                 self.wrapped_native,
                 self.executor,
-            self.executor_bribe_bps,
-            self.executor_bribe_recipient,
-            self.flashloan_enabled,
-            self.flashloan_providers.clone(),
-            self.aave_pool,
-            reserve_cache.clone(),
-            self.sandwich_attacks_enabled,
-            self.simulation_backend.clone(),
-            self.worker_limit,
-        );
+                self.executor_bribe_bps,
+                self.executor_bribe_recipient,
+                self.flashloan_enabled,
+                self.flashloan_providers.clone(),
+                self.aave_pool,
+                reserve_cache.clone(),
+                self.sandwich_attacks_enabled,
+                self.simulation_backend.clone(),
+                self.worker_limit,
+            );
 
             if self.mev_share_enabled {
                 let mev_share = MevShareClient::new(

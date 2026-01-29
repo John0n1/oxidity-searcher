@@ -283,7 +283,14 @@ impl StrategyExecutor {
             main: main_request.clone(),
             victims: vec![tx.inner.encoded_2718()],
         };
-        let touched_pools = self.reserve_cache.pairs_for_v2_path(&observed_swap.path);
+        let mut touched_pools = self.reserve_cache.pairs_for_v2_path(&observed_swap.path);
+        if observed_swap.router_kind == crate::services::strategy::decode::RouterKind::V3Like {
+            if let Some(v3_id) =
+                StrategyExecutor::v3_pool_identifier(&observed_swap.path, &observed_swap.v3_fees)
+            {
+                touched_pools.push(v3_id);
+            }
+        }
         let plan_hashes = match self.merge_and_send_bundle(plan, touched_pools, lease).await {
             Ok(Some(h)) => h,
             Ok(None) => return Ok(None),

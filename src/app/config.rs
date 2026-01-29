@@ -73,6 +73,11 @@ pub struct GlobalSettings {
     pub router_allowlist_by_chain: Option<HashMap<String, HashMap<String, String>>>,
     pub chainlink_feeds_by_chain: Option<HashMap<String, HashMap<String, String>>>,
     pub chainlink_feeds_by_chain_eth: Option<HashMap<String, HashMap<String, String>>>,
+    pub binance_api_key: Option<String>,
+    pub coinmarketcap_api_key: Option<String>,
+    pub coingecko_api_key: Option<String>,
+    pub cryptocompare_api_key: Option<String>,
+    pub coindesk_api_key: Option<String>,
 }
 
 // Defaults
@@ -334,10 +339,16 @@ impl GlobalSettings {
             .and_then(|m| m.get(&chain_id.to_string()).cloned())
     }
 
-    pub fn flashloan_providers(&self) -> Vec<crate::services::strategy::strategy::FlashloanProvider> {
+    pub fn flashloan_providers(
+        &self,
+    ) -> Vec<crate::services::strategy::strategy::FlashloanProvider> {
         use crate::services::strategy::strategy::FlashloanProvider::*;
         let raw = self.flashloan_provider.to_lowercase();
-        let mut parts: Vec<&str> = raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        let mut parts: Vec<&str> = raw
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
         let mut auto = false;
         if let Some(pos) = parts.iter().position(|p| *p == "auto") {
             auto = true;
@@ -436,6 +447,27 @@ impl GlobalSettings {
             .ok()
             .or_else(|| self.chainlink_feeds_path.clone())
             .unwrap_or_else(|| "data/chainlink_feeds.json".to_string())
+    }
+
+    pub fn price_api_keys(&self) -> crate::network::price_feed::PriceApiKeys {
+        use std::env::var;
+        crate::network::price_feed::PriceApiKeys {
+            binance: var("BINANCE_API_KEY")
+                .ok()
+                .or_else(|| self.binance_api_key.clone()),
+            coinmarketcap: var("COINMARKETCAP_API_KEY")
+                .ok()
+                .or_else(|| self.coinmarketcap_api_key.clone()),
+            coingecko: var("COINGECKO_API_KEY")
+                .ok()
+                .or_else(|| self.coingecko_api_key.clone()),
+            cryptocompare: var("CRYPTOCOMPARE_API_KEY")
+                .ok()
+                .or_else(|| self.cryptocompare_api_key.clone()),
+            coindesk: var("COINDESK_API_KEY")
+                .ok()
+                .or_else(|| self.coindesk_api_key.clone()),
+        }
     }
 }
 
@@ -636,6 +668,11 @@ mod tests {
             chainlink_feeds_by_chain: None,
             chainlink_feeds_by_chain_eth: None,
             aave_pools_by_chain: None,
+            binance_api_key: None,
+            coinmarketcap_api_key: None,
+            coingecko_api_key: None,
+            cryptocompare_api_key: None,
+            coindesk_api_key: None,
         }
     }
 

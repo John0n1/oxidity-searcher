@@ -17,7 +17,7 @@ use oxidity_builder::infrastructure::data::token_manager::TokenManager;
 use oxidity_builder::network::gas::GasOracle;
 use oxidity_builder::network::mev_share::MevShareHint;
 use oxidity_builder::network::nonce::NonceManager;
-use oxidity_builder::network::price_feed::PriceFeed;
+use oxidity_builder::network::price_feed::{PriceApiKeys, PriceFeed};
 use oxidity_builder::network::provider::HttpProvider;
 use oxidity_builder::network::reserves::ReserveCache;
 use oxidity_builder::services::strategy::routers::UniV3Router;
@@ -63,7 +63,11 @@ async fn mev_share_v3_pipeline_manual() {
     let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), signer.address()));
     let gas_oracle = GasOracle::new(http.clone());
-    let price_feed = PriceFeed::new(http.clone(), std::collections::HashMap::new());
+    let price_feed = PriceFeed::new(
+        http.clone(),
+        std::collections::HashMap::new(),
+        PriceApiKeys::default(),
+    );
     let simulator = Simulator::new(http.clone());
     let token_manager = Arc::new(TokenManager::default());
     let stats = Arc::new(StrategyStats::default());

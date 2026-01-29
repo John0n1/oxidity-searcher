@@ -4,23 +4,22 @@
 pub mod bundles;
 pub mod swaps;
 
+use crate::common::constants::default_balancer_vault_for_chain;
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
 use crate::data::executor::{FlashCallbackData, UnifiedHardenedExecutor};
+use crate::network::gas::GasFees;
 use crate::services::strategy::decode::{
     ObservedSwap, RouterKind, encode_v3_path, reverse_v3_path, target_token,
 };
+use crate::services::strategy::routers::{AavePool, BalancerProtocolFees, BalancerVaultFees};
 use crate::services::strategy::routers::{ERC20, UniV2Router, UniV3Router};
 use crate::services::strategy::strategy::{FlashloanProvider, StrategyExecutor};
-use crate::common::constants::default_balancer_vault_for_chain;
-use crate::services::strategy::routers::{BalancerProtocolFees, BalancerVaultFees, AavePool};
-use crate::network::gas::GasFees;
 use alloy::eips::eip2930::AccessList;
 use alloy::primitives::{Address, B256, Bytes, TxKind, U256};
 use alloy::rpc::types::eth::{TransactionInput, TransactionRequest};
 use alloy::sol_types::{SolCall, SolValue};
 use std::time::Duration;
-use std::str::FromStr;
 
 pub struct BackrunTx {
     pub raw: Vec<u8>,
@@ -728,18 +727,20 @@ impl StrategyExecutor {
                         uses_flashloan: false,
                         router_kind: observed.router_kind,
                     });
-        }
-        }
-    } else {
-        let tokens_in = token_in_override.unwrap();
-        let (value, expected_out, calldata, access_list) = match observed.router_kind {
-            RouterKind::V2Like => {
-                expected_out_token = self.wrapped_native;
-                let router_contract = UniV2Router::new(observed.router, self.http_provider.clone());
-                let sell_path = vec![target_token, self.wrapped_native];
-                let sell_amount = tokens_in;
-                let expected_out =
-                    if let Some(q) = self.reserve_cache.quote_v2_path(&sell_path, sell_amount) {
+                }
+            }
+        } else {
+            let tokens_in = token_in_override.unwrap();
+            let (value, expected_out, calldata, access_list) = match observed.router_kind {
+                RouterKind::V2Like => {
+                    expected_out_token = self.wrapped_native;
+                    let router_contract =
+                        UniV2Router::new(observed.router, self.http_provider.clone());
+                    let sell_path = vec![target_token, self.wrapped_native];
+                    let sell_amount = tokens_in;
+                    let expected_out = if let Some(q) =
+                        self.reserve_cache.quote_v2_path(&sell_path, sell_amount)
+                    {
                         q
                     } else {
                         let quote_path = sell_path.clone();
@@ -759,127 +760,129 @@ impl StrategyExecutor {
                             AppError::Strategy("Sell quote missing amounts".into())
                         })?
                     };
-                let ratio_ppm = StrategyExecutor::price_ratio_ppm(expected_out, sell_amount);
-                if ratio_ppm < U256::from(1_000u64) {
-                    return Err(AppError::Strategy("Sell liquidity too low".into()));
-                }
-                if !self.dry_run {
-                    if !self
-                        .probe_v2_sell_for_toxicity(
-                            target_token,
-                            observed.router,
+                    let ratio_ppm = StrategyExecutor::price_ratio_ppm(expected_out, sell_amount);
+                    if ratio_ppm < U256::from(1_000u64) {
+                        return Err(AppError::Strategy("Sell liquidity too low".into()));
+                    }
+                    if !self.dry_run {
+                        if !self
+                            .probe_v2_sell_for_toxicity(
+                                target_token,
+                                observed.router,
+                                sell_amount,
+                                expected_out,
+                            )
+                            .await?
+                        {
+                            return Err(AppError::Strategy(
+                                "toxic token detected on backrun".into(),
+                            ));
+                        }
+                    }
+                    let min_out = expected_out
+                        .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+                        / U256::from(10_000u64);
+                    let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 300);
+                    let calldata = router_contract
+                        .swapExactTokensForETH(
                             sell_amount,
-                            expected_out,
+                            min_out,
+                            sell_path.clone(),
+                            self.signer.address(),
+                            deadline,
                         )
-                        .await?
-                    {
-                        return Err(AppError::Strategy("toxic token detected on backrun".into()));
+                        .calldata()
+                        .to_vec();
+                    let access_list =
+                        StrategyExecutor::build_access_list(observed.router, &sell_path);
+                    (U256::ZERO, expected_out, calldata, access_list)
+                }
+                RouterKind::V3Like => {
+                    expected_out_token = self.wrapped_native;
+                    unwrap_to_native = true;
+                    let rev_path = reverse_v3_path(&observed.path, &observed.v3_fees)
+                        .ok_or_else(|| AppError::Strategy("Reverse V3 path failed".into()))?;
+                    let expected_out = self.quote_v3_path(&rev_path, tokens_in).await?;
+                    let ratio_ppm = StrategyExecutor::price_ratio_ppm(expected_out, tokens_in);
+                    if ratio_ppm < U256::from(1_000u64) {
+                        return Err(AppError::Strategy("Sell liquidity too low".into()));
                     }
-                }
-                let min_out = expected_out
-                    .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
-                    / U256::from(10_000u64);
-                let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 300);
-                let calldata = router_contract
-                    .swapExactTokensForETH(
-                        sell_amount,
-                        min_out,
-                        sell_path.clone(),
-                        self.signer.address(),
-                        deadline,
-                    )
-                    .calldata()
-                    .to_vec();
-                let access_list = StrategyExecutor::build_access_list(observed.router, &sell_path);
-                (U256::ZERO, expected_out, calldata, access_list)
-            }
-            RouterKind::V3Like => {
-                expected_out_token = self.wrapped_native;
-                unwrap_to_native = true;
-                let rev_path = reverse_v3_path(&observed.path, &observed.v3_fees)
-                    .ok_or_else(|| AppError::Strategy("Reverse V3 path failed".into()))?;
-                let expected_out = self.quote_v3_path(&rev_path, tokens_in).await?;
-                let ratio_ppm = StrategyExecutor::price_ratio_ppm(expected_out, tokens_in);
-                if ratio_ppm < U256::from(1_000u64) {
-                    return Err(AppError::Strategy("Sell liquidity too low".into()));
-                }
-                if !self.dry_run {
-                    if !self
-                        .probe_v3_sell_for_toxicity(
-                            observed.router,
-                            rev_path.clone(),
-                            tokens_in,
-                            expected_out,
-                        )
-                        .await?
-                    {
-                        self.mark_toxic_token(target_token, "v3_probe_shortfall");
-                        return Err(AppError::Strategy("toxic token detected on backrun".into()));
+                    if !self.dry_run {
+                        if !self
+                            .probe_v3_sell_for_toxicity(
+                                observed.router,
+                                rev_path.clone(),
+                                tokens_in,
+                                expected_out,
+                            )
+                            .await?
+                        {
+                            self.mark_toxic_token(target_token, "v3_probe_shortfall");
+                            return Err(AppError::Strategy(
+                                "toxic token detected on backrun".into(),
+                            ));
+                        }
                     }
+                    let min_out = expected_out
+                        .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+                        / U256::from(10_000u64);
+                    let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 300);
+                    let calldata = UniV3Router::new(observed.router, self.http_provider.clone())
+                        .exactInput(UniV3Router::ExactInputParams {
+                            path: rev_path.clone().into(),
+                            recipient: self.signer.address(),
+                            deadline,
+                            amountIn: tokens_in,
+                            amountOutMinimum: min_out,
+                        })
+                        .calldata()
+                        .to_vec();
+                    let access_list =
+                        StrategyExecutor::build_access_list(observed.router, &observed.path);
+                    (U256::ZERO, expected_out, calldata, access_list)
                 }
-                let min_out = expected_out
-                    .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
-                    / U256::from(10_000u64);
-                let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 300);
-                let calldata = UniV3Router::new(observed.router, self.http_provider.clone())
-                    .exactInput(UniV3Router::ExactInputParams {
-                        path: rev_path.clone().into(),
-                        recipient: self.signer.address(),
-                        deadline,
-                        amountIn: tokens_in,
-                        amountOutMinimum: min_out,
-                    })
-                    .calldata()
-                    .to_vec();
-                let access_list =
-                    StrategyExecutor::build_access_list(observed.router, &observed.path);
-                (U256::ZERO, expected_out, calldata, access_list)
-            }
-        };
+            };
 
-        let access_list = access_list.clone();
-        let (raw, request, hash) = self
-            .sign_with_access_list(
-                TransactionRequest {
-                    from: Some(self.signer.address()),
-                    to: Some(TxKind::Call(observed.router)),
-                    max_fee_per_gas: Some(max_fee_per_gas),
-                    max_priority_fee_per_gas: Some(max_priority_fee_per_gas),
-                    gas: Some(gas_limit_hint),
-                    value: Some(value),
-                    input: TransactionInput::new(calldata.into()),
-                    nonce: Some(nonce),
-                    chain_id: Some(self.chain_id),
-                    access_list: Some(access_list.clone()),
-                    ..Default::default()
-                },
-                access_list,
-            )
-            .await?;
+            let access_list = access_list.clone();
+            let (raw, request, hash) = self
+                .sign_with_access_list(
+                    TransactionRequest {
+                        from: Some(self.signer.address()),
+                        to: Some(TxKind::Call(observed.router)),
+                        max_fee_per_gas: Some(max_fee_per_gas),
+                        max_priority_fee_per_gas: Some(max_priority_fee_per_gas),
+                        gas: Some(gas_limit_hint),
+                        value: Some(value),
+                        input: TransactionInput::new(calldata.into()),
+                        nonce: Some(nonce),
+                        chain_id: Some(self.chain_id),
+                        access_list: Some(access_list.clone()),
+                        ..Default::default()
+                    },
+                    access_list,
+                )
+                .await?;
 
-        Ok(BackrunTx {
-            raw,
-            hash,
-            to: observed.router,
-            value,
-            request,
-            expected_out,
-            expected_out_token,
-            unwrap_to_native,
-            uses_flashloan: use_flashloan,
-            router_kind: observed.router_kind,
-        })
+            Ok(BackrunTx {
+                raw,
+                hash,
+                to: observed.router,
+                value,
+                request,
+                expected_out,
+                expected_out_token,
+                unwrap_to_native,
+                uses_flashloan: use_flashloan,
+                router_kind: observed.router_kind,
+            })
+        }
     }
-    }
+}
 
-    }
-
-    // ------------------------------------------------------------------
-    // Flashloan provider scoring
-    // ------------------------------------------------------------------
+// ------------------------------------------------------------------
+// Flashloan provider scoring
+// ------------------------------------------------------------------
 impl StrategyExecutor {
-
-
     async fn select_flashloan_provider(
         &self,
         asset: Address,
@@ -901,7 +904,9 @@ impl StrategyExecutor {
                         .await?
                 }
             };
-            let Some((total_cost, _)) = quote else { continue };
+            let Some((total_cost, _)) = quote else {
+                continue;
+            };
             match best {
                 None => best = Some((*provider, total_cost)),
                 Some((_, current)) if total_cost < current => best = Some((*provider, total_cost)),
@@ -921,9 +926,8 @@ impl StrategyExecutor {
         amount: U256,
         max_fee_per_gas: u128,
     ) -> Result<Option<(U256, u64)>, AppError> {
-        let vault = default_balancer_vault_for_chain(self.chain_id).ok_or_else(|| {
-            AppError::Strategy("Balancer vault not configured for chain".into())
-        })?;
+        let vault = default_balancer_vault_for_chain(self.chain_id)
+            .ok_or_else(|| AppError::Strategy("Balancer vault not configured for chain".into()))?;
         let balance: U256 = ERC20::new(asset, self.http_provider.clone())
             .balanceOf(vault)
             .call()
@@ -933,17 +937,21 @@ impl StrategyExecutor {
             return Ok(None);
         }
 
+        // Balancer governance can set this to 0 on mainnet; treat missing/failed call as zero per spec.
         let fee_pct_wei: U256 = self
             .get_balancer_flashloan_fee()
             .await
-            .unwrap_or_else(|| U256::from_str("400000000000000").unwrap_or(U256::ZERO)); // 0.0004 * 1e18 fallback
+            .unwrap_or(U256::ZERO);
         let premium = amount
             .saturating_mul(fee_pct_wei)
             .checked_div(U256::from(1_000_000_000_000_000_000u128))
             .unwrap_or(U256::MAX);
-        let gas_cost = U256::from(BALANCER_FLASHLOAN_OVERHEAD_GAS)
-            .saturating_mul(U256::from(max_fee_per_gas));
-        Ok(Some((premium.saturating_add(gas_cost), BALANCER_FLASHLOAN_OVERHEAD_GAS)))
+        let gas_cost =
+            U256::from(BALANCER_FLASHLOAN_OVERHEAD_GAS).saturating_mul(U256::from(max_fee_per_gas));
+        Ok(Some((
+            premium.saturating_add(gas_cost),
+            BALANCER_FLASHLOAN_OVERHEAD_GAS,
+        )))
     }
 
     async fn get_balancer_flashloan_fee(&self) -> Option<U256> {
@@ -955,11 +963,7 @@ impl StrategyExecutor {
             .await
             .ok()?;
         let collector = BalancerProtocolFees::new(collector_addr, self.http_provider.clone());
-        collector
-            .getFlashLoanFeePercentage()
-            .call()
-            .await
-            .ok()
+        collector.getFlashLoanFeePercentage().call().await.ok()
     }
 
     async fn quote_aave_flashloan(
@@ -980,12 +984,14 @@ impl StrategyExecutor {
         if balance < amount {
             return Ok(None);
         }
-        let premium_bps: U256 = AavePool::new(pool, self.http_provider.clone())
+        let premium_bps: U256 = match AavePool::new(pool, self.http_provider.clone())
             .FLASHLOAN_PREMIUM_TOTAL()
             .call()
             .await
-            .map(U256::from)
-            .unwrap_or_else(|_| U256::from(9u64)); // default 9 bps
+        {
+            Ok(v) => U256::from(v),
+            Err(_) => return Ok(None), // If premium unknown, skip provider instead of guessing
+        };
 
         let premium = amount
             .saturating_mul(premium_bps)
@@ -993,6 +999,9 @@ impl StrategyExecutor {
             .unwrap_or(U256::MAX);
         let gas_cost =
             U256::from(AAVE_FLASHLOAN_OVERHEAD_GAS).saturating_mul(U256::from(max_fee_per_gas));
-        Ok(Some((premium.saturating_add(gas_cost), AAVE_FLASHLOAN_OVERHEAD_GAS)))
+        Ok(Some((
+            premium.saturating_add(gas_cost),
+            AAVE_FLASHLOAN_OVERHEAD_GAS,
+        )))
     }
 }

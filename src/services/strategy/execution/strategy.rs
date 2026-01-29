@@ -17,7 +17,7 @@ use crate::network::reserves::ReserveCache;
 use crate::services::strategy::bundles::BundleState;
 use crate::services::strategy::routers::UniV3Router;
 use crate::services::strategy::swaps::V3QuoteCacheEntry;
-use alloy::primitives::{Address, B256, Bytes, TxKind, U256};
+use alloy::primitives::{Address, B256, Bytes, TxKind, U256, keccak256};
 use alloy::providers::Provider;
 use alloy::rpc::types::Header;
 use alloy::rpc::types::eth::Transaction;
@@ -344,6 +344,22 @@ impl StrategyExecutor {
         }
     }
 
+    /// Deterministic pseudo-identifier for a V3 pool based on token path and fee tiers.
+    /// We hash the canonical path encoding and take the last 20 bytes so it fits into Address.
+    pub(crate) fn v3_pool_identifier(tokens: &[Address], fees: &[u32]) -> Option<Address> {
+        if tokens.len() < 2 || fees.len() + 1 != tokens.len() {
+            return None;
+        }
+        let mut buf = Vec::with_capacity(tokens.len() * 23);
+        buf.extend_from_slice(tokens[0].as_slice());
+        for (i, fee) in fees.iter().enumerate() {
+            buf.extend_from_slice(&fee.to_be_bytes()[1..]); // 3-byte fee tier
+            buf.extend_from_slice(tokens[i + 1].as_slice());
+        }
+        let h = keccak256(buf);
+        Some(Address::from_slice(&h.as_slice()[12..]))
+    }
+
     pub fn new(
         tx_rx: Receiver<StrategyWork>,
         block_rx: BroadcastReceiver<Header>,
@@ -589,6 +605,7 @@ mod tests {
     use crate::common::constants::{MIN_PROFIT_THRESHOLD_WEI, WETH_MAINNET};
     use crate::core::executor::BundleSender;
     use crate::network::gas::GasFees;
+    use crate::network::price_feed::PriceApiKeys;
     use crate::services::strategy::decode::{
         ObservedSwap, RouterKind, SwapDirection, decode_swap_input, direction, parse_v3_path,
         target_token, v3_fee_sane,
@@ -946,7 +963,7 @@ mod tests {
         let db = Database::new("sqlite::memory:").await.expect("db");
         let portfolio = Arc::new(PortfolioManager::new(http.clone(), Address::ZERO));
         let gas_oracle = GasOracle::new(http.clone());
-        let price_feed = PriceFeed::new(http.clone(), HashMap::new());
+        let price_feed = PriceFeed::new(http.clone(), HashMap::new(), PriceApiKeys::default());
         let simulator = Simulator::new(http.clone());
         let token_manager = Arc::new(TokenManager::default());
         let stats = Arc::new(StrategyStats::default());

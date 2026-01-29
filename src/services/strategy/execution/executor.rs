@@ -34,6 +34,9 @@ pub struct BundleSender {
     signer: PrivateKeySigner,
 }
 
+const FLASHBOTS_MAX_TXS: usize = 100;
+const FLASHBOTS_MAX_BYTES: usize = 500_000;
+
 impl BundleSender {
     pub fn new(
         provider: HttpProvider,
@@ -123,6 +126,17 @@ impl BundleSender {
     /// Broadcast a list of raw transaction payloads (RLP encoded).
     /// In dry-run mode this only logs.
     pub async fn send_bundle(&self, raw_txs: &[Vec<u8>], chain_id: u64) -> Result<(), AppError> {
+        let bundle_bytes: usize = raw_txs.iter().map(|r| r.len()).sum();
+        if raw_txs.len() > FLASHBOTS_MAX_TXS || bundle_bytes > FLASHBOTS_MAX_BYTES {
+            return Err(AppError::Strategy(format!(
+                "Bundle exceeds Flashbots limits: {} txs, {} bytes (max {} tx / {} bytes)",
+                raw_txs.len(),
+                bundle_bytes,
+                FLASHBOTS_MAX_TXS,
+                FLASHBOTS_MAX_BYTES
+            )));
+        }
+
         if self.dry_run {
             tracing::info!("Dry-run: would send bundle with {} txs", raw_txs.len());
             return Ok(());

@@ -44,7 +44,11 @@ async fn flashloan_builder_encodes_callbacks() {
     let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), bundle_signer.address()));
     let gas_oracle = oxidity_builder::network::gas::GasOracle::new(http.clone());
-    let price_feed = PriceFeed::new(http.clone(), std::collections::HashMap::new());
+    let price_feed = PriceFeed::new(
+        http.clone(),
+        std::collections::HashMap::new(),
+        oxidity_builder::network::price_feed::PriceApiKeys::default(),
+    );
     let simulator = Simulator::new(http.clone());
     let token_manager =
         Arc::new(oxidity_builder::infrastructure::data::token_manager::TokenManager::default());
@@ -159,7 +163,11 @@ async fn flashloan_builder_uses_aave_selector() {
     let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), bundle_signer.address()));
     let gas_oracle = oxidity_builder::network::gas::GasOracle::new(http.clone());
-    let price_feed = PriceFeed::new(http.clone(), std::collections::HashMap::new());
+    let price_feed = PriceFeed::new(
+        http.clone(),
+        std::collections::HashMap::new(),
+        oxidity_builder::network::price_feed::PriceApiKeys::default(),
+    );
     let simulator = Simulator::new(http.clone());
     let token_manager =
         Arc::new(oxidity_builder::infrastructure::data::token_manager::TokenManager::default());
@@ -206,11 +214,7 @@ async fn flashloan_builder_uses_aave_selector() {
         4,
     );
 
-    let callbacks = vec![(
-        WETH_MAINNET,
-        Bytes::from(vec![0x99]),
-        U256::from(0u64),
-    )];
+    let callbacks = vec![(WETH_MAINNET, Bytes::from(vec![0x99]), U256::from(0u64))];
 
     let gas_fees = GasFees {
         max_fee_per_gas: 30_000_000_000,
@@ -232,11 +236,7 @@ async fn flashloan_builder_uses_aave_selector() {
         .await
         .expect("build aave flashloan");
 
-    let input_bytes = request
-        .input
-        .clone()
-        .into_input()
-        .expect("input bytes");
+    let input_bytes = request.input.clone().into_input().expect("input bytes");
     let selector = &input_bytes[..4];
     assert_eq!(
         selector,
