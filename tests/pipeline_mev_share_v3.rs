@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT
 
-
 use alloy::primitives::{Address, B256, Bytes, U160, U256, aliases::U24};
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
@@ -10,7 +9,9 @@ use oxidity_builder::core::executor::BundleSender;
 use oxidity_builder::core::portfolio::PortfolioManager;
 use oxidity_builder::core::safety::SafetyGuard;
 use oxidity_builder::core::simulation::Simulator;
-use oxidity_builder::core::strategy::{StrategyExecutor, StrategyStats, StrategyWork};
+use oxidity_builder::core::strategy::{
+    FlashloanProvider, StrategyExecutor, StrategyStats, StrategyWork,
+};
 use oxidity_builder::data::db::Database;
 use oxidity_builder::infrastructure::data::token_manager::TokenManager;
 use oxidity_builder::network::gas::GasOracle;
@@ -104,6 +105,8 @@ async fn mev_share_v3_pipeline_manual() {
         0,
         None,
         false,
+        vec![FlashloanProvider::Balancer],
+        None,
         reserve_cache,
         true,
         "revm".to_string(),

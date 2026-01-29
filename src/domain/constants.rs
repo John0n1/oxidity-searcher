@@ -295,6 +295,40 @@ lazy_static! {
         m.insert(CHAIN_BSC, WBNB_BSC);
         m
     };
+
+    // -------------------------
+    // Aave v3 (core market) addresses
+    // -------------------------
+    pub static ref AAVE_POOL_BY_CHAIN: HashMap<u64, Address> = {
+        let mut m = HashMap::new();
+        // Ethereum Core V3
+        m.insert(CHAIN_ETHEREUM, address!("87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"));
+        m
+    };
+
+    pub static ref AAVE_ADDRESSES_PROVIDER_BY_CHAIN: HashMap<u64, Address> = {
+        let mut m = HashMap::new();
+        m.insert(CHAIN_ETHEREUM, address!("2f39d218133AFaB8F2B819B1066c7E434Ad94E9e"));
+        m
+    };
+
+    pub static ref AAVE_WETH_GATEWAY_BY_CHAIN: HashMap<u64, Address> = {
+        let mut m = HashMap::new();
+        m.insert(CHAIN_ETHEREUM, address!("d01607c3C5eCABa394D8be377a08590149325722"));
+        m
+    };
+
+    pub static ref AAVE_ORACLE_BY_CHAIN: HashMap<u64, Address> = {
+        let mut m = HashMap::new();
+        m.insert(CHAIN_ETHEREUM, address!("54586bE62E3c3580375aE3723C145253060Ca0C2"));
+        m
+    };
+
+    pub static ref AAVE_DATA_PROVIDER_BY_CHAIN: HashMap<u64, Address> = {
+        let mut m = HashMap::new();
+        m.insert(CHAIN_ETHEREUM, address!("7B4EB56E7CD4b454BA8ff71E4518426369a138a3"));
+        m
+    };
 }
 
 // =============================================================================
@@ -331,4 +365,32 @@ pub fn wrapped_native_for_chain(chain_id: u64) -> Address {
         .get(&chain_id)
         .copied()
         .unwrap_or(WETH_MAINNET)
+}
+
+pub fn default_balancer_vault_for_chain(chain_id: u64) -> Option<Address> {
+    DEX_ROUTERS_BY_CHAIN
+        .get(&chain_id)
+        .and_then(|m| m.get("balancer_v2_vault"))
+        .copied()
+        .map(Address::from)
+}
+
+pub fn default_aave_pool(chain_id: u64) -> Option<Address> {
+    AAVE_POOL_BY_CHAIN.get(&chain_id).copied()
+}
+
+pub fn default_aave_addresses_provider(chain_id: u64) -> Option<Address> {
+    AAVE_ADDRESSES_PROVIDER_BY_CHAIN.get(&chain_id).copied()
+}
+
+pub fn default_aave_weth_gateway(chain_id: u64) -> Option<Address> {
+    AAVE_WETH_GATEWAY_BY_CHAIN.get(&chain_id).copied()
+}
+
+pub fn default_aave_oracle(chain_id: u64) -> Option<Address> {
+    AAVE_ORACLE_BY_CHAIN.get(&chain_id).copied()
+}
+
+pub fn default_aave_data_provider(chain_id: u64) -> Option<Address> {
+    AAVE_DATA_PROVIDER_BY_CHAIN.get(&chain_id).copied()
 }

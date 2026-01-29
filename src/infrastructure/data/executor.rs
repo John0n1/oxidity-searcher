@@ -26,6 +26,14 @@ sol! {
         function setProfitReceiver(address newReceiver) external;
         function setSweepPreference(bool sweepToEth) external;
 
+        // Aave v3 simple flashloan entry
+        function executeAaveFlashLoanSimple(
+            address pool,
+            address asset,
+            uint256 amount,
+            bytes calldata params
+        ) external;
+
         error OnlyOwner();
         error OnlyVault();
         error LengthMismatch();

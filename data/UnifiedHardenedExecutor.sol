@@ -34,11 +34,31 @@ interface IFlashLoanRecipient {
     ) external;
 }
 
+interface IAavePool {
+    function flashLoanSimple(
+        address receiverAddress,
+        address asset,
+        uint256 amount,
+        bytes calldata params,
+        uint16 referralCode
+    ) external;
+}
+
+interface IAaveFlashLoanSimpleReceiver {
+    function executeOperation(
+        address asset,
+        uint256 amount,
+        uint256 premium,
+        address initiator,
+        bytes calldata params
+    ) external returns (bool);
+}
+
 // ==========================================
 // UNIFIED EXECUTOR (HARDENED)
 // ==========================================
 
-contract UnifiedHardenedExecutor is IFlashLoanRecipient {
+contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleReceiver {
     // --- Constants & State ---
     address private constant BALANCER_VAULT = 0xBA12222222228d8Ba445958a75a0704d566BF2C8;
     
@@ -46,6 +66,7 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient {
     address public immutable WETH;
     address public profitReceiver;
     bool public sweepProfitToEth;
+    address private activeAavePool;
 
     // --- Events ---
     event ArbitrageExecuted(uint256 surplus, address token);
@@ -68,6 +89,9 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient {
     error ApprovalFailed();
     error BribeFailed();
     error BalanceInvariantBroken(address token, uint256 beforeBalance, uint256 afterBalance);
+    error OnlyPool();
+    error InvalidPool();
+    error InvalidAsset();
 
     constructor(address _profitReceiver, address _weth) {
         if (_profitReceiver == address(0)) revert InvalidProfitReceiver();
@@ -179,6 +203,20 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient {
         );
     }
 
+    /// @notice Initiate an Aave V3 simple flashloan. Params encoding matches Balancer path.
+    function executeAaveFlashLoanSimple(
+        address pool,
+        address asset,
+        uint256 amount,
+        bytes calldata params
+    ) external onlyOwner {
+        if (pool == address(0)) revert InvalidPool();
+        if (asset == address(0)) revert InvalidAsset();
+        activeAavePool = pool;
+        IAavePool(pool).flashLoanSimple(address(this), asset, amount, params, 0);
+        activeAavePool = address(0);
+    }
+
     function receiveFlashLoan(
         IERC20[] memory tokens,
         uint256[] memory amounts,
@@ -236,6 +274,51 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient {
             (bool success, ) = profitReceiver.call{value: ethBal}("");
             if (!success) emit DistributeFailed(address(0), ethBal);
         }
+    }
+
+    // Aave V3 simple flashloan callback
+    function executeOperation(
+        address asset,
+        uint256 amount,
+        uint256 premium,
+        address initiator,
+        bytes calldata params
+    ) external override returns (bool) {
+        if (msg.sender != activeAavePool) revert OnlyPool();
+        if (initiator != address(this)) revert OnlyOwner();
+
+        (address[] memory targets, uint256[] memory values, bytes[] memory payloads) =
+            abi.decode(params, (address[], uint256[], bytes[]));
+        if (targets.length != values.length || targets.length != payloads.length) {
+            revert LengthMismatch();
+        }
+
+        for (uint256 i = 0; i < targets.length; i++) {
+            (bool success, bytes memory result) = targets[i].call{value: values[i]}(payloads[i]);
+            if (!success) {
+                _revertWithDetails(i, result);
+            }
+        }
+
+        uint256 amountOwing = amount + premium;
+        uint256 bal = IERC20(asset).balanceOf(address(this));
+        if (bal < amountOwing) {
+            revert InsufficientFundsForRepayment(asset, amountOwing, bal);
+        }
+
+        uint256 surplus = bal - amountOwing;
+        if (surplus > 0) {
+            _distributeProfit(asset, surplus);
+        }
+
+        _safeTransfer(asset, msg.sender, amountOwing);
+
+        uint256 ethBal = address(this).balance;
+        if (ethBal > 0) {
+            (bool ok, ) = profitReceiver.call{value: ethBal}("");
+            if (!ok) emit DistributeFailed(address(0), ethBal);
+        }
+        return true;
     }
 
     // ==========================================

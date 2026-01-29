@@ -11,7 +11,7 @@ use oxidity_builder::core::executor::BundleSender;
 use oxidity_builder::core::portfolio::PortfolioManager;
 use oxidity_builder::core::safety::SafetyGuard;
 use oxidity_builder::core::simulation::Simulator;
-use oxidity_builder::core::strategy::{StrategyExecutor, StrategyWork};
+use oxidity_builder::core::strategy::{FlashloanProvider, StrategyExecutor, StrategyWork};
 use oxidity_builder::data::db::Database;
 use oxidity_builder::infrastructure::data::token_manager::TokenManager;
 use oxidity_builder::network::gas::GasOracle;
@@ -83,6 +83,8 @@ async fn mev_share_hint_round_trip() {
         0,
         None,
         false,
+        vec![FlashloanProvider::Balancer],
+        None,
         reserve_cache,
         true,
         "revm".to_string(),

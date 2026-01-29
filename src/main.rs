@@ -177,6 +177,8 @@ async fn main() -> Result<(), AppError> {
             settings.executor_bribe_bps,
             settings.executor_bribe_recipient.or(Some(profit_receiver)),
             settings.flashloan_enabled,
+            settings.flashloan_providers(),
+            settings.aave_pool_for_chain(chain_id),
             settings
                 .gas_cap_for_chain(chain_id)
                 .unwrap_or(settings.max_gas_price_gwei),

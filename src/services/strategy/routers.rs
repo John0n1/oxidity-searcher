@@ -51,4 +51,22 @@ sol! {
         function allowance(address owner, address spender) external view returns (uint256);
         function approve(address spender, uint256 amount) external returns (bool);
     }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
+    contract BalancerVaultFees {
+        function getProtocolFeesCollector() external view returns (address);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
+    contract BalancerProtocolFees {
+        function getFlashLoanFeePercentage() external view returns (uint256);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
+    contract AavePool {
+        function FLASHLOAN_PREMIUM_TOTAL() external view returns (uint128);
+    }
 }

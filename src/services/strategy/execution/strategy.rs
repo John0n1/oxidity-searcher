@@ -50,6 +50,12 @@ pub(crate) const TAX_TOLERANCE_BPS: u64 = 500;
 pub(crate) const PROBE_GAS_LIMIT: u64 = 220_000;
 pub(crate) const V3_QUOTE_CACHE_TTL_MS: u64 = 250;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlashloanProvider {
+    Balancer,
+    AaveV3,
+}
+
 #[derive(Default)]
 pub struct StrategyStats {
     pub processed: AtomicU64,
@@ -150,6 +156,8 @@ pub struct StrategyExecutor {
     pub(in crate::services::strategy) executor_bribe_bps: u64,
     pub(in crate::services::strategy) executor_bribe_recipient: Option<Address>,
     pub(in crate::services::strategy) flashloan_enabled: bool,
+    pub(in crate::services::strategy) flashloan_providers: Vec<FlashloanProvider>,
+    pub(in crate::services::strategy) aave_pool: Option<Address>,
     pub(in crate::services::strategy) reserve_cache: Arc<ReserveCache>,
     pub(in crate::services::strategy) bundle_state: Arc<Mutex<Option<BundleState>>>,
     pub(in crate::services::strategy) v3_quote_cache: DashMap<B256, V3QuoteCacheEntry>,
@@ -160,6 +168,23 @@ pub struct StrategyExecutor {
 }
 
 impl StrategyExecutor {
+    pub(crate) fn has_usable_flashloan_provider(&self) -> bool {
+        if !self.flashloan_enabled || self.executor.is_none() {
+            return false;
+        }
+        for p in &self.flashloan_providers {
+            match p {
+                FlashloanProvider::Balancer => return true,
+                FlashloanProvider::AaveV3 => {
+                    if self.aave_pool.is_some() {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     fn serialize_pools(pools: &HashSet<Address>) -> String {
         pools
             .iter()
@@ -344,6 +369,8 @@ impl StrategyExecutor {
         executor_bribe_bps: u64,
         executor_bribe_recipient: Option<Address>,
         flashloan_enabled: bool,
+        flashloan_providers: Vec<FlashloanProvider>,
+        aave_pool: Option<Address>,
         reserve_cache: Arc<ReserveCache>,
         sandwich_attacks_enabled: bool,
         simulation_backend: String,
@@ -378,6 +405,8 @@ impl StrategyExecutor {
             executor_bribe_bps,
             executor_bribe_recipient,
             flashloan_enabled,
+            flashloan_providers,
+            aave_pool,
             reserve_cache,
             bundle_state: Arc::new(Mutex::new(None)),
             v3_quote_cache: DashMap::new(),
@@ -949,6 +978,8 @@ mod tests {
             0,
             None,
             false,
+            vec![FlashloanProvider::Balancer],
+            None,
             reserve_cache,
             true,
             "revm".to_string(),

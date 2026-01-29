@@ -11,12 +11,16 @@ use crate::services::strategy::decode::{
     ObservedSwap, RouterKind, encode_v3_path, reverse_v3_path, target_token,
 };
 use crate::services::strategy::routers::{ERC20, UniV2Router, UniV3Router};
-use crate::services::strategy::strategy::StrategyExecutor;
+use crate::services::strategy::strategy::{FlashloanProvider, StrategyExecutor};
+use crate::common::constants::default_balancer_vault_for_chain;
+use crate::services::strategy::routers::{BalancerProtocolFees, BalancerVaultFees, AavePool};
+use crate::network::gas::GasFees;
 use alloy::eips::eip2930::AccessList;
 use alloy::primitives::{Address, B256, Bytes, TxKind, U256};
 use alloy::rpc::types::eth::{TransactionInput, TransactionRequest};
 use alloy::sol_types::{SolCall, SolValue};
 use std::time::Duration;
+use std::str::FromStr;
 
 pub struct BackrunTx {
     pub raw: Vec<u8>,
@@ -44,6 +48,9 @@ pub struct ApproveTx {
     pub raw: Vec<u8>,
     pub request: TransactionRequest,
 }
+
+const BALANCER_FLASHLOAN_OVERHEAD_GAS: u64 = 180_000;
+const AAVE_FLASHLOAN_OVERHEAD_GAS: u64 = 200_000;
 
 impl StrategyExecutor {
     pub(crate) async fn needs_approval(
@@ -218,6 +225,9 @@ impl StrategyExecutor {
         if !self.flashloan_enabled || self.executor.is_none() || self.dry_run {
             return false;
         }
+        if !self.has_usable_flashloan_provider() {
+            return false;
+        }
         let safety_buffer = U256::from(2_000_000_000_000_000u128); // 0.002 ETH
         if wallet_balance < required_value.saturating_add(safety_buffer) {
             return true;
@@ -236,9 +246,14 @@ impl StrategyExecutor {
         amount: U256,
         callbacks: Vec<(Address, Bytes, U256)>,
         gas_limit_hint: u64,
-        gas_fees: &crate::network::gas::GasFees,
+        gas_fees: &GasFees,
         nonce: u64,
     ) -> Result<(Vec<u8>, TransactionRequest, B256), AppError> {
+        let provider = self
+            .select_flashloan_provider(asset, amount, gas_fees)
+            .await?
+            .ok_or_else(|| AppError::Strategy("No flashloan provider available".into()))?;
+
         let mut targets = Vec::new();
         let mut values = Vec::new();
         let mut payloads = Vec::new();
@@ -256,14 +271,35 @@ impl StrategyExecutor {
         };
         let params = callback.abi_encode();
 
-        let exec_call = UnifiedHardenedExecutor::executeFlashLoanCall {
-            assets: vec![asset],
-            amounts: vec![amount],
-            params: Bytes::from(params),
+        let calldata = match provider {
+            FlashloanProvider::Balancer => {
+                let exec_call = UnifiedHardenedExecutor::executeFlashLoanCall {
+                    assets: vec![asset],
+                    amounts: vec![amount],
+                    params: Bytes::from(params.clone()),
+                };
+                exec_call.abi_encode()
+            }
+            FlashloanProvider::AaveV3 => {
+                let pool = self
+                    .aave_pool
+                    .ok_or_else(|| AppError::Strategy("Aave pool address missing".into()))?;
+                let exec_call = UnifiedHardenedExecutor::executeAaveFlashLoanSimpleCall {
+                    pool,
+                    asset,
+                    amount,
+                    params: Bytes::from(params.clone()),
+                };
+                exec_call.abi_encode()
+            }
         };
-        let calldata = exec_call.abi_encode();
 
-        let mut gas_limit = gas_limit_hint.saturating_add(150_000);
+        let overhead = match provider {
+            FlashloanProvider::Balancer => BALANCER_FLASHLOAN_OVERHEAD_GAS,
+            FlashloanProvider::AaveV3 => AAVE_FLASHLOAN_OVERHEAD_GAS,
+        };
+
+        let mut gas_limit = gas_limit_hint.saturating_add(overhead);
         if gas_limit < 220_000 {
             gas_limit = 220_000;
         }
@@ -285,7 +321,7 @@ impl StrategyExecutor {
     pub(crate) fn flashloan_request_template(
         from: Address,
         executor: Address,
-        gas_fees: &crate::network::gas::GasFees,
+        gas_fees: &GasFees,
         gas_limit: u64,
         nonce: u64,
         calldata: Vec<u8>,
@@ -692,10 +728,9 @@ impl StrategyExecutor {
                         uses_flashloan: false,
                         router_kind: observed.router_kind,
                     });
-                }
-            }
         }
-
+        }
+    } else {
         let tokens_in = token_in_override.unwrap();
         let (value, expected_out, calldata, access_list) = match observed.router_kind {
             RouterKind::V2Like => {
@@ -834,5 +869,130 @@ impl StrategyExecutor {
             uses_flashloan: use_flashloan,
             router_kind: observed.router_kind,
         })
+    }
+    }
+
+    }
+
+    // ------------------------------------------------------------------
+    // Flashloan provider scoring
+    // ------------------------------------------------------------------
+impl StrategyExecutor {
+
+
+    async fn select_flashloan_provider(
+        &self,
+        asset: Address,
+        amount: U256,
+        gas_fees: &GasFees,
+    ) -> Result<Option<FlashloanProvider>, AppError> {
+        if self.flashloan_providers.is_empty() {
+            return Ok(None);
+        }
+        let mut best: Option<(FlashloanProvider, U256)> = None;
+        for provider in &self.flashloan_providers {
+            let quote = match provider {
+                FlashloanProvider::Balancer => {
+                    self.quote_balancer_flashloan(asset, amount, gas_fees.max_fee_per_gas)
+                        .await?
+                }
+                FlashloanProvider::AaveV3 => {
+                    self.quote_aave_flashloan(asset, amount, gas_fees.max_fee_per_gas)
+                        .await?
+                }
+            };
+            let Some((total_cost, _)) = quote else { continue };
+            match best {
+                None => best = Some((*provider, total_cost)),
+                Some((_, current)) if total_cost < current => best = Some((*provider, total_cost)),
+                _ => {}
+            }
+        }
+        if let Some((p, _)) = best {
+            Ok(Some(p))
+        } else {
+            Ok(self.flashloan_providers.first().copied())
+        }
+    }
+
+    async fn quote_balancer_flashloan(
+        &self,
+        asset: Address,
+        amount: U256,
+        max_fee_per_gas: u128,
+    ) -> Result<Option<(U256, u64)>, AppError> {
+        let vault = default_balancer_vault_for_chain(self.chain_id).ok_or_else(|| {
+            AppError::Strategy("Balancer vault not configured for chain".into())
+        })?;
+        let balance: U256 = ERC20::new(asset, self.http_provider.clone())
+            .balanceOf(vault)
+            .call()
+            .await
+            .unwrap_or(U256::MAX);
+        if balance < amount {
+            return Ok(None);
+        }
+
+        let fee_pct_wei: U256 = self
+            .get_balancer_flashloan_fee()
+            .await
+            .unwrap_or_else(|| U256::from_str("400000000000000").unwrap_or(U256::ZERO)); // 0.0004 * 1e18 fallback
+        let premium = amount
+            .saturating_mul(fee_pct_wei)
+            .checked_div(U256::from(1_000_000_000_000_000_000u128))
+            .unwrap_or(U256::MAX);
+        let gas_cost = U256::from(BALANCER_FLASHLOAN_OVERHEAD_GAS)
+            .saturating_mul(U256::from(max_fee_per_gas));
+        Ok(Some((premium.saturating_add(gas_cost), BALANCER_FLASHLOAN_OVERHEAD_GAS)))
+    }
+
+    async fn get_balancer_flashloan_fee(&self) -> Option<U256> {
+        let vault = default_balancer_vault_for_chain(self.chain_id)?;
+        let vault_contract = BalancerVaultFees::new(vault, self.http_provider.clone());
+        let collector_addr: Address = vault_contract
+            .getProtocolFeesCollector()
+            .call()
+            .await
+            .ok()?;
+        let collector = BalancerProtocolFees::new(collector_addr, self.http_provider.clone());
+        collector
+            .getFlashLoanFeePercentage()
+            .call()
+            .await
+            .ok()
+    }
+
+    async fn quote_aave_flashloan(
+        &self,
+        asset: Address,
+        amount: U256,
+        max_fee_per_gas: u128,
+    ) -> Result<Option<(U256, u64)>, AppError> {
+        let pool = match self.aave_pool {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let balance: U256 = ERC20::new(asset, self.http_provider.clone())
+            .balanceOf(pool)
+            .call()
+            .await
+            .unwrap_or(U256::MAX);
+        if balance < amount {
+            return Ok(None);
+        }
+        let premium_bps: U256 = AavePool::new(pool, self.http_provider.clone())
+            .FLASHLOAN_PREMIUM_TOTAL()
+            .call()
+            .await
+            .map(U256::from)
+            .unwrap_or_else(|_| U256::from(9u64)); // default 9 bps
+
+        let premium = amount
+            .saturating_mul(premium_bps)
+            .checked_div(U256::from(10_000u64))
+            .unwrap_or(U256::MAX);
+        let gas_cost =
+            U256::from(AAVE_FLASHLOAN_OVERHEAD_GAS).saturating_mul(U256::from(max_fee_per_gas));
+        Ok(Some((premium.saturating_add(gas_cost), AAVE_FLASHLOAN_OVERHEAD_GAS)))
     }
 }

@@ -34,6 +34,9 @@ pub struct GlobalSettings {
     // MEV
     #[serde(default = "default_true")]
     pub flashloan_enabled: bool,
+    /// Comma-separated list; supports "auto" prefix, "balancer", "aavev3"
+    #[serde(default = "default_flashloan_provider")]
+    pub flashloan_provider: String,
     pub executor_address: Option<Address>,
     #[serde(default = "default_true")]
     pub sandwich_attacks_enabled: bool,
@@ -42,6 +45,7 @@ pub struct GlobalSettings {
     pub ipc_urls: Option<HashMap<String, String>>,
     pub chainlink_feeds: Option<HashMap<String, String>>, // Symbol -> aggregator address
     pub chainlink_feeds_path: Option<String>,
+    pub aave_pools_by_chain: Option<HashMap<String, String>>,
     pub flashbots_relay_url: Option<String>,
     pub bundle_signer_key: Option<String>,
     #[serde(default = "default_bribe_bps")]
@@ -92,6 +96,9 @@ fn default_slippage_bps() -> u64 {
 }
 fn default_sim_backend() -> String {
     "revm".to_string()
+}
+fn default_flashloan_provider() -> String {
+    "auto,aavev3,balancer".to_string()
 }
 fn default_mev_share_url() -> String {
     "https://mev-share.flashbots.net".to_string()
@@ -327,6 +334,32 @@ impl GlobalSettings {
             .and_then(|m| m.get(&chain_id.to_string()).cloned())
     }
 
+    pub fn flashloan_providers(&self) -> Vec<crate::services::strategy::strategy::FlashloanProvider> {
+        use crate::services::strategy::strategy::FlashloanProvider::*;
+        let raw = self.flashloan_provider.to_lowercase();
+        let mut parts: Vec<&str> = raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        let mut auto = false;
+        if let Some(pos) = parts.iter().position(|p| *p == "auto") {
+            auto = true;
+            parts.remove(pos);
+        }
+        let mut out = Vec::new();
+        for p in parts {
+            match p {
+                "aave" | "aavev3" | "aave_v3" => out.push(AaveV3),
+                "balancer" => out.push(Balancer),
+                _ => {}
+            }
+        }
+        if out.is_empty() && auto {
+            out = vec![AaveV3, Balancer];
+        }
+        if out.is_empty() {
+            out = vec![Balancer];
+        }
+        out
+    }
+
     pub fn routers_for_chain(&self, chain_id: u64) -> Result<HashMap<String, Address>, AppError> {
         if let Some(map) = self
             .router_allowlist_by_chain
@@ -337,6 +370,19 @@ impl GlobalSettings {
         }
 
         Ok(constants::default_routers_for_chain(chain_id))
+    }
+
+    pub fn aave_pool_for_chain(&self, chain_id: u64) -> Option<Address> {
+        if let Some(map) = self
+            .aave_pools_by_chain
+            .as_ref()
+            .and_then(|m| m.get(&chain_id.to_string()))
+        {
+            if let Ok(addr) = Address::from_str(map) {
+                return Some(addr);
+            }
+        }
+        constants::default_aave_pool(chain_id)
     }
 
     pub fn chainlink_feeds_for_chain(
@@ -563,6 +609,7 @@ mod tests {
             max_gas_price_gwei: default_max_gas(),
             simulation_backend: default_sim_backend(),
             flashloan_enabled: default_true(),
+            flashloan_provider: default_flashloan_provider(),
             executor_address: None,
             sandwich_attacks_enabled: default_true(),
             rpc_urls: None,
@@ -588,6 +635,7 @@ mod tests {
             router_allowlist_by_chain: None,
             chainlink_feeds_by_chain: None,
             chainlink_feeds_by_chain_eth: None,
+            aave_pools_by_chain: None,
         }
     }
 
