@@ -22,6 +22,14 @@ pub struct GasFees {
     pub max_priority_fee_per_gas: u128,
     pub next_base_fee_per_gas: u128,
     pub base_fee_per_gas: u128,
+    /// Median priority fee over the sampled blocks (when available).
+    pub p50_priority_fee_per_gas: Option<u128>,
+    /// 90th percentile priority fee over the sampled blocks (when available).
+    pub p90_priority_fee_per_gas: Option<u128>,
+    /// Average gas used ratio across the sampled blocks (0.0-2.0, since target is 1.0).
+    pub gas_used_ratio: Option<f64>,
+    /// Suggested dynamic cap derived from recent base fees (e.g. p95 * 1.2).
+    pub suggested_max_fee_per_gas: Option<u128>,
 }
 
 impl GasOracle {
@@ -44,8 +52,9 @@ impl GasOracle {
             move |_| {
                 let provider = provider.clone();
                 async move {
+                    // Ask for p50 and p90 tips to inform fee boosts.
                     provider
-                        .get_fee_history(5, BlockNumberOrTag::Latest, &[50.0f64])
+                        .get_fee_history(5, BlockNumberOrTag::Latest, &[50.0f64, 90.0f64])
                         .await
                 }
             },
@@ -57,37 +66,76 @@ impl GasOracle {
     }
 
     fn fees_from_history(history: FeeHistory) -> Result<GasFees, AppError> {
-        let last_base_fee = history
-            .base_fee_per_gas
-            .last()
+        let latest_base_fee = history
+            .latest_block_base_fee()
+            .or_else(|| history.base_fee_per_gas.iter().rev().nth(1).copied())
             .ok_or(AppError::Initialization("No base fee history".into()))?;
 
-        // Approximate next base fee using EIP-1559 elastic rule (reuse 12.5% bump heuristic)
-        let next_base_fee = (last_base_fee.saturating_mul(1125)) / 1000;
+        let raw_next_base = history.next_block_base_fee().unwrap_or(latest_base_fee);
 
-        let priority_fee = if let Some(rewards) = history.reward {
-            let mut sum = 0u128;
-            let mut count = 0;
+        // Keep the original 12.5% buffer as a fallback for nodes that return zeroes.
+        let next_base_fee = if raw_next_base == 0 {
+            (latest_base_fee.saturating_mul(1125)) / 1000
+        } else {
+            raw_next_base
+        };
+
+        let mut p50_sum = 0u128;
+        let mut p90_sum = 0u128;
+        let mut p50_count = 0u128;
+        let mut p90_count = 0u128;
+        if let Some(rewards) = &history.reward {
             for block_reward in rewards {
-                if let Some(r) = block_reward.first() {
-                    sum = sum.saturating_add(*r);
-                    count += 1;
+                if let Some(r) = block_reward.get(0) {
+                    p50_sum = p50_sum.saturating_add(*r);
+                    p50_count = p50_count.saturating_add(1);
+                }
+                if let Some(r) = block_reward.get(1) {
+                    p90_sum = p90_sum.saturating_add(*r);
+                    p90_count = p90_count.saturating_add(1);
                 }
             }
-            if count > 0 {
-                sum / count
-            } else {
-                2_000_000_000
-            }
+        }
+
+        let avg_p50 = if p50_count > 0 {
+            p50_sum / p50_count
         } else {
             2_000_000_000
         };
+        let avg_p90 = if p90_count > 0 {
+            p90_sum / p90_count
+        } else {
+            avg_p50
+        };
+
+        let util_sum: f64 = history.gas_used_ratio.iter().copied().sum();
+        let util_avg = if history.gas_used_ratio.is_empty() {
+            None
+        } else {
+            Some(util_sum / history.gas_used_ratio.len() as f64)
+        };
+
+        // Use a rough p95 base fee (max over sample) with a 20% headroom for a dynamic cap.
+        let p95_base = history
+            .base_fee_per_gas
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(next_base_fee);
+        let suggested_cap = p95_base
+            .saturating_mul(12)
+            .checked_div(10)
+            .unwrap_or(p95_base);
 
         Ok(GasFees {
-            max_fee_per_gas: next_base_fee + priority_fee,
-            max_priority_fee_per_gas: priority_fee,
+            max_fee_per_gas: next_base_fee.saturating_add(avg_p50),
+            max_priority_fee_per_gas: avg_p50,
             next_base_fee_per_gas: next_base_fee,
-            base_fee_per_gas: *last_base_fee,
+            base_fee_per_gas: latest_base_fee,
+            p50_priority_fee_per_gas: Some(avg_p50),
+            p90_priority_fee_per_gas: Some(avg_p90),
+            gas_used_ratio: util_avg,
+            suggested_max_fee_per_gas: Some(suggested_cap),
         })
     }
 
@@ -128,6 +176,10 @@ impl GasOracle {
             max_priority_fee_per_gas: priority,
             next_base_fee_per_gas: next_base,
             base_fee_per_gas: base,
+            p50_priority_fee_per_gas: None,
+            p90_priority_fee_per_gas: None,
+            gas_used_ratio: None,
+            suggested_max_fee_per_gas: None,
         })
     }
 
@@ -170,6 +222,10 @@ impl GasOracle {
             max_priority_fee_per_gas: priority,
             next_base_fee_per_gas: next_base,
             base_fee_per_gas: base,
+            p50_priority_fee_per_gas: None,
+            p90_priority_fee_per_gas: None,
+            gas_used_ratio: None,
+            suggested_max_fee_per_gas: None,
         })
     }
 }

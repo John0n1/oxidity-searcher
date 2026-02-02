@@ -268,7 +268,7 @@ impl StrategyExecutor {
         let sell_req = alloy::rpc::types::eth::TransactionRequest {
             from: Some(self.signer.address()),
             to: Some(TxKind::Call(router)),
-            gas: Some(crate::services::strategy::strategy::PROBE_GAS_LIMIT),
+            gas: Some(self.probe_gas_limit(router)),
             value: Some(U256::ZERO),
             input: TransactionInput::new(sell_calldata.into()),
             chain_id: Some(self.chain_id),
@@ -287,6 +287,7 @@ impl StrategyExecutor {
             self.mark_toxic_token(token, "probe_revert");
             return Ok(false);
         }
+        self.record_probe_gas(router, outcome.gas_used);
 
         if outcome.return_data.is_empty() {
             return Ok(true);

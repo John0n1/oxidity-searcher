@@ -5,10 +5,13 @@ use crate::common::error::AppError;
 use crate::data::executor::UnifiedHardenedExecutor;
 use crate::network::provider::HttpProvider;
 use alloy::providers::Provider;
-use alloy::rpc::types::eth::Transaction;
-use alloy::rpc::types::eth::TransactionRequest;
-use alloy::rpc::types::eth::simulate::{SimBlock, SimulatePayload};
+use alloy::providers::ext::DebugApi;
+use alloy::rpc::types::eth::simulate::{SimBlock, SimCallResult, SimulatePayload};
 use alloy::rpc::types::eth::state::StateOverride;
+use alloy::rpc::types::eth::{
+    BlockId, BlockNumberOrTag, Bundle, StateContext, Transaction, TransactionRequest,
+};
+use alloy::rpc::types::trace::geth::{DefaultFrame, GethDebugTracingCallOptions};
 use alloy::sol_types::SolInterface;
 use alloy_sol_types::{Revert, SolError};
 
@@ -20,14 +23,75 @@ pub struct SimulationOutcome {
     pub reason: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SimulationBackendMethod {
+    EthSimulate,
+    DebugTraceCall,
+    EthCall,
+}
+
+#[derive(Clone, Debug)]
+pub struct SimulationBackend {
+    order: Vec<SimulationBackendMethod>,
+}
+
+impl SimulationBackend {
+    pub fn new(config: impl AsRef<str>) -> Self {
+        let primary = SimulationBackendMethod::from_config(config.as_ref());
+        Self {
+            order: SimulationBackendMethod::build_order(primary),
+        }
+    }
+
+    pub fn order(&self) -> &[SimulationBackendMethod] {
+        &self.order
+    }
+}
+
+impl SimulationBackendMethod {
+    fn from_config(config: &str) -> Self {
+        for token in config
+            .split(|c: char| c == ',' || c == ';' || c.is_whitespace())
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            let lowercase = token.to_lowercase();
+            match lowercase.as_str() {
+                "debug" | "debug_trace" | "debug-trace" | "debugtrace" | "debug_tracecall"
+                | "debugtracecall" | "trace" | "tracecall" | "trace_call" => {
+                    return Self::DebugTraceCall;
+                }
+                "eth_call" | "ethcall" | "call" => return Self::EthCall,
+                "eth_simulate" | "ethsimulate" | "simulate" | "revm" | "revmv1" | "anvil" => {
+                    return Self::EthSimulate;
+                }
+                _ => {}
+            }
+        }
+        Self::EthSimulate
+    }
+
+    fn build_order(primary: Self) -> Vec<Self> {
+        let mut order = Vec::with_capacity(3);
+        order.push(primary);
+        for candidate in &[Self::EthSimulate, Self::DebugTraceCall, Self::EthCall] {
+            if *candidate != primary {
+                order.push(*candidate);
+            }
+        }
+        order
+    }
+}
+
 #[derive(Clone)]
 pub struct Simulator {
     provider: HttpProvider,
+    backend: SimulationBackend,
 }
 
 impl Simulator {
-    pub fn new(provider: HttpProvider) -> Self {
-        Self { provider }
+    pub fn new(provider: HttpProvider, backend: SimulationBackend) -> Self {
+        Self { provider, backend }
     }
 
     pub async fn simulate_transaction(
@@ -43,48 +107,111 @@ impl Simulator {
         req: TransactionRequest,
         state_override: Option<StateOverride>,
     ) -> Result<SimulationOutcome, AppError> {
-        if state_override.is_some() {
-            let block = SimBlock {
-                block_overrides: None,
-                state_overrides: state_override.clone(),
-                calls: vec![req.clone()],
-            };
-            let payload = SimulatePayload {
-                block_state_calls: vec![block],
-                trace_transfers: false,
-                validation: false,
-                return_full_transactions: false,
-            };
-
-            if let Ok(simulated) = self.provider.simulate(&payload).await {
-                if let Some(call) = simulated.first().and_then(|b| b.calls.first()) {
-                    let success = call.error.is_none() && call.status;
-
-                    if !success {
-                        let reason = decode_flashloan_revert(&call.return_data);
-                        tracing::warn!("Simulation Revert Reason: {}", reason);
-                    }
-
-                    return Ok(SimulationOutcome {
-                        success,
-                        gas_used: call.gas_used,
-                        return_data: call.return_data.to_vec(),
-                        reason: if success {
-                            None
-                        } else {
-                            call.error.as_ref().map(|e| format!("{:?}", e)).or_else(|| {
-                                if call.return_data.is_empty() {
-                                    None
-                                } else {
-                                    Some(decode_flashloan_revert(&call.return_data))
-                                }
-                            })
-                        },
-                    });
-                }
+        for method in self.backend.order() {
+            let outcome_opt = self
+                .try_simulation_method(req.clone(), state_override.clone(), *method)
+                .await?;
+            if let Some(outcome) = outcome_opt {
+                return Ok(outcome);
             }
         }
+        self.simulate_request_with_eth_call(req).await
+    }
 
+    async fn try_simulation_method(
+        &self,
+        req: TransactionRequest,
+        state_override: Option<StateOverride>,
+        method: SimulationBackendMethod,
+    ) -> Result<Option<SimulationOutcome>, AppError> {
+        match method {
+            SimulationBackendMethod::EthSimulate => {
+                self.simulate_request_with_eth_simulate(req, state_override)
+                    .await
+            }
+            SimulationBackendMethod::DebugTraceCall => {
+                self.simulate_request_with_debug_trace(req).await
+            }
+            SimulationBackendMethod::EthCall => {
+                Ok(Some(self.simulate_request_with_eth_call(req).await?))
+            }
+        }
+    }
+
+    async fn simulate_request_with_eth_simulate(
+        &self,
+        req: TransactionRequest,
+        state_override: Option<StateOverride>,
+    ) -> Result<Option<SimulationOutcome>, AppError> {
+        let block = SimBlock {
+            block_overrides: None,
+            state_overrides: state_override.clone(),
+            calls: vec![req.clone()],
+        };
+        let payload = SimulatePayload {
+            block_state_calls: vec![block],
+            trace_transfers: false,
+            validation: false,
+            return_full_transactions: false,
+        };
+
+        match self.provider.simulate(&payload).await {
+            Ok(simulated) => {
+                if let Some(call) = simulated.first().and_then(|blk| blk.calls.first()) {
+                    return Ok(Some(sim_call_result_to_outcome(call)));
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "simulation",
+                    backend = "eth_simulate",
+                    error = %e,
+                    "simulate_request eth_simulate failed"
+                );
+            }
+        }
+        Ok(None)
+    }
+
+    async fn simulate_request_with_debug_trace(
+        &self,
+        req: TransactionRequest,
+    ) -> Result<Option<SimulationOutcome>, AppError> {
+        let trace_options = GethDebugTracingCallOptions::default();
+        let block = BlockId::Number(BlockNumberOrTag::Pending);
+        match self
+            .provider
+            .debug_trace_call(req.clone(), block, trace_options)
+            .await
+        {
+            Ok(trace) => match trace.try_into_default_frame() {
+                Ok(frame) => Ok(Some(default_frame_to_outcome(frame))),
+                Err(err) => {
+                    tracing::warn!(
+                        target: "simulation",
+                        backend = "debug_trace_call",
+                        error = ?err,
+                        "unexpected trace frame"
+                    );
+                    Ok(None)
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    target: "simulation",
+                    backend = "debug_trace_call",
+                    error = %e,
+                    "debug_trace_call failed"
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    async fn simulate_request_with_eth_call(
+        &self,
+        req: TransactionRequest,
+    ) -> Result<SimulationOutcome, AppError> {
         let gas_used = match self.provider.estimate_gas(req.clone()).await {
             Ok(g) => g,
             Err(e) => {
@@ -99,7 +226,6 @@ impl Simulator {
         };
 
         let call_res = self.provider.call(req).await;
-
         let (success, return_data) = match call_res {
             Ok(bytes) => (true, bytes.to_vec()),
             Err(e) => (false, format!("eth_call failed: {e}").into_bytes()),
@@ -137,11 +263,47 @@ impl Simulator {
             return Ok(Vec::new());
         }
 
-        let calls = txs.to_vec();
+        for method in self.backend.order() {
+            match method {
+                SimulationBackendMethod::EthSimulate => {
+                    if let Some(outcomes) = self
+                        .try_bundle_with_eth_simulate(txs, state_override.clone())
+                        .await?
+                    {
+                        return Ok(outcomes);
+                    }
+                }
+                SimulationBackendMethod::DebugTraceCall => {
+                    if let Some(outcomes) = self.try_bundle_with_debug_trace(txs).await? {
+                        return Ok(outcomes);
+                    }
+                }
+                SimulationBackendMethod::EthCall => {
+                    let mut outcomes = Vec::with_capacity(txs.len());
+                    for tx in txs {
+                        outcomes.push(self.simulate_request_with_eth_call(tx.clone()).await?);
+                    }
+                    return Ok(outcomes);
+                }
+            }
+        }
+
+        let mut outcomes = Vec::with_capacity(txs.len());
+        for tx in txs {
+            outcomes.push(self.simulate_request_with_eth_call(tx.clone()).await?);
+        }
+        Ok(outcomes)
+    }
+
+    async fn try_bundle_with_eth_simulate(
+        &self,
+        txs: &[TransactionRequest],
+        state_override: Option<StateOverride>,
+    ) -> Result<Option<Vec<SimulationOutcome>>, AppError> {
         let block = SimBlock {
             block_overrides: None,
             state_overrides: state_override.clone(),
-            calls,
+            calls: txs.to_vec(),
         };
         let payload = SimulatePayload {
             block_state_calls: vec![block],
@@ -152,47 +314,132 @@ impl Simulator {
 
         match self.provider.simulate(&payload).await {
             Ok(blocks) => {
-                let mut out = Vec::new();
+                let mut outcomes = Vec::new();
                 for blk in blocks {
-                    for (i, tx) in blk.calls.iter().enumerate() {
-                        let success = tx.error.is_none() && tx.status;
-
-                        if !success {
-                            let reason = decode_flashloan_revert(&tx.return_data);
-                            tracing::warn!("Bundle Tx {} Revert: {}", i, reason);
-                        }
-
-                        out.push(SimulationOutcome {
-                            success,
-                            gas_used: tx.gas_used,
-                            return_data: tx.return_data.to_vec(),
-                            reason: if success {
-                                None
-                            } else {
-                                tx.error.as_ref().map(|e| format!("{:?}", e)).or_else(|| {
-                                    if tx.return_data.is_empty() {
-                                        None
-                                    } else {
-                                        Some(decode_flashloan_revert(&tx.return_data))
-                                    }
-                                })
-                            },
-                        });
+                    for call in &blk.calls {
+                        outcomes.push(sim_call_result_to_outcome(call));
                     }
                 }
-                return Ok(out);
-            }
-            Err(_) => {
-                let mut out = Vec::new();
-                for tx in txs {
-                    out.push(
-                        self.simulate_request(tx.clone(), state_override.clone())
-                            .await?,
-                    );
+                if outcomes.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(outcomes))
                 }
-                Ok(out)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "simulation",
+                    backend = "eth_simulate",
+                    error = %e,
+                    "simulate_bundle_requests failed"
+                );
+                Ok(None)
             }
         }
+    }
+
+    async fn try_bundle_with_debug_trace(
+        &self,
+        txs: &[TransactionRequest],
+    ) -> Result<Option<Vec<SimulationOutcome>>, AppError> {
+        if txs.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        let bundle = Bundle::from(txs.to_vec());
+        let context = StateContext {
+            block_number: Some(BlockId::Number(BlockNumberOrTag::Pending)),
+            transaction_index: None,
+        };
+        let trace_options = GethDebugTracingCallOptions::default();
+
+        match self
+            .provider
+            .debug_trace_call_many(vec![bundle], context, trace_options)
+            .await
+        {
+            Ok(traces) => {
+                if traces.is_empty() {
+                    return Ok(None);
+                }
+                let mut outcomes = Vec::new();
+                for trace_set in traces {
+                    for trace in trace_set {
+                        match trace.try_into_default_frame() {
+                            Ok(frame) => outcomes.push(default_frame_to_outcome(frame)),
+                            Err(err) => {
+                                tracing::warn!(
+                                    target: "simulation",
+                                    backend = "debug_trace_call",
+                                    error = ?err,
+                                    "unexpected trace frame in bundle"
+                                );
+                                return Ok(None);
+                            }
+                        }
+                    }
+                }
+                Ok(Some(outcomes))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "simulation",
+                    backend = "debug_trace_call",
+                    error = %e,
+                    "debug_trace_call_many failed"
+                );
+                Ok(None)
+            }
+        }
+    }
+}
+
+fn sim_call_result_to_outcome(call: &SimCallResult) -> SimulationOutcome {
+    let success = call.error.is_none() && call.status;
+    if !success {
+        tracing::warn!(
+            target: "simulation",
+            "Simulation Revert Reason: {}",
+            decode_flashloan_revert(&call.return_data)
+        );
+    }
+    let reason = if success {
+        None
+    } else {
+        call.error.as_ref().map(|e| format!("{:?}", e)).or_else(|| {
+            if call.return_data.is_empty() {
+                None
+            } else {
+                Some(decode_flashloan_revert(&call.return_data))
+            }
+        })
+    };
+    SimulationOutcome {
+        success,
+        gas_used: call.gas_used,
+        return_data: call.return_data.to_vec(),
+        reason,
+    }
+}
+
+fn default_frame_to_outcome(frame: DefaultFrame) -> SimulationOutcome {
+    let success = !frame.failed;
+    if !success {
+        tracing::warn!(
+            target: "simulation",
+            "Simulation Revert Reason: {}",
+            decode_flashloan_revert(&frame.return_value)
+        );
+    }
+    let reason = if success {
+        None
+    } else {
+        Some(decode_flashloan_revert(&frame.return_value))
+    };
+    SimulationOutcome {
+        success,
+        gas_used: frame.gas,
+        return_data: frame.return_value.to_vec(),
+        reason,
     }
 }
 
@@ -201,49 +448,61 @@ pub fn decode_flashloan_revert(revert_data: &[u8]) -> String {
         return "Reverted with no data (OOG or empty)".to_string();
     }
 
-    // Try decoding against our custom errors
-    // Note: SolError trait provides abi_decode for the enum generated by sol!
     if let Ok(decoded) =
         UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::abi_decode(revert_data)
     {
         #[allow(unreachable_patterns)]
         return match decoded {
-            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::InsufficientFundsForRepayment(e) => {
-                format!(
-                    "📉 INSOLVENT: Needed {} of token {:?}, but only had {}",
-                    e.required, e.token, e.available
-                )
-            }
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::InsufficientFundsForRepayment(
+                e,
+            ) => format!(
+                "📉 INSOLVENT: Needed {} of token {:?}, but only had {}",
+                e.required, e.token, e.available
+            ),
             UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::ExecutionFailed(e) => {
                 let inner_msg = String::from_utf8(e.reason.to_vec())
                     .unwrap_or_else(|_| format!("0x{}", hex::encode(&e.reason)));
                 format!("💥 STRATEGY FAILED at index {}: {}", e.index, inner_msg)
             }
-            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::LengthMismatch(_) => "🚫 Array Length Mismatch".to_string(),
-            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::ZeroAssets(_) => "🚫 Zero Assets requested".to_string(),
-            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::TokenTransferFailed(_) => "🔒 Token Transfer Failed (USDT?)".to_string(),
-            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::ApprovalFailed(_) => "🔒 Approval failed (USDT-style)".to_string(),
-            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::InvalidWETHAddress(_) => "🚫 Invalid WETH address".to_string(),
-            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::InvalidProfitReceiver(_) => "🚫 Invalid profit receiver".to_string(),
-            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::BribeFailed(_) => "💰 Bribe payment failed".to_string(),
-            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::BalanceInvariantBroken(e) => {
-                format!(
-                    "🔒 Balance invariant broke for token {:?}: before {}, after {}",
-                    e.token, e.beforeBalance, e.afterBalance
-                )
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::LengthMismatch(_) => {
+                "🚫 Array Length Mismatch".to_string()
             }
-            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::OnlyOwner(_) => "🚫 Caller is not owner".to_string(),
-            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::OnlyVault(_) => "🚫 Caller is not Balancer Vault".to_string(),
-            _ => "Reverted with known custom error".to_string(), // Fallback if Debug is missing
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::ZeroAssets(_) => {
+                "🚫 Zero Assets requested".to_string()
+            }
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::TokenTransferFailed(_) => {
+                "🔒 Token Transfer Failed (USDT?)".to_string()
+            }
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::ApprovalFailed(_) => {
+                "🔒 Approval failed (USDT-style)".to_string()
+            }
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::InvalidWETHAddress(_) => {
+                "🚫 Invalid WETH address".to_string()
+            }
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::InvalidProfitReceiver(_) => {
+                "🚫 Invalid profit receiver".to_string()
+            }
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::BribeFailed(_) => {
+                "💰 Bribe payment failed".to_string()
+            }
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::BalanceInvariantBroken(e) => format!(
+                "🔒 Balance invariant broke for token {:?}: before {}, after {}",
+                e.token, e.beforeBalance, e.afterBalance
+            ),
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::OnlyOwner(_) => {
+                "🚫 Caller is not owner".to_string()
+            }
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::OnlyVault(_) => {
+                "🚫 Caller is not Balancer Vault".to_string()
+            }
+            _ => "Reverted with known custom error".to_string(),
         };
     }
 
-    // Try decoding standard Error(string)
     if let Ok(msg) = Revert::abi_decode(revert_data) {
         return format!("Standard Revert: {}", msg.reason());
     }
 
-    // Unknown binary data
     format!("Unknown Revert: 0x{}", hex::encode(revert_data))
 }
 

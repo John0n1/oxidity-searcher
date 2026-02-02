@@ -2,9 +2,14 @@
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
 
 pub mod bundles;
+pub mod routes;
 pub mod swaps;
+pub mod graph;
 
-use crate::common::constants::default_balancer_vault_for_chain;
+pub use routes::{RouteLeg, RoutePlan, RouteVenue};
+pub use graph::{QuoteEdge, QuoteGraph, QuoteSearchOptions};
+
+use crate::common::constants::{default_balancer_vault_for_chain, default_routers_for_chain};
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
 use crate::data::executor::{FlashCallbackData, UnifiedHardenedExecutor};
@@ -12,11 +17,15 @@ use crate::network::gas::GasFees;
 use crate::services::strategy::decode::{
     ObservedSwap, RouterKind, encode_v3_path, reverse_v3_path, target_token,
 };
-use crate::services::strategy::routers::{AavePool, BalancerProtocolFees, BalancerVaultFees};
+use crate::services::strategy::time_utils::current_unix;
+use crate::services::strategy::routers::{
+    AavePool, AaveV2LendingPool, BalancerProtocolFees, BalancerVault, BalancerVaultFees,
+    CurvePoolSwap,
+};
 use crate::services::strategy::routers::{ERC20, UniV2Router, UniV3Router};
 use crate::services::strategy::strategy::{FlashloanProvider, StrategyExecutor};
 use alloy::eips::eip2930::AccessList;
-use alloy::primitives::{Address, B256, Bytes, TxKind, U256};
+use alloy::primitives::{Address, B256, Bytes, I256, TxKind, U256};
 use alloy::rpc::types::eth::{TransactionInput, TransactionRequest};
 use alloy::sol_types::{SolCall, SolValue};
 use std::time::Duration;
@@ -31,7 +40,10 @@ pub struct BackrunTx {
     pub expected_out_token: Address,
     pub unwrap_to_native: bool,
     pub uses_flashloan: bool,
+    pub flashloan_premium: U256,
+    pub flashloan_overhead_gas: u64,
     pub router_kind: RouterKind,
+    pub route_plan: Option<RoutePlan>,
 }
 
 pub struct FrontRunTx {
@@ -50,8 +62,37 @@ pub struct ApproveTx {
 
 const BALANCER_FLASHLOAN_OVERHEAD_GAS: u64 = 180_000;
 const AAVE_FLASHLOAN_OVERHEAD_GAS: u64 = 200_000;
+const AAVE_V2_FLASHLOAN_OVERHEAD_GAS: u64 = 220_000;
+const V2_SWAP_OVERHEAD_GAS: u64 = 160_000;
+const CURVE_SWAP_OVERHEAD_GAS: u64 = 220_000;
+const BALANCER_SWAP_OVERHEAD_GAS: u64 = 200_000;
 
 impl StrategyExecutor {
+    fn single_leg_route(
+        venue: RouteVenue,
+        target: Address,
+        token_in: Address,
+        token_out: Address,
+        amount_in: U256,
+        min_out: U256,
+        fee: Option<u32>,
+        params: Option<Bytes>,
+    ) -> Option<RoutePlan> {
+        RoutePlan::try_new(vec![RouteLeg {
+            venue,
+            target,
+            token_in,
+            token_out,
+            amount_in,
+            min_out,
+            fee,
+            params,
+            is_flash_leg: matches!(
+                venue,
+                RouteVenue::AaveV2 | RouteVenue::AaveV3Flash | RouteVenue::BalancerFlash
+            ),
+        }])
+    }
     pub(crate) async fn needs_approval(
         &self,
         token: Address,
@@ -100,6 +141,73 @@ impl StrategyExecutor {
             .await?;
 
         Ok(ApproveTx { raw, request })
+    }
+
+    pub(crate) fn build_curve_swap_payload(
+        &self,
+        pool: Address,
+        i: i128,
+        j: i128,
+        amount_in: U256,
+        min_out: U256,
+        use_underlying: bool,
+    ) -> Vec<u8> {
+        let contract = CurvePoolSwap::new(pool, self.http_provider.clone());
+        if use_underlying {
+            contract
+                .exchange_underlying(i.into(), j.into(), amount_in, min_out)
+                .calldata()
+                .to_vec()
+        } else {
+            contract
+                .exchange(i.into(), j.into(), amount_in, min_out)
+                .calldata()
+                .to_vec()
+        }
+    }
+
+    pub(crate) fn build_balancer_single_swap_payload(
+        &self,
+        vault: Address,
+        pool_id: B256,
+        asset_in: Address,
+        asset_out: Address,
+        amount_in: U256,
+        min_out: U256,
+        sender: Address,
+        recipient: Address,
+    ) -> Vec<u8> {
+        let assets = vec![asset_in, asset_out];
+        let swap = BalancerVault::BatchSwapStep {
+            poolId: pool_id,
+            assetInIndex: U256::ZERO,
+            assetOutIndex: U256::ONE,
+            amount: amount_in,
+            userData: Bytes::new(),
+        };
+        let funds = BalancerVault::FundManagement {
+            sender,
+            fromInternalBalance: false,
+            recipient,
+            toInternalBalance: false,
+        };
+        let limit_in = I256::try_from(amount_in).unwrap_or(I256::MAX);
+        let limit_out = I256::try_from(min_out)
+            .unwrap_or(I256::MAX)
+            .checked_neg()
+            .unwrap_or(I256::MIN);
+        let limits = vec![limit_in, limit_out];
+        BalancerVault::new(vault, self.http_provider.clone())
+            .batchSwap(
+                0u8,
+                vec![swap],
+                assets,
+                funds,
+                limits,
+                U256::from(current_unix().saturating_add(120)),
+            )
+            .calldata()
+            .to_vec()
     }
 
     pub(crate) async fn build_executor_wrapper(
@@ -237,6 +345,173 @@ impl StrategyExecutor {
         remaining < overhead_cost
     }
 
+    pub(crate) async fn build_quote_graph(
+        &self,
+        token_in: Address,
+        token_out: Address,
+        amount_in: U256,
+        _gas_price: u128,
+        _max_hops: usize,
+    ) -> QuoteGraph {
+        let mut graph = QuoteGraph::default();
+        let routers = default_routers_for_chain(self.chain_id);
+
+        // UniV2 / Sushi (reuse V2 cache)
+        if let Some(out) = self.reserve_cache.quote_v2_path(&[token_in, token_out], amount_in) {
+            let min_out = out
+                .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+                / U256::from(10_000u64);
+            if let Some(router) = routers.get("uniswap_v2_router02").copied() {
+                graph.add_edge(QuoteEdge {
+                    venue: RouteVenue::UniV2,
+                    pool: router,
+                    token_in,
+                    token_out,
+                    amount_in,
+                    expected_out: out,
+                    min_out,
+                    gas_overhead: V2_SWAP_OVERHEAD_GAS,
+                    fee: None,
+                    params: None,
+                    is_flash: false,
+                });
+            }
+            if let Some(router) = routers.get("sushiswap_router").copied() {
+                graph.add_edge(QuoteEdge {
+                    venue: RouteVenue::Sushi,
+                    pool: router,
+                    token_in,
+                    token_out,
+                    amount_in,
+                    expected_out: out,
+                    min_out,
+                    gas_overhead: V2_SWAP_OVERHEAD_GAS,
+                    fee: None,
+                    params: None,
+                    is_flash: false,
+                });
+            }
+        }
+
+        // Curve pools
+        for pool in self.reserve_cache.curve_known_pools() {
+            if let Some((out, underlying, i, j)) = self
+                .reserve_cache
+                .quote_curve_pool(pool, token_in, token_out, amount_in)
+                .await
+            {
+                let min_out = out
+                    .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+                    / U256::from(10_000u64);
+                let mut param_bytes = Vec::with_capacity(3);
+                param_bytes.push(if underlying { 1 } else { 0 });
+                param_bytes.push(i as u8);
+                param_bytes.push(j as u8);
+                graph.add_edge(QuoteEdge {
+                    venue: RouteVenue::CurvePool,
+                    pool,
+                    token_in,
+                    token_out,
+                    amount_in,
+                    expected_out: out,
+                    min_out,
+                    gas_overhead: CURVE_SWAP_OVERHEAD_GAS,
+                    fee: None,
+                    params: Some(Bytes::from(param_bytes)),
+                    is_flash: false,
+                });
+            }
+        }
+
+        // Balancer pools
+        for pool in self.reserve_cache.balancer_known_pools() {
+            if let Some((out, pool_id)) = self
+                .reserve_cache
+                .quote_balancer_single(pool, token_in, token_out, amount_in)
+                .await
+            {
+                let min_out = out
+                    .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+                    / U256::from(10_000u64);
+                graph.add_edge(QuoteEdge {
+                    venue: RouteVenue::BalancerPool,
+                    pool,
+                    token_in,
+                    token_out,
+                    amount_in,
+                    expected_out: out,
+                    min_out,
+                    gas_overhead: BALANCER_SWAP_OVERHEAD_GAS,
+                    fee: None,
+                    params: Some(Bytes::from(pool_id.to_vec())),
+                    is_flash: false,
+                });
+            }
+        }
+
+        // Flash legs: allow Balancer / Aave flash loans if enabled
+        if self.flashloan_enabled {
+            if self.flashloan_providers.contains(&FlashloanProvider::Balancer) {
+                if let Some(vault) = default_balancer_vault_for_chain(self.chain_id) {
+                    graph.add_edge(QuoteEdge {
+                        venue: RouteVenue::BalancerFlash,
+                        pool: vault,
+                        token_in,
+                        token_out: token_in,
+                        amount_in,
+                        expected_out: amount_in,
+                        min_out: amount_in,
+                        gas_overhead: BALANCER_FLASHLOAN_OVERHEAD_GAS,
+                        fee: None,
+                        params: None,
+                        is_flash: true,
+                    });
+                }
+            }
+            if self.flashloan_providers.contains(&FlashloanProvider::AaveV3)
+                || self.flashloan_providers.contains(&FlashloanProvider::AaveV2)
+            {
+                if let Some(pool) = self.aave_pool {
+                    graph.add_edge(QuoteEdge {
+                        venue: RouteVenue::AaveV3Flash,
+                        pool,
+                        token_in,
+                        token_out: token_in,
+                        amount_in,
+                        expected_out: amount_in,
+                        min_out: amount_in,
+                        gas_overhead: AAVE_FLASHLOAN_OVERHEAD_GAS,
+                        fee: None,
+                        params: None,
+                        is_flash: true,
+                    });
+                }
+            }
+        }
+
+        // Optional pruning by ratio
+        graph
+    }
+
+    pub(crate) async fn best_route_plan(
+        &self,
+        token_in: Address,
+        token_out: Address,
+        amount_in: U256,
+        gas_price: u128,
+    ) -> Option<RoutePlan> {
+        let graph = self
+            .build_quote_graph(token_in, token_out, amount_in, gas_price, 3)
+            .await;
+        let opts = QuoteSearchOptions {
+            gas_price,
+            max_hops: 3,
+            beam_size: 8,
+            min_ratio_ppm: 900,
+        };
+        graph.k_best(token_in, token_out, amount_in, 1, opts).into_iter().next()
+    }
+
     // Exposed for integration testing of encoded flashloan callbacks.
     pub async fn build_flashloan_transaction(
         &self,
@@ -247,7 +522,7 @@ impl StrategyExecutor {
         gas_limit_hint: u64,
         gas_fees: &GasFees,
         nonce: u64,
-    ) -> Result<(Vec<u8>, TransactionRequest, B256), AppError> {
+    ) -> Result<(Vec<u8>, TransactionRequest, B256, U256, u64), AppError> {
         let provider = self
             .select_flashloan_provider(asset, amount, gas_fees)
             .await?
@@ -279,6 +554,26 @@ impl StrategyExecutor {
                 };
                 exec_call.abi_encode()
             }
+            FlashloanProvider::AaveV2 => {
+                // Aave v2 flashLoan(address receiver, address[] assets, uint256[] amounts, uint256[] modes, address onBehalfOf, bytes params, uint16 referralCode)
+                let _pool = self
+                    .aave_pool
+                    .ok_or_else(|| AppError::Strategy("Aave v2 pool address missing".into()))?;
+                // modes all zero for no debt (full repayment)
+                let modes = vec![U256::ZERO];
+                let params_bytes = Bytes::from(params.clone());
+                let referral: u16 = 0;
+                let call = AaveV2LendingPool::flashLoanCall {
+                    receiverAddress: executor,
+                    assets: vec![asset],
+                    amounts: vec![amount],
+                    modes,
+                    onBehalfOf: executor,
+                    params: params_bytes,
+                    referralCode: referral,
+                };
+                call.abi_encode()
+            }
             FlashloanProvider::AaveV3 => {
                 let pool = self
                     .aave_pool
@@ -295,6 +590,7 @@ impl StrategyExecutor {
 
         let overhead = match provider {
             FlashloanProvider::Balancer => BALANCER_FLASHLOAN_OVERHEAD_GAS,
+            FlashloanProvider::AaveV2 => AAVE_V2_FLASHLOAN_OVERHEAD_GAS,
             FlashloanProvider::AaveV3 => AAVE_FLASHLOAN_OVERHEAD_GAS,
         };
 
@@ -313,8 +609,46 @@ impl StrategyExecutor {
             self.chain_id,
         );
 
-        self.sign_with_access_list(request, AccessList::default())
-            .await
+        let premium = match self
+            .select_flashloan_provider(asset, amount, gas_fees)
+            .await?
+        {
+            Some(FlashloanProvider::Balancer) => {
+                let fee = self
+                    .get_balancer_flashloan_fee()
+                    .await
+                    .unwrap_or(U256::ZERO);
+                amount.saturating_mul(fee) / U256::from(1_000_000_000_000_000_000u128)
+            }
+            Some(FlashloanProvider::AaveV3) => {
+                let premium_bps = if let Some(pool_addr) = self.aave_pool {
+                    match AavePool::new(pool_addr, self.http_provider.clone())
+                        .FLASHLOAN_PREMIUM_TOTAL()
+                        .call()
+                        .await
+                    {
+                        Ok(v) => U256::from(v),
+                        Err(e) => {
+                            return Err(AppError::Strategy(format!(
+                                "Failed to read Aave premium: {}",
+                                e
+                            )));
+                        }
+                    }
+                } else {
+                    return Err(AppError::Strategy("Aave pool missing".into()));
+                };
+                amount.saturating_mul(premium_bps) / U256::from(10_000u64)
+            }
+            _ => U256::ZERO,
+        };
+        let _overhead_cost =
+            U256::from(overhead).saturating_mul(U256::from(gas_fees.max_fee_per_gas));
+
+        let signed = self
+            .sign_with_access_list(request, AccessList::default())
+            .await?;
+        Ok((signed.0, signed.1, signed.2, premium, overhead))
     }
 
     pub(crate) fn flashloan_request_template(
@@ -358,8 +692,7 @@ impl StrategyExecutor {
     pub(crate) async fn build_front_run_tx(
         &self,
         observed: &ObservedSwap,
-        max_fee_per_gas: u128,
-        max_priority_fee_per_gas: u128,
+        gas_fees: &GasFees,
         wallet_balance: U256,
         gas_limit_hint: u64,
         nonce: u64,
@@ -370,13 +703,25 @@ impl StrategyExecutor {
         let target_token = target_token(&observed.path, self.wrapped_native)
             .ok_or_else(|| AppError::Strategy("Unable to derive target token".into()))?;
 
-        let value = StrategyExecutor::dynamic_backrun_value(
-            observed.amount_in,
-            wallet_balance,
-            self.slippage_bps,
-            gas_limit_hint,
-            max_fee_per_gas,
-        )?;
+        let value = match self
+            .pool_backrun_value(
+                observed,
+                wallet_balance,
+                self.slippage_bps,
+                gas_limit_hint,
+                gas_fees,
+            )
+            .await?
+        {
+            Some(v) => v,
+            None => StrategyExecutor::dynamic_backrun_value(
+                observed.amount_in,
+                wallet_balance,
+                self.slippage_bps,
+                gas_limit_hint,
+                gas_fees.max_fee_per_gas,
+            )?,
+        };
 
         let (expected_tokens, calldata, value, gas_limit, access_list) = match observed.router_kind
         {
@@ -455,8 +800,8 @@ impl StrategyExecutor {
                 observed.router,
                 gas_limit,
                 value,
-                max_fee_per_gas,
-                max_priority_fee_per_gas,
+                gas_fees.max_fee_per_gas,
+                gas_fees.max_priority_fee_per_gas,
                 nonce,
                 calldata,
                 access_list,
@@ -476,8 +821,7 @@ impl StrategyExecutor {
     pub(crate) async fn build_backrun_tx(
         &self,
         observed: &ObservedSwap,
-        max_fee_per_gas: u128,
-        max_priority_fee_per_gas: u128,
+        gas_fees: &GasFees,
         wallet_balance: U256,
         gas_limit_hint: u64,
         token_in_override: Option<U256>,
@@ -499,13 +843,25 @@ impl StrategyExecutor {
         if token_in_override.is_none() {
             match observed.router_kind {
                 RouterKind::V2Like => {
-                    let value = StrategyExecutor::dynamic_backrun_value(
-                        observed.amount_in,
-                        wallet_balance,
-                        self.slippage_bps,
-                        gas_limit_hint,
-                        max_fee_per_gas,
-                    )?;
+                    let value = match self
+                        .pool_backrun_value(
+                            observed,
+                            wallet_balance,
+                            self.slippage_bps,
+                            gas_limit_hint,
+                            gas_fees,
+                        )
+                        .await?
+                    {
+                        Some(v) => v,
+                        None => StrategyExecutor::dynamic_backrun_value(
+                            observed.amount_in,
+                            wallet_balance,
+                            self.slippage_bps,
+                            gas_limit_hint,
+                            gas_fees.max_fee_per_gas,
+                        )?,
+                    };
                     expected_out_token = target_token;
                     let path = vec![self.wrapped_native, target_token];
                     let recipient = if use_flashloan {
@@ -592,7 +948,7 @@ impl StrategyExecutor {
                                 U256::ZERO,
                             ),
                         ];
-                        let (raw, req, hash) = self
+                        let (raw, req, hash, premium, overhead_gas) = self
                             .build_flashloan_transaction(
                                 executor,
                                 path[0],
@@ -600,10 +956,14 @@ impl StrategyExecutor {
                                 callbacks,
                                 gas_limit_hint,
                                 &crate::network::gas::GasFees {
-                                    max_fee_per_gas,
-                                    max_priority_fee_per_gas,
+                                    max_fee_per_gas: gas_fees.max_fee_per_gas,
+                                    max_priority_fee_per_gas: gas_fees.max_priority_fee_per_gas,
                                     next_base_fee_per_gas: 0,
                                     base_fee_per_gas: 0,
+                                    p50_priority_fee_per_gas: None,
+                                    p90_priority_fee_per_gas: None,
+                                    gas_used_ratio: None,
+                                    suggested_max_fee_per_gas: None,
                                 },
                                 nonce,
                             )
@@ -622,7 +982,10 @@ impl StrategyExecutor {
                             expected_out_token: self.wrapped_native,
                             unwrap_to_native: false,
                             uses_flashloan: true,
+                            flashloan_premium: premium,
+                            flashloan_overhead_gas: overhead_gas,
                             router_kind: observed.router_kind,
+                            route_plan: None,
                         });
                     }
                     if let Some(addr) = swap.access_list.0.first().map(|a| a.address) {
@@ -646,8 +1009,8 @@ impl StrategyExecutor {
                         request: TransactionRequest {
                             from: Some(self.signer.address()),
                             to: Some(TxKind::Call(observed.router)),
-                            max_fee_per_gas: Some(max_fee_per_gas),
-                            max_priority_fee_per_gas: Some(max_priority_fee_per_gas),
+                            max_fee_per_gas: Some(gas_fees.max_fee_per_gas),
+                            max_priority_fee_per_gas: Some(gas_fees.max_priority_fee_per_gas),
                             gas: Some(gas_limit),
                             value: Some(value),
                             input: TransactionInput::new(calldata.into()),
@@ -660,17 +1023,51 @@ impl StrategyExecutor {
                         expected_out_token,
                         unwrap_to_native,
                         uses_flashloan: false,
+                        flashloan_premium: U256::ZERO,
+                        flashloan_overhead_gas: 0,
                         router_kind: observed.router_kind,
+                        route_plan: self
+                            .best_route_plan(
+                                self.wrapped_native,
+                                expected_out_token,
+                                value,
+                                gas_fees.max_fee_per_gas,
+                            )
+                            .await
+                            .or_else(|| {
+                                StrategyExecutor::single_leg_route(
+                                    RouteVenue::UniV2,
+                                    observed.router,
+                                    self.wrapped_native,
+                                    expected_out_token,
+                                    value,
+                                    tokens_out,
+                                    None,
+                                    None,
+                                )
+                            }),
                     });
                 }
                 RouterKind::V3Like => {
-                    let value = StrategyExecutor::dynamic_backrun_value(
-                        observed.amount_in,
-                        wallet_balance,
-                        self.slippage_bps,
-                        gas_limit_hint,
-                        max_fee_per_gas,
-                    )?;
+                    let value = match self
+                        .pool_backrun_value(
+                            observed,
+                            wallet_balance,
+                            self.slippage_bps,
+                            gas_limit_hint,
+                            gas_fees,
+                        )
+                        .await?
+                    {
+                        Some(v) => v,
+                        None => StrategyExecutor::dynamic_backrun_value(
+                            observed.amount_in,
+                            wallet_balance,
+                            self.slippage_bps,
+                            gas_limit_hint,
+                            gas_fees.max_fee_per_gas,
+                        )?,
+                    };
                     expected_out_token = observed
                         .path
                         .last()
@@ -711,8 +1108,8 @@ impl StrategyExecutor {
                         request: TransactionRequest {
                             from: Some(self.signer.address()),
                             to: Some(TxKind::Call(observed.router)),
-                            max_fee_per_gas: Some(max_fee_per_gas),
-                            max_priority_fee_per_gas: Some(max_priority_fee_per_gas),
+                            max_fee_per_gas: Some(gas_fees.max_fee_per_gas),
+                            max_priority_fee_per_gas: Some(gas_fees.max_priority_fee_per_gas),
                             gas: Some(gas_limit_hint.max(180_000)),
                             value: Some(U256::ZERO),
                             input: TransactionInput::new(calldata.into()),
@@ -725,7 +1122,29 @@ impl StrategyExecutor {
                         expected_out_token,
                         unwrap_to_native,
                         uses_flashloan: false,
+                        flashloan_premium: U256::ZERO,
+                        flashloan_overhead_gas: 0,
                         router_kind: observed.router_kind,
+                        route_plan: self
+                            .best_route_plan(
+                                self.wrapped_native,
+                                expected_out_token,
+                                value,
+                                gas_fees.max_fee_per_gas,
+                            )
+                            .await
+                            .or_else(|| {
+                                StrategyExecutor::single_leg_route(
+                                    RouteVenue::UniV3,
+                                    observed.router,
+                                    self.wrapped_native,
+                                    expected_out_token,
+                                    value,
+                                    expected_out,
+                                    observed.v3_fees.first().copied(),
+                                    Some(Bytes::from(path_bytes.clone())),
+                                )
+                            }),
                     });
                 }
             }
@@ -849,8 +1268,8 @@ impl StrategyExecutor {
                     TransactionRequest {
                         from: Some(self.signer.address()),
                         to: Some(TxKind::Call(observed.router)),
-                        max_fee_per_gas: Some(max_fee_per_gas),
-                        max_priority_fee_per_gas: Some(max_priority_fee_per_gas),
+                        max_fee_per_gas: Some(gas_fees.max_fee_per_gas),
+                        max_priority_fee_per_gas: Some(gas_fees.max_priority_fee_per_gas),
                         gas: Some(gas_limit_hint),
                         value: Some(value),
                         input: TransactionInput::new(calldata.into()),
@@ -873,12 +1292,40 @@ impl StrategyExecutor {
                 expected_out_token,
                 unwrap_to_native,
                 uses_flashloan: use_flashloan,
+                flashloan_premium: U256::ZERO,
+                flashloan_overhead_gas: 0,
                 router_kind: observed.router_kind,
+                route_plan: self
+                    .best_route_plan(
+                        target_token,
+                        expected_out_token,
+                        value,
+                        gas_fees.max_fee_per_gas,
+                    )
+                    .await
+                    .or_else(|| {
+                        StrategyExecutor::single_leg_route(
+                            match observed.router_kind {
+                                RouterKind::V2Like => RouteVenue::UniV2,
+                                RouterKind::V3Like => RouteVenue::UniV3,
+                            },
+                            observed.router,
+                            target_token,
+                            expected_out_token,
+                            value,
+                            expected_out,
+                            match observed.router_kind {
+                                RouterKind::V3Like => observed.v3_fees.first().copied(),
+                                _ => None,
+                            },
+                            None,
+                        )
+                    }),
             })
         }
     }
-}
 
+}
 // ------------------------------------------------------------------
 // Flashloan provider scoring
 // ------------------------------------------------------------------
@@ -897,6 +1344,10 @@ impl StrategyExecutor {
             let quote = match provider {
                 FlashloanProvider::Balancer => {
                     self.quote_balancer_flashloan(asset, amount, gas_fees.max_fee_per_gas)
+                        .await?
+                }
+                FlashloanProvider::AaveV2 => {
+                    self.quote_aave_v2_flashloan(asset, amount, gas_fees.max_fee_per_gas)
                         .await?
                 }
                 FlashloanProvider::AaveV3 => {
@@ -1002,6 +1453,47 @@ impl StrategyExecutor {
         Ok(Some((
             premium.saturating_add(gas_cost),
             AAVE_FLASHLOAN_OVERHEAD_GAS,
+        )))
+    }
+
+    async fn quote_aave_v2_flashloan(
+        &self,
+        asset: Address,
+        amount: U256,
+        max_fee_per_gas: u128,
+    ) -> Result<Option<(U256, u64)>, AppError> {
+        let pool = match self.aave_pool {
+            Some(p) => p,
+            None => return Ok(None),
+        };
+        let balance: U256 = ERC20::new(asset, self.http_provider.clone())
+            .balanceOf(pool)
+            .call()
+            .await
+            .unwrap_or(U256::MAX);
+        if balance < amount {
+            return Ok(None);
+        }
+
+        // Aave v2 premium is FLASHLOAN_PREMIUM_TOTAL / 10_000
+        let premium_bps: U256 = match AaveV2LendingPool::new(pool, self.http_provider.clone())
+            .FLASHLOAN_PREMIUM_TOTAL()
+            .call()
+            .await
+        {
+            Ok(v) => U256::from(v),
+            Err(_) => return Ok(None),
+        };
+
+        let premium = amount
+            .saturating_mul(premium_bps)
+            .checked_div(U256::from(10_000u64))
+            .unwrap_or(U256::MAX);
+        let gas_cost = U256::from(AAVE_V2_FLASHLOAN_OVERHEAD_GAS)
+            .saturating_mul(U256::from(max_fee_per_gas));
+        Ok(Some((
+            premium.saturating_add(gas_cost),
+            AAVE_V2_FLASHLOAN_OVERHEAD_GAS,
         )))
     }
 }

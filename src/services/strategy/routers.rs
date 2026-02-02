@@ -66,6 +66,108 @@ sol! {
 
     #[derive(Debug, PartialEq, Eq)]
     #[sol(rpc)]
+    contract BalancerVault {
+        struct BatchSwapStep {
+            bytes32 poolId;
+            uint256 assetInIndex;
+            uint256 assetOutIndex;
+            uint256 amount;
+            bytes userData;
+        }
+
+        struct FundManagement {
+            address sender;
+            bool fromInternalBalance;
+            address recipient;
+            bool toInternalBalance;
+        }
+
+        function queryBatchSwap(
+            uint8 kind,
+            BatchSwapStep[] calldata swaps,
+            address[] calldata assets,
+            FundManagement calldata funds
+        ) external view returns (int256[] memory assetDeltas);
+
+        function batchSwap(
+            uint8 kind,
+            BatchSwapStep[] calldata swaps,
+            address[] calldata assets,
+            FundManagement calldata funds,
+            int256[] calldata limits,
+            uint256 deadline
+        ) external payable returns (int256[] memory);
+
+        function getPoolTokens(bytes32 poolId)
+            external
+            view
+            returns (address[] memory tokens, uint256[] memory balances, uint256 lastChangeBlock);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
+    contract BalancerPoolId {
+        function getPoolId() external view returns (bytes32);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
+    contract BalancerWeightedPool {
+        function getNormalizedWeights() external view returns (uint256[] memory);
+        function getSwapFeePercentage() external view returns (uint256);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
+    contract BalancerStablePool {
+        function getAmplificationParameter()
+            external
+            view
+            returns (uint256 value, bool isUpdating, uint256 precision);
+        function getSwapFeePercentage() external view returns (uint256);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
+    contract CurveRegistry {
+        function get_coins(address pool) external view returns (address[8] memory);
+        function get_underlying_coins(address pool) external view returns (address[8] memory);
+        function get_decimals(address pool) external view returns (uint256[8] memory);
+        function get_underlying_decimals(address pool) external view returns (uint256[8] memory);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
+    contract CurvePoolLike {
+        function get_dy(int128 i, int128 j, uint256 dx) external view returns (uint256);
+        function get_dy_underlying(int128 i, int128 j, uint256 dx) external view returns (uint256);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
+    contract CurvePoolSwap {
+        function exchange(int128 i, int128 j, uint256 dx, uint256 min_dy) external returns (uint256);
+        function exchange_underlying(int128 i, int128 j, uint256 dx, uint256 min_dy) external returns (uint256);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
+    contract AaveV2LendingPool {
+        function flashLoan(
+            address receiverAddress,
+            address[] calldata assets,
+            uint256[] calldata amounts,
+            uint256[] calldata modes,
+            address onBehalfOf,
+            bytes calldata params,
+            uint16 referralCode
+        ) external;
+
+        function FLASHLOAN_PREMIUM_TOTAL() external view returns (uint256);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
     contract AavePool {
         function FLASHLOAN_PREMIUM_TOTAL() external view returns (uint128);
     }

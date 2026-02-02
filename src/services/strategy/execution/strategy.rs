@@ -53,6 +53,7 @@ pub(crate) const V3_QUOTE_CACHE_TTL_MS: u64 = 250;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlashloanProvider {
     Balancer,
+    AaveV2,
     AaveV3,
 }
 
@@ -161,6 +162,7 @@ pub struct StrategyExecutor {
     pub(in crate::services::strategy) reserve_cache: Arc<ReserveCache>,
     pub(in crate::services::strategy) bundle_state: Arc<Mutex<Option<BundleState>>>,
     pub(in crate::services::strategy) v3_quote_cache: DashMap<B256, V3QuoteCacheEntry>,
+    pub(in crate::services::strategy) probe_gas_stats: DashMap<Address, (u64, u64)>,
     pub(in crate::services::strategy) current_block: AtomicU64,
     pub(in crate::services::strategy) sandwich_attacks_enabled: bool,
     pub(in crate::services::strategy) simulation_backend: String,
@@ -175,6 +177,11 @@ impl StrategyExecutor {
         for p in &self.flashloan_providers {
             match p {
                 FlashloanProvider::Balancer => return true,
+                FlashloanProvider::AaveV2 => {
+                    if self.aave_pool.is_some() {
+                        return true;
+                    }
+                }
                 FlashloanProvider::AaveV3 => {
                     if self.aave_pool.is_some() {
                         return true;
@@ -426,6 +433,7 @@ impl StrategyExecutor {
             reserve_cache,
             bundle_state: Arc::new(Mutex::new(None)),
             v3_quote_cache: DashMap::new(),
+            probe_gas_stats: DashMap::new(),
             current_block: AtomicU64::new(0),
             sandwich_attacks_enabled,
             simulation_backend,
@@ -517,6 +525,36 @@ impl StrategyExecutor {
         }
     }
 
+    /// Rolling probe gas estimate per router with a 20% safety margin.
+    pub(crate) fn probe_gas_limit(&self, router: Address) -> u64 {
+        let base = PROBE_GAS_LIMIT;
+        if let Some(entry) = self.probe_gas_stats.get(&router) {
+            let (sum, count) = *entry;
+            if count > 0 {
+                let avg = sum.saturating_div(count);
+                return avg
+                    .saturating_mul(12)
+                    .checked_div(10)
+                    .unwrap_or(avg)
+                    .clamp(150_000, 500_000);
+            }
+        }
+        base
+    }
+
+    pub(crate) fn record_probe_gas(&self, router: Address, used: u64) {
+        let used = used.clamp(60_000, 600_000);
+        self.probe_gas_stats
+            .entry(router)
+            .and_modify(|(sum, count)| {
+                // Decaying average: keep weights bounded to avoid overflow.
+                let new_sum = sum.saturating_mul(9).checked_div(10).unwrap_or(*sum);
+                *sum = new_sum.saturating_add(used);
+                *count = count.saturating_add(1).min(10);
+            })
+            .or_insert((used, 1));
+    }
+
     pub(in crate::services::strategy) async fn probe_v3_sell_for_toxicity(
         &self,
         router: Address,
@@ -538,10 +576,11 @@ impl StrategyExecutor {
             })
             .calldata()
             .to_vec();
+        let probe_gas = self.probe_gas_limit(router);
         let req = TransactionRequest {
             from: Some(self.signer.address()),
             to: Some(TxKind::Call(router)),
-            gas: Some(PROBE_GAS_LIMIT.saturating_mul(2)),
+            gas: Some(probe_gas.saturating_mul(2)),
             value: Some(U256::ZERO),
             input: TransactionInput::new(Bytes::from(calldata)),
             chain_id: Some(self.chain_id),
@@ -552,6 +591,7 @@ impl StrategyExecutor {
             tracing::debug!(target: "strategy", "V3 probe revert; marking toxic");
             return Ok(false);
         }
+        self.record_probe_gas(router, outcome.gas_used);
         if outcome.return_data.is_empty() {
             return Ok(true);
         }
@@ -604,6 +644,7 @@ mod tests {
     use super::*;
     use crate::common::constants::{MIN_PROFIT_THRESHOLD_WEI, WETH_MAINNET};
     use crate::core::executor::BundleSender;
+    use crate::core::simulation::SimulationBackend;
     use crate::network::gas::GasFees;
     use crate::network::price_feed::PriceApiKeys;
     use crate::services::strategy::decode::{
@@ -869,6 +910,10 @@ mod tests {
             max_priority_fee_per_gas: 5,
             next_base_fee_per_gas: 0,
             base_fee_per_gas: 0,
+            p50_priority_fee_per_gas: None,
+            p90_priority_fee_per_gas: None,
+            gas_used_ratio: None,
+            suggested_max_fee_per_gas: None,
         };
         let calldata = vec![0x01, 0x02];
         let req = StrategyExecutor::flashloan_request_template(
@@ -964,7 +1009,7 @@ mod tests {
         let portfolio = Arc::new(PortfolioManager::new(http.clone(), Address::ZERO));
         let gas_oracle = GasOracle::new(http.clone());
         let price_feed = PriceFeed::new(http.clone(), HashMap::new(), PriceApiKeys::default());
-        let simulator = Simulator::new(http.clone());
+        let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
         let token_manager = Arc::new(TokenManager::default());
         let stats = Arc::new(StrategyStats::default());
         let nonce_manager = NonceManager::new(http.clone(), Address::ZERO);

@@ -22,7 +22,6 @@ use alloy::primitives::TxKind;
 use alloy::primitives::{Address, B256, U256};
 use alloy::rpc::types::eth::state::StateOverridesBuilder;
 use alloy::rpc::types::eth::{Transaction, TransactionInput, TransactionRequest};
-use std::str::FromStr;
 
 impl StrategyExecutor {
     pub async fn process_work(self: std::sync::Arc<Self>, work: StrategyWork) {
@@ -229,6 +228,7 @@ impl StrategyExecutor {
                 overrides,
                 &backrun,
                 parts.attack_value_eth,
+                parts.bribe_wei,
                 parts.wallet_balance,
                 tx.gas_limit(),
                 &parts.gas_fees,
@@ -489,6 +489,7 @@ impl StrategyExecutor {
                 overrides,
                 &backrun,
                 parts.attack_value_eth,
+                parts.bribe_wei,
                 parts.wallet_balance,
                 gas_limit_hint,
                 &parts.gas_fees,
@@ -695,13 +696,16 @@ impl StrategyExecutor {
     ) -> Result<Option<BundleParts>, AppError> {
         let mut gas_fees: GasFees = self.gas_oracle.estimate_eip1559_fees().await?;
         self.boost_fees(&mut gas_fees, fee_hints.0, fee_hints.1);
-        let gas_cap_wei = U256::from(self.max_gas_price_gwei) * U256::from(1_000_000_000u64);
-        if U256::from(gas_fees.max_fee_per_gas) > gas_cap_wei {
+        let dynamic_cap = gas_fees
+            .suggested_max_fee_per_gas
+            .map(U256::from)
+            .unwrap_or(U256::from(self.max_gas_price_gwei) * U256::from(1_000_000_000u64));
+        if U256::from(gas_fees.max_fee_per_gas) > dynamic_cap {
             self.log_skip(
                 "gas_price_cap",
                 &format!(
-                    "max_fee_per_gas={} cap_gwei={}",
-                    gas_fees.max_fee_per_gas, self.max_gas_price_gwei
+                    "max_fee_per_gas={} cap_wei={}",
+                    gas_fees.max_fee_per_gas, dynamic_cap
                 ),
             );
             return Ok(None);
@@ -725,8 +729,7 @@ impl StrategyExecutor {
             match self
                 .build_front_run_tx(
                     observed_swap,
-                    gas_fees.max_fee_per_gas,
-                    gas_fees.max_priority_fee_per_gas,
+                    &gas_fees,
                     wallet_chain_balance,
                     gas_limit_hint,
                     0,
@@ -764,13 +767,13 @@ impl StrategyExecutor {
             }
         }
 
+        let required_value = victim_value.saturating_add(attack_value_eth);
         let use_flashloan =
-            self.should_use_flashloan(observed_swap.amount_in, wallet_chain_balance, &gas_fees)
+            self.should_use_flashloan(required_value, wallet_chain_balance, &gas_fees)
                 && front_run.is_none();
-        let sim_balance =
-            U256::from_str("10000000000000000000000").unwrap_or_else(|_| U256::from(u128::MAX));
+        // For sizing, flashloans can extend to wallet balance plus victim value instead of a fixed 10k override.
         let trade_balance = if use_flashloan {
-            sim_balance
+            wallet_chain_balance.saturating_add(victim_value)
         } else {
             wallet_chain_balance
         };
@@ -778,8 +781,7 @@ impl StrategyExecutor {
         let backrun = match self
             .build_backrun_tx(
                 observed_swap,
-                gas_fees.max_fee_per_gas,
-                gas_fees.max_priority_fee_per_gas,
+                &gas_fees,
                 trade_balance,
                 gas_limit_hint,
                 front_run.as_ref().map(|f| f.expected_tokens),
@@ -799,11 +801,22 @@ impl StrategyExecutor {
             .build_executor_wrapper(approval.as_ref(), &backrun, &gas_fees, gas_limit_hint, 0)
             .await?;
 
+        let bribe_wei = if let Some((_, req, _)) = executor_request.as_ref() {
+            req.value
+                .unwrap_or(U256::ZERO)
+                .saturating_sub(backrun.value)
+        } else {
+            U256::ZERO
+        };
+
+        let sim_balance = wallet_chain_balance;
+
         Ok(Some(BundleParts {
             gas_fees,
             wallet_balance: wallet_chain_balance,
             sim_balance,
             attack_value_eth,
+            bribe_wei,
             front_run,
             approval,
             backrun,
@@ -840,6 +853,7 @@ impl StrategyExecutor {
         overrides: StateOverridesBuilder,
         backrun: &BackrunTx,
         attack_value_eth: U256,
+        bribe_wei: U256,
         wallet_chain_balance: U256,
         gas_limit_hint: u64,
         gas_fees: &GasFees,
@@ -877,13 +891,43 @@ impl StrategyExecutor {
             gas_used_total = gas_used_total.saturating_add(sim.gas_used);
         }
         let bundle_gas_limit = gas_used_total.max(gas_limit_hint);
-        let effective_fee = gas_fees
-            .next_base_fee_per_gas
-            .max(gas_fees.base_fee_per_gas)
-            .saturating_add(gas_fees.max_priority_fee_per_gas);
-        let gas_cost_wei = U256::from(gas_used_total).saturating_mul(U256::from(effective_fee));
 
-        let total_eth_in = backrun.value.saturating_add(attack_value_eth);
+        // EIP-1559 effective fee actually paid: base_fee + min(tip, max_fee - base_fee).
+        let paid_tip = gas_fees.max_priority_fee_per_gas.min(
+            gas_fees
+                .max_fee_per_gas
+                .saturating_sub(gas_fees.base_fee_per_gas),
+        );
+        // Add a small drift multiplier (5%) to cushion basefee movement across a couple blocks.
+        let paid_fee = gas_fees
+            .base_fee_per_gas
+            .saturating_add(paid_tip)
+            .saturating_mul(105)
+            .checked_div(100)
+            .unwrap_or_else(|| gas_fees.base_fee_per_gas.saturating_add(paid_tip));
+        let gas_cost_wei = U256::from(gas_used_total).saturating_mul(U256::from(paid_fee));
+
+        // Include any wrapper‑level bribe/value delta even if backrun.value itself is zero.
+        let backrun_value = backrun
+            .request
+            .value
+            .unwrap_or(backrun.value)
+            .max(backrun.value);
+        let total_eth_in = backrun_value
+            .saturating_add(attack_value_eth)
+            .saturating_add(bribe_wei);
+
+        let upfront_need = total_eth_in.saturating_add(gas_cost_wei);
+        if wallet_chain_balance < upfront_need {
+            self.log_skip(
+                "insufficient_balance",
+                &format!(
+                    "need {} wei (value+bribe+gas) have {}",
+                    upfront_need, wallet_chain_balance
+                ),
+            );
+            return Ok(None);
+        }
         let Some(native_out) =
             self.ensure_native_out(backrun.expected_out, backrun.expected_out_token)
         else {
@@ -897,8 +941,14 @@ impl StrategyExecutor {
             return Ok(None);
         }
 
-        let net_profit_wei = gross_profit_wei.saturating_sub(gas_cost_wei);
-        let profit_floor = StrategyExecutor::dynamic_profit_floor(wallet_chain_balance);
+        let net_profit_wei = gross_profit_wei
+            .saturating_sub(gas_cost_wei)
+            .saturating_sub(backrun.flashloan_premium);
+        let profit_floor = StrategyExecutor::dynamic_profit_floor_with_costs(
+            wallet_chain_balance,
+            gas_cost_wei,
+            bribe_wei.saturating_add(backrun.flashloan_premium),
+        );
 
         if net_profit_wei < profit_floor {
             self.log_skip(
@@ -937,6 +987,7 @@ struct BundleParts {
     wallet_balance: U256,
     sim_balance: U256,
     attack_value_eth: U256,
+    bribe_wei: U256,
     front_run: Option<FrontRunTx>,
     approval: Option<ApproveTx>,
     backrun: BackrunTx,

@@ -358,6 +358,7 @@ impl GlobalSettings {
         for p in parts {
             match p {
                 "aave" | "aavev3" | "aave_v3" => out.push(AaveV3),
+                "aavev2" | "aave_v2" => out.push(AaveV2),
                 "balancer" => out.push(Balancer),
                 _ => {}
             }

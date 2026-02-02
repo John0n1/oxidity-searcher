@@ -17,7 +17,7 @@ use oxidity_builder::infrastructure::network::provider::ConnectionFactory;
 use oxidity_builder::services::strategy::engine::Engine;
 use oxidity_builder::services::strategy::portfolio::PortfolioManager;
 use oxidity_builder::services::strategy::safety::SafetyGuard;
-use oxidity_builder::services::strategy::simulation::Simulator;
+use oxidity_builder::services::strategy::simulation::{SimulationBackend, Simulator};
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -146,7 +146,10 @@ async fn main() -> Result<(), AppError> {
             chainlink_feeds,
             settings.price_api_keys(),
         );
-        let simulator = Simulator::new(http_provider.clone());
+        let simulator = Simulator::new(
+            http_provider.clone(),
+            SimulationBackend::new(settings.simulation_backend.clone()),
+        );
 
         let strategy_enabled = strategy_enabled_flag;
         let router_allowlist: HashSet<Address> = settings

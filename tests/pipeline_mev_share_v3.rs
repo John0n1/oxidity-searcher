@@ -8,7 +8,7 @@ use oxidity_builder::common::constants::WETH_MAINNET;
 use oxidity_builder::core::executor::BundleSender;
 use oxidity_builder::core::portfolio::PortfolioManager;
 use oxidity_builder::core::safety::SafetyGuard;
-use oxidity_builder::core::simulation::Simulator;
+use oxidity_builder::core::simulation::{SimulationBackend, Simulator};
 use oxidity_builder::core::strategy::{
     FlashloanProvider, StrategyExecutor, StrategyStats, StrategyWork,
 };
@@ -68,7 +68,7 @@ async fn mev_share_v3_pipeline_manual() {
         std::collections::HashMap::new(),
         PriceApiKeys::default(),
     );
-    let simulator = Simulator::new(http.clone());
+    let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
     let token_manager = Arc::new(TokenManager::default());
     let stats = Arc::new(StrategyStats::default());
     let nonce_manager = NonceManager::new(http.clone(), signer.address());
