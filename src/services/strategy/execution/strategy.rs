@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
 
 use crate::common::error::AppError;
+use crate::domain::constants;
 use crate::core::executor::SharedBundleSender;
 use crate::core::portfolio::PortfolioManager;
 use crate::core::safety::SafetyGuard;
@@ -15,7 +16,8 @@ use crate::network::price_feed::PriceFeed;
 use crate::network::provider::HttpProvider;
 use crate::network::reserves::ReserveCache;
 use crate::services::strategy::bundles::BundleState;
-use crate::services::strategy::routers::UniV3Router;
+use crate::services::strategy::decode::{ObservedSwap, parse_v3_path};
+use crate::services::strategy::routers::{ERC20, UniV3Router};
 use crate::services::strategy::swaps::V3QuoteCacheEntry;
 use alloy::primitives::{Address, B256, Bytes, TxKind, U256, keccak256};
 use alloy::providers::Provider;
@@ -66,11 +68,13 @@ pub struct StrategyStats {
     pub skip_unknown_router: AtomicU64,
     pub skip_decode_failed: AtomicU64,
     pub skip_missing_wrapped: AtomicU64,
+    pub skip_non_wrapped_balance: AtomicU64,
     pub skip_gas_cap: AtomicU64,
     pub skip_sim_failed: AtomicU64,
     pub skip_profit_guard: AtomicU64,
     pub skip_unsupported_router: AtomicU64,
     pub skip_token_call: AtomicU64,
+    pub skip_insufficient_balance: AtomicU64,
     pub skip_toxic_token: AtomicU64,
     pub ingest_queue_depth: AtomicU64,
     pub ingest_queue_dropped: AtomicU64,
@@ -141,6 +145,7 @@ pub struct StrategyExecutor {
     pub(in crate::services::strategy) chain_id: u64,
     pub(in crate::services::strategy) stats: Arc<StrategyStats>,
     pub(in crate::services::strategy) max_gas_price_gwei: u64,
+    pub(in crate::services::strategy) gas_cap_multiplier_bps: u64,
     pub(in crate::services::strategy) simulator: Simulator,
     pub(in crate::services::strategy) token_manager: Arc<TokenManager>,
     pub(in crate::services::strategy) signer: PrivateKeySigner,
@@ -148,8 +153,14 @@ pub struct StrategyExecutor {
     pub(in crate::services::strategy) slippage_bps: u64,
     pub(in crate::services::strategy) http_provider: HttpProvider,
     pub(in crate::services::strategy) dry_run: bool,
-    pub(in crate::services::strategy) router_allowlist: HashSet<Address>,
+    pub(in crate::services::strategy) router_allowlist: Arc<DashSet<Address>>,
+    pub(in crate::services::strategy) router_discovery: Option<Arc<crate::services::strategy::router_discovery::RouterDiscovery>>,
+    pub(in crate::services::strategy) skip_log_every: u64,
     pub(in crate::services::strategy) wrapped_native: Address,
+    pub(in crate::services::strategy) allow_non_wrapped_swaps: bool,
+    pub(in crate::services::strategy) universal_router: Option<Address>,
+    pub(in crate::services::strategy) exec_router_v2: Option<Address>,
+    pub(in crate::services::strategy) exec_router_v3: Option<Address>,
     pub(in crate::services::strategy) inventory_tokens: DashSet<Address>,
     pub(in crate::services::strategy) last_rebalance: Mutex<Instant>,
     pub(in crate::services::strategy) toxic_tokens: DashSet<Address>,
@@ -210,6 +221,27 @@ impl StrategyExecutor {
                 }
             })
             .collect()
+    }
+
+    pub(in crate::services::strategy) fn balance_cap_multiplier_bps(&self, balance: U256) -> u64 {
+        let eth = U256::from(1_000_000_000_000_000_000u128);
+        if balance < eth / U256::from(1_000u64) {
+            6_000
+        } else if balance < eth / U256::from(100u64) {
+            7_000
+        } else if balance < eth / U256::from(5u64) {
+            8_000
+        } else if balance < eth / U256::from(2u64) {
+            9_000
+        } else if balance < eth.saturating_mul(U256::from(2u64)) {
+            10_000
+        } else if balance < eth.saturating_mul(U256::from(5u64)) {
+            11_000
+        } else if balance < eth.saturating_mul(U256::from(10u64)) {
+            12_000
+        } else {
+            13_000
+        }
     }
 
     pub(crate) async fn persist_nonce_state(
@@ -281,49 +313,58 @@ impl StrategyExecutor {
     }
 
     pub(in crate::services::strategy) fn log_skip(&self, reason: &str, detail: &str) {
-        if self.dry_run {
-            tracing::info!(target: "strategy_skip", %reason, %detail, "Dry-run skip");
-        } else {
-            tracing::debug!(target: "strategy_skip", %reason, %detail);
-        }
-
-        match reason {
-            "unknown_router" => {
-                self.stats
-                    .skip_unknown_router
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            "decode_failed" => {
-                self.stats
-                    .skip_decode_failed
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            "zero_amount_or_no_wrapped_native" => {
-                self.stats
-                    .skip_missing_wrapped
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            "gas_price_cap" => {
-                self.stats.skip_gas_cap.fetch_add(1, Ordering::Relaxed);
-            }
+        let count = match reason {
+            "unknown_router" => self
+                .stats
+                .skip_unknown_router
+                .fetch_add(1, Ordering::Relaxed)
+                + 1,
+            "decode_failed" => self
+                .stats
+                .skip_decode_failed
+                .fetch_add(1, Ordering::Relaxed)
+                + 1,
+            "zero_amount_or_no_wrapped_native" => self
+                .stats
+                .skip_missing_wrapped
+                .fetch_add(1, Ordering::Relaxed)
+                + 1,
+            "non_wrapped_balance" => self
+                .stats
+                .skip_non_wrapped_balance
+                .fetch_add(1, Ordering::Relaxed)
+                + 1,
+            "gas_price_cap" => self.stats.skip_gas_cap.fetch_add(1, Ordering::Relaxed) + 1,
             "simulation_failed" => {
-                self.stats.skip_sim_failed.fetch_add(1, Ordering::Relaxed);
+                self.stats.skip_sim_failed.fetch_add(1, Ordering::Relaxed) + 1
             }
             "profit_or_gas_guard" => {
-                self.stats.skip_profit_guard.fetch_add(1, Ordering::Relaxed);
+                self.stats.skip_profit_guard.fetch_add(1, Ordering::Relaxed) + 1
             }
-            "unsupported_router_type" => {
-                self.stats
-                    .skip_unsupported_router
-                    .fetch_add(1, Ordering::Relaxed);
+            "unsupported_router_type" => self
+                .stats
+                .skip_unsupported_router
+                .fetch_add(1, Ordering::Relaxed)
+                + 1,
+            "token_call" => self.stats.skip_token_call.fetch_add(1, Ordering::Relaxed) + 1,
+            "toxic_token" => self.stats.skip_toxic_token.fetch_add(1, Ordering::Relaxed) + 1,
+            "insufficient_balance" => self
+                .stats
+                .skip_insufficient_balance
+                .fetch_add(1, Ordering::Relaxed)
+                + 1,
+            _ => 0,
+        };
+
+        let noisy = matches!(reason, "unknown_router" | "token_call" | "decode_failed");
+        let should_log = self.dry_run || !noisy || count % self.skip_log_every == 0;
+
+        if should_log {
+            if self.dry_run {
+                tracing::info!(target: "strategy_skip", %reason, %detail, count, "Dry-run skip");
+            } else {
+                tracing::debug!(target: "strategy_skip", %reason, %detail, count);
             }
-            "token_call" => {
-                self.stats.skip_token_call.fetch_add(1, Ordering::Relaxed);
-            }
-            "toxic_token" => {
-                self.stats.skip_toxic_token.fetch_add(1, Ordering::Relaxed);
-            }
-            _ => {}
         }
     }
 
@@ -339,6 +380,7 @@ impl StrategyExecutor {
         units_to_float(amount, decimals)
     }
 
+    #[allow(dead_code)]
     pub(in crate::services::strategy) fn ensure_native_out(
         &self,
         amount: U256,
@@ -349,6 +391,58 @@ impl StrategyExecutor {
         } else {
             None
         }
+    }
+
+    pub(in crate::services::strategy) fn execution_router(&self, observed: &ObservedSwap) -> Address {
+        if Some(observed.router) == self.universal_router {
+            match observed.router_kind {
+                crate::services::strategy::decode::RouterKind::V2Like => {
+                    self.exec_router_v2.unwrap_or(observed.router)
+                }
+                crate::services::strategy::decode::RouterKind::V3Like => {
+                    self.exec_router_v3.unwrap_or(observed.router)
+                }
+            }
+        } else {
+            observed.router
+        }
+    }
+
+    pub(in crate::services::strategy) async fn estimate_native_out(
+        &self,
+        amount: U256,
+        token: Address,
+    ) -> Option<U256> {
+        if token == self.wrapped_native {
+            return Some(amount);
+        }
+        if !self.allow_non_wrapped_swaps {
+            return None;
+        }
+        let info = self.token_manager.info(self.chain_id, token)?;
+        let symbol = info.symbol.clone();
+        let token_quote = self
+            .price_feed
+            .get_price(&format!("{symbol}USD"))
+            .await
+            .ok()?;
+        let native_symbol = crate::common::constants::native_symbol_for_chain(self.chain_id);
+        let native_quote = self
+            .price_feed
+            .get_price(&format!("{native_symbol}USD"))
+            .await
+            .ok()?;
+        if token_quote.price <= 0.0 || native_quote.price <= 0.0 {
+            return None;
+        }
+        let amount_float = self.amount_to_display(amount, token);
+        let usd_value = amount_float * token_quote.price;
+        let native_value = usd_value / native_quote.price;
+        if !native_value.is_finite() || native_value <= 0.0 {
+            return None;
+        }
+        let wei_estimate = native_value * 1_000_000_000_000_000_000.0;
+        Some(U256::from(wei_estimate as u128))
     }
 
     /// Deterministic pseudo-identifier for a V3 pool based on token path and fee tiers.
@@ -378,6 +472,7 @@ impl StrategyExecutor {
         price_feed: PriceFeed,
         chain_id: u64,
         max_gas_price_gwei: u64,
+        gas_cap_multiplier_bps: u64,
         simulator: Simulator,
         token_manager: Arc<TokenManager>,
         stats: Arc<StrategyStats>,
@@ -386,8 +481,11 @@ impl StrategyExecutor {
         slippage_bps: u64,
         http_provider: HttpProvider,
         dry_run: bool,
-        router_allowlist: HashSet<Address>,
+        router_allowlist: Arc<DashSet<Address>>,
+        router_discovery: Option<Arc<crate::services::strategy::router_discovery::RouterDiscovery>>,
+        skip_log_every: u64,
         wrapped_native: Address,
+        allow_non_wrapped_swaps: bool,
         executor: Option<Address>,
         executor_bribe_bps: u64,
         executor_bribe_recipient: Option<Address>,
@@ -400,6 +498,9 @@ impl StrategyExecutor {
         worker_limit: usize,
     ) -> Self {
         let semaphore_size = worker_limit.max(1);
+        let universal_router = constants::default_uniswap_universal_router(chain_id);
+        let exec_router_v2 = constants::default_uniswap_v2_router(chain_id);
+        let exec_router_v3 = constants::default_uniswap_v3_router(chain_id);
         Self {
             tx_rx: Mutex::new(tx_rx),
             mut_block_rx: Mutex::new(block_rx),
@@ -412,6 +513,7 @@ impl StrategyExecutor {
             chain_id,
             stats,
             max_gas_price_gwei,
+            gas_cap_multiplier_bps: gas_cap_multiplier_bps.max(10_000),
             simulator,
             token_manager,
             signer,
@@ -420,7 +522,13 @@ impl StrategyExecutor {
             http_provider,
             dry_run,
             router_allowlist,
+            router_discovery,
+            skip_log_every: skip_log_every.max(1),
             wrapped_native,
+            allow_non_wrapped_swaps,
+            universal_router,
+            exec_router_v2,
+            exec_router_v3,
             inventory_tokens: DashSet::new(),
             last_rebalance: Mutex::new(Instant::now()),
             toxic_tokens: DashSet::new(),
@@ -566,6 +674,14 @@ impl StrategyExecutor {
             return Ok(false);
         }
         let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 60);
+        let token_in = match parse_v3_path(&path).and_then(|p| p.tokens.first().copied()) {
+            Some(t) => t,
+            None => return Ok(true),
+        };
+        let approve_calldata = ERC20::new(token_in, self.http_provider.clone())
+            .approve(router, amount_in)
+            .calldata()
+            .to_vec();
         let calldata = UniV3Router::new(router, self.http_provider.clone())
             .exactInput(UniV3Router::ExactInputParams {
                 path: path.clone().into(),
@@ -577,6 +693,15 @@ impl StrategyExecutor {
             .calldata()
             .to_vec();
         let probe_gas = self.probe_gas_limit(router);
+        let approve_req = TransactionRequest {
+            from: Some(self.signer.address()),
+            to: Some(TxKind::Call(token_in)),
+            gas: Some(70_000),
+            value: Some(U256::ZERO),
+            input: TransactionInput::new(Bytes::from(approve_calldata)),
+            chain_id: Some(self.chain_id),
+            ..Default::default()
+        };
         let req = TransactionRequest {
             from: Some(self.signer.address()),
             to: Some(TxKind::Call(router)),
@@ -586,7 +711,17 @@ impl StrategyExecutor {
             chain_id: Some(self.chain_id),
             ..Default::default()
         };
-        let outcome = self.simulator.simulate_request(req, None).await?;
+        let sims = self
+            .simulator
+            .simulate_bundle_requests(&[approve_req, req], None)
+            .await?;
+        if sims.len() < 2 {
+            return Ok(true);
+        }
+        if !sims[0].success {
+            return Ok(true);
+        }
+        let outcome = &sims[1];
         if !outcome.success {
             tracing::debug!(target: "strategy", "V3 probe revert; marking toxic");
             return Ok(false);
@@ -1003,17 +1138,19 @@ mod tests {
             http.clone(),
             true,
             "http://localhost:8545".to_string(),
+            "http://localhost:8545".to_string(),
             PrivateKeySigner::random(),
         ));
         let db = Database::new("sqlite::memory:").await.expect("db");
         let portfolio = Arc::new(PortfolioManager::new(http.clone(), Address::ZERO));
-        let gas_oracle = GasOracle::new(http.clone());
+        let gas_oracle = GasOracle::new(http.clone(), 1);
         let price_feed = PriceFeed::new(http.clone(), HashMap::new(), PriceApiKeys::default());
         let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
         let token_manager = Arc::new(TokenManager::default());
         let stats = Arc::new(StrategyStats::default());
         let nonce_manager = NonceManager::new(http.clone(), Address::ZERO);
         let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
+        let router_allowlist = Arc::new(DashSet::new());
 
         StrategyExecutor::new(
             rx,
@@ -1026,6 +1163,7 @@ mod tests {
             price_feed,
             1,
             100,
+            12_000,
             simulator,
             token_manager,
             stats,
@@ -1034,8 +1172,11 @@ mod tests {
             50,
             http.clone(),
             true,
-            HashSet::new(),
+            router_allowlist,
+            None,
+            500,
             WETH_MAINNET,
+            false,
             None,
             0,
             None,

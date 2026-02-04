@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
 
-use alloy::primitives::Address;
 use alloy::signers::local::PrivateKeySigner;
+use dashmap::DashSet;
 use clap::Parser;
 use futures::future::try_join_all;
 use oxidity_builder::app::config::GlobalSettings;
@@ -18,7 +18,6 @@ use oxidity_builder::services::strategy::engine::Engine;
 use oxidity_builder::services::strategy::portfolio::PortfolioManager;
 use oxidity_builder::services::strategy::safety::SafetyGuard;
 use oxidity_builder::services::strategy::simulation::{SimulationBackend, Simulator};
-use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -37,9 +36,13 @@ struct Cli {
     #[arg(long)]
     metrics_port: Option<u16>,
 
-    /// Disable strategies (ingest only)
+    /// Enable strategies (ingest + execute)
     #[arg(long, default_value_t = true)]
     strategy_enabled: bool,
+
+    /// Disable strategies (ingest only)
+    #[arg(long, default_value_t = false)]
+    no_strategy: bool,
 
     /// Slippage basis points for crafted bundles
     #[arg(long)]
@@ -59,16 +62,29 @@ async fn main() -> Result<(), AppError> {
     if let Some(token) = settings.metrics_token_value() {
         unsafe { std::env::set_var("METRICS_TOKEN", token) };
     }
+    if let Some(key) = settings.etherscan_api_key_value() {
+        if std::env::var("ETHERSCAN_API_KEY").is_err() {
+            unsafe { std::env::set_var("ETHERSCAN_API_KEY", key) };
+        }
+    }
 
-    let database_url =
-        std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://oxidity_builder.db".to_string());
+    let database_url = settings.database_url();
     let db = Database::new(&database_url).await?;
 
     if settings.chains.is_empty() {
         return Err(AppError::Config("No chains configured".into()));
     }
 
-    let wallet_address = settings.wallet_address;
+    let wallet_signer = PrivateKeySigner::from_str(&settings.wallet_key)
+        .map_err(|e| AppError::Config(format!("Invalid wallet key: {}", e)))?;
+    let wallet_address = wallet_signer.address();
+    if wallet_address != settings.wallet_address {
+        return Err(AppError::Config(format!(
+            "wallet_address {} does not match wallet_key address {}",
+            settings.wallet_address, wallet_address
+        )));
+    }
+
     let relay_url = settings.flashbots_relay_url();
     let bundle_signer = PrivateKeySigner::from_str(&settings.bundle_signer_key())
         .map_err(|e| AppError::Config(format!("Invalid bundle signer key: {}", e)))?;
@@ -81,7 +97,8 @@ async fn main() -> Result<(), AppError> {
         })
         .unwrap_or(settings.metrics_port);
     let slippage_bps = cli.slippage_bps.unwrap_or(settings.slippage_bps);
-    let strategy_enabled_flag = cli.strategy_enabled && settings.strategy_enabled;
+    let strategy_enabled_flag =
+        !cli.no_strategy && cli.strategy_enabled && settings.strategy_enabled;
     let worker_limit = settings.strategy_worker_limit();
     let tokenlist_path = settings.tokenlist_path();
     let token_manager = Arc::new(
@@ -134,7 +151,7 @@ async fn main() -> Result<(), AppError> {
         let portfolio = Arc::new(PortfolioManager::new(http_provider.clone(), wallet_address));
         let nonce_manager = NonceManager::new(http_provider.clone(), wallet_address);
         let safety_guard = Arc::new(SafetyGuard::new());
-        let gas_oracle = GasOracle::new(http_provider.clone());
+        let gas_oracle = GasOracle::new(http_provider.clone(), chain_id);
 
         let chainlink_feeds = settings.chainlink_feeds_for_chain(chain_id)?;
         if chainlink_feeds.is_empty() {
@@ -152,14 +169,36 @@ async fn main() -> Result<(), AppError> {
         );
 
         let strategy_enabled = strategy_enabled_flag;
-        let router_allowlist: HashSet<Address> = settings
-            .routers_for_chain(chain_id)?
-            .values()
-            .copied()
-            .collect();
+        let router_allowlist = Arc::new(DashSet::new());
+        for addr in settings.routers_for_chain(chain_id)?.values().copied() {
+            router_allowlist.insert(addr);
+        }
+        if let Ok(approved) = db.approved_routers(chain_id).await {
+            for addr in approved {
+                router_allowlist.insert(addr);
+            }
+        }
         if router_allowlist.is_empty() {
             tracing::warn!(target: "router", chain_id, "Router allowlist is empty");
         }
+
+        let router_discovery = if settings.router_discovery_enabled {
+            Some(Arc::new(
+                oxidity_builder::services::strategy::router_discovery::RouterDiscovery::new(
+                    chain_id,
+                    router_allowlist.clone(),
+                    db.clone(),
+                    settings.etherscan_api_key_value(),
+                    settings.router_discovery_enabled,
+                    settings.router_discovery_auto_allow,
+                    settings.router_discovery_min_hits,
+                    settings.router_discovery_flush_every,
+                    settings.router_discovery_check_interval(),
+                ),
+            ))
+        } else {
+            None
+        };
 
         let metrics_port = if settings.chains.len() > 1 {
             metrics_base.saturating_add(idx as u16)
@@ -179,6 +218,8 @@ async fn main() -> Result<(), AppError> {
             price_feed,
             chain_id,
             relay_url.clone(),
+            settings.mev_share_relay_url(),
+            wallet_signer.clone(),
             bundle_signer.clone(),
             settings.executor_address,
             settings.executor_bribe_bps,
@@ -189,13 +230,17 @@ async fn main() -> Result<(), AppError> {
             settings
                 .gas_cap_for_chain(chain_id)
                 .unwrap_or(settings.max_gas_price_gwei),
+            settings.gas_cap_multiplier_bps_value(),
             simulator,
             token_manager.clone(),
             metrics_port,
             strategy_enabled,
             slippage_bps,
             router_allowlist,
+            router_discovery,
+            settings.skip_log_every_value(),
             wrapped_native,
+            settings.allow_non_wrapped_swaps,
             settings.mev_share_stream_url.clone(),
             settings.mev_share_history_limit,
             settings.mev_share_enabled,

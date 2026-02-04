@@ -20,7 +20,7 @@ impl StrategyExecutor {
         *guard = std::time::Instant::now();
         drop(guard);
 
-        let routers: Vec<Address> = self.router_allowlist.iter().copied().collect();
+        let routers: Vec<Address> = self.router_allowlist.iter().map(|r| *r).collect();
         if routers.is_empty() {
             return Ok(());
         }
@@ -180,7 +180,7 @@ impl StrategyExecutor {
     }
 
     pub async fn emergency_exit_inventory(&self, reason: &str) {
-        let routers: Vec<Address> = self.router_allowlist.iter().copied().collect();
+        let routers: Vec<Address> = self.router_allowlist.iter().map(|r| *r).collect();
         if routers.is_empty() {
             tracing::warn!(target: "inventory", reason=%reason, "No routers available for emergency exit");
             return;

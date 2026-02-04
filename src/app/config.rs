@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::str::FromStr;
+use url::Url;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct GlobalSettings {
@@ -19,6 +20,7 @@ pub struct GlobalSettings {
     pub debug: bool,
     #[serde(default = "default_chain", deserialize_with = "deserialize_chain_list")]
     pub chains: Vec<u64>,
+    pub database_url: Option<String>,
 
     // Identity
     pub wallet_key: String,
@@ -61,13 +63,32 @@ pub struct GlobalSettings {
     pub metrics_token: Option<String>,
     #[serde(default = "default_slippage_bps")]
     pub slippage_bps: u64,
+    #[serde(default = "default_gas_cap_multiplier_bps")]
+    pub gas_cap_multiplier_bps: u64,
+    #[serde(default = "default_skip_log_every")]
+    pub skip_log_every: u64,
+    #[serde(default = "default_allow_non_wrapped_swaps")]
+    pub allow_non_wrapped_swaps: bool,
     pub gas_caps_gwei: Option<HashMap<String, u64>>,
     #[serde(default = "default_mev_share_url")]
     pub mev_share_stream_url: String,
+    pub mev_share_relay_url: Option<String>,
     #[serde(default = "default_mev_share_history_limit")]
     pub mev_share_history_limit: u32,
     #[serde(default = "default_true")]
     pub mev_share_enabled: bool,
+
+    // Router discovery
+    #[serde(default = "default_router_discovery_enabled")]
+    pub router_discovery_enabled: bool,
+    #[serde(default = "default_router_discovery_min_hits")]
+    pub router_discovery_min_hits: u64,
+    #[serde(default = "default_router_discovery_flush_every")]
+    pub router_discovery_flush_every: u64,
+    #[serde(default = "default_router_discovery_check_interval_secs")]
+    pub router_discovery_check_interval_secs: u64,
+    #[serde(default = "default_router_discovery_auto_allow")]
+    pub router_discovery_auto_allow: bool,
 
     // Per-chain maps
     pub router_allowlist_by_chain: Option<HashMap<String, HashMap<String, String>>>,
@@ -78,6 +99,7 @@ pub struct GlobalSettings {
     pub coingecko_api_key: Option<String>,
     pub cryptocompare_api_key: Option<String>,
     pub coindesk_api_key: Option<String>,
+    pub etherscan_api_key: Option<String>,
 }
 
 // Defaults
@@ -99,6 +121,15 @@ fn default_metrics_port() -> u16 {
 fn default_slippage_bps() -> u64 {
     50
 }
+fn default_gas_cap_multiplier_bps() -> u64 {
+    12_000
+}
+fn default_skip_log_every() -> u64 {
+    500
+}
+fn default_allow_non_wrapped_swaps() -> bool {
+    false
+}
 fn default_sim_backend() -> String {
     "revm".to_string()
 }
@@ -113,6 +144,21 @@ fn default_mev_share_history_limit() -> u32 {
 }
 fn default_bribe_bps() -> u64 {
     0
+}
+fn default_router_discovery_enabled() -> bool {
+    true
+}
+fn default_router_discovery_min_hits() -> u64 {
+    25
+}
+fn default_router_discovery_flush_every() -> u64 {
+    50
+}
+fn default_router_discovery_check_interval_secs() -> u64 {
+    300
+}
+fn default_router_discovery_auto_allow() -> bool {
+    true
 }
 
 fn deserialize_chain_list<'de, D>(deserializer: D) -> Result<Vec<u64>, D::Error>
@@ -292,11 +338,22 @@ impl GlobalSettings {
             .unwrap_or_else(|| "data/tokenlist.json".to_string())
     }
 
+    pub fn database_url(&self) -> String {
+        std::env::var("DATABASE_URL")
+            .ok()
+            .or_else(|| self.database_url.clone())
+            .unwrap_or_else(|| "sqlite://oxidity_builder.db".to_string())
+    }
+
     pub fn flashbots_relay_url(&self) -> String {
         self.flashbots_relay_url
             .clone()
             .or_else(|| std::env::var("FLASHBOTS_RELAY_URL").ok())
             .unwrap_or_else(|| "https://relay.flashbots.net".to_string())
+    }
+
+    pub fn router_discovery_check_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.router_discovery_check_interval_secs.max(30))
     }
 
     pub fn bundle_signer_key(&self) -> String {
@@ -331,6 +388,15 @@ impl GlobalSettings {
             }
         }
         self.metrics_token.clone()
+    }
+
+    pub fn etherscan_api_key_value(&self) -> Option<String> {
+        if let Ok(v) = std::env::var("ETHERSCAN_API_KEY") {
+            if !v.trim().is_empty() {
+                return Some(v);
+            }
+        }
+        self.etherscan_api_key.clone()
     }
 
     pub fn gas_cap_for_chain(&self, chain_id: u64) -> Option<u64> {
@@ -373,15 +439,26 @@ impl GlobalSettings {
     }
 
     pub fn routers_for_chain(&self, chain_id: u64) -> Result<HashMap<String, Address>, AppError> {
+        let mut out = constants::default_routers_for_chain(chain_id);
+
         if let Some(map) = self
             .router_allowlist_by_chain
             .as_ref()
             .and_then(|m| m.get(&chain_id.to_string()))
         {
-            return parse_address_map(map, "router_allowlist_by_chain");
+            let parsed = parse_address_map(map, "router_allowlist_by_chain")?;
+            out.extend(parsed);
         }
 
-        Ok(constants::default_routers_for_chain(chain_id))
+        Ok(out)
+    }
+
+    pub fn gas_cap_multiplier_bps_value(&self) -> u64 {
+        self.gas_cap_multiplier_bps.max(10_000)
+    }
+
+    pub fn skip_log_every_value(&self) -> u64 {
+        self.skip_log_every.max(1)
     }
 
     pub fn aave_pool_for_chain(&self, chain_id: u64) -> Option<Address> {
@@ -448,6 +525,29 @@ impl GlobalSettings {
             .ok()
             .or_else(|| self.chainlink_feeds_path.clone())
             .unwrap_or_else(|| "data/chainlink_feeds.json".to_string())
+    }
+
+    pub fn mev_share_relay_url(&self) -> String {
+        if let Ok(v) = std::env::var("MEV_SHARE_RELAY_URL") {
+            if !v.trim().is_empty() {
+                return v;
+            }
+        }
+        if let Some(v) = &self.mev_share_relay_url {
+            if !v.trim().is_empty() {
+                return v.clone();
+            }
+        }
+        if let Ok(mut parsed) = Url::parse(&self.mev_share_stream_url) {
+            parsed.set_path("");
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            return parsed
+                .to_string()
+                .trim_end_matches('/')
+                .to_string();
+        }
+        self.mev_share_stream_url.clone()
     }
 
     pub fn price_api_keys(&self) -> crate::network::price_feed::PriceApiKeys {
@@ -636,6 +736,7 @@ mod tests {
         GlobalSettings {
             debug: default_debug(),
             chains: vec![1],
+            database_url: None,
             wallet_key: "0x0".to_string(),
             wallet_address: Address::ZERO,
             profit_receiver_address: None,
@@ -661,10 +762,19 @@ mod tests {
             metrics_bind: None,
             metrics_token: None,
             slippage_bps: default_slippage_bps(),
+            gas_cap_multiplier_bps: default_gas_cap_multiplier_bps(),
+            skip_log_every: default_skip_log_every(),
+            allow_non_wrapped_swaps: default_allow_non_wrapped_swaps(),
             gas_caps_gwei: None,
             mev_share_stream_url: default_mev_share_url(),
+            mev_share_relay_url: None,
             mev_share_history_limit: default_mev_share_history_limit(),
             mev_share_enabled: default_true(),
+            router_discovery_enabled: default_router_discovery_enabled(),
+            router_discovery_min_hits: default_router_discovery_min_hits(),
+            router_discovery_flush_every: default_router_discovery_flush_every(),
+            router_discovery_check_interval_secs: default_router_discovery_check_interval_secs(),
+            router_discovery_auto_allow: default_router_discovery_auto_allow(),
             router_allowlist_by_chain: None,
             chainlink_feeds_by_chain: None,
             chainlink_feeds_by_chain_eth: None,
@@ -674,6 +784,7 @@ mod tests {
             coingecko_api_key: None,
             cryptocompare_api_key: None,
             coindesk_api_key: None,
+            etherscan_api_key: None,
         }
     }
 
@@ -701,5 +812,16 @@ mod tests {
             AppError::Config(msg) => assert!(msg.contains("No WS URL")),
             other => panic!("Unexpected error variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn mev_share_relay_url_prefers_config_value() {
+        unsafe { std::env::remove_var("MEV_SHARE_RELAY_URL") };
+        let mut settings = base_settings();
+        settings.mev_share_relay_url = Some("https://relay.example".to_string());
+        assert_eq!(
+            settings.mev_share_relay_url(),
+            "https://relay.example".to_string()
+        );
     }
 }

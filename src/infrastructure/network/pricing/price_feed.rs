@@ -9,7 +9,7 @@ use alloy::sol;
 use reqwest::Client;
 use reqwest::header;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -633,8 +633,8 @@ fn normalize_symbol(symbol: &str) -> NormalizedSymbols {
         binance_symbols.push(format!("{}{}", chainlink_symbol, quote));
     }
 
-    binance_symbols.sort();
-    binance_symbols.dedup();
+    let mut seen = HashSet::new();
+    binance_symbols.retain(|s| seen.insert(s.clone()));
 
     NormalizedSymbols {
         cache_key: chainlink_symbol.clone(),

@@ -60,6 +60,7 @@ lazy_static! {
         let mut m = HashMap::new();
 
         // Uniswap
+        m.insert("uniswap_v2_router01", address!("f164fC0Ec4E93095b804a4795bBe1e041497b92a"));
         m.insert("uniswap_v2_router02", address!("7a250d5630B4cF539739dF2C5dAcb4c659F2488D"));
         m.insert("uniswap_v3_swaprouter", address!("E592427A0AEce92De3Edee1F18E0157C05861564"));
         m.insert("uniswap_v3_swaprouter02", address!("68b3465833fb72A70ecDF485E0e4C7bD8665Fc45"));
@@ -349,6 +350,27 @@ pub fn default_routers_for_chain(chain_id: u64) -> HashMap<String, Address> {
         .unwrap_or_default()
 }
 
+pub fn default_uniswap_v2_router(chain_id: u64) -> Option<Address> {
+    DEX_ROUTERS_BY_CHAIN
+        .get(&chain_id)
+        .and_then(|m| m.get("uniswap_v2_router02"))
+        .copied()
+}
+
+pub fn default_uniswap_v3_router(chain_id: u64) -> Option<Address> {
+    DEX_ROUTERS_BY_CHAIN
+        .get(&chain_id)
+        .and_then(|m| m.get("uniswap_v3_swaprouter02"))
+        .copied()
+}
+
+pub fn default_uniswap_universal_router(chain_id: u64) -> Option<Address> {
+    DEX_ROUTERS_BY_CHAIN
+        .get(&chain_id)
+        .and_then(|m| m.get("uniswap_universal_router"))
+        .copied()
+}
+
 pub fn default_chainlink_feeds(chain_id: u64) -> HashMap<String, Address> {
     CHAINLINK_FEEDS_BY_CHAIN
         .get(&chain_id)
@@ -365,6 +387,14 @@ pub fn wrapped_native_for_chain(chain_id: u64) -> Address {
         .get(&chain_id)
         .copied()
         .unwrap_or(WETH_MAINNET)
+}
+
+pub fn native_symbol_for_chain(chain_id: u64) -> &'static str {
+    match chain_id {
+        CHAIN_BSC => "BNB",
+        CHAIN_POLYGON => "MATIC",
+        _ => "ETH",
+    }
 }
 
 pub fn default_balancer_vault_for_chain(chain_id: u64) -> Option<Address> {
@@ -393,4 +423,16 @@ pub fn default_aave_oracle(chain_id: u64) -> Option<Address> {
 
 pub fn default_aave_data_provider(chain_id: u64) -> Option<Address> {
     AAVE_DATA_PROVIDER_BY_CHAIN.get(&chain_id).copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_symbol_map() {
+        assert_eq!(native_symbol_for_chain(CHAIN_ETHEREUM), "ETH");
+        assert_eq!(native_symbol_for_chain(CHAIN_BSC), "BNB");
+        assert_eq!(native_symbol_for_chain(CHAIN_POLYGON), "MATIC");
+    }
 }

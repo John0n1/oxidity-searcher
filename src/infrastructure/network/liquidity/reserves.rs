@@ -550,7 +550,10 @@ impl ReserveCache {
     ) -> Vec<u8> {
         let deadline = U256::from(current_unix().saturating_add(60));
 
-        if path.first().copied() == Some(wrapped_native) {
+        let starts_with_wrapped = path.first().copied() == Some(wrapped_native);
+        let ends_with_wrapped = path.last().copied() == Some(wrapped_native);
+
+        if starts_with_wrapped && !ends_with_wrapped {
             if use_flashloan {
                 UniV2Router::swapExactTokensForTokensCall {
                     amountIn: amount_in,
@@ -569,7 +572,7 @@ impl ReserveCache {
                 }
                 .abi_encode()
             }
-        } else {
+        } else if ends_with_wrapped && !starts_with_wrapped {
             if use_flashloan {
                 UniV2Router::swapExactTokensForTokensCall {
                     amountIn: amount_in,
@@ -589,6 +592,15 @@ impl ReserveCache {
                 }
                 .abi_encode()
             }
+        } else {
+            UniV2Router::swapExactTokensForTokensCall {
+                amountIn: amount_in,
+                amountOutMin: amount_out_min,
+                path,
+                to: recipient,
+                deadline,
+            }
+            .abi_encode()
         }
     }
 }

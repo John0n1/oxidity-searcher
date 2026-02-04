@@ -53,6 +53,8 @@ pub struct FrontRunTx {
     pub value: U256,
     pub request: TransactionRequest,
     pub expected_tokens: U256,
+    pub input_token: Address,
+    pub input_amount: U256,
 }
 
 pub struct ApproveTx {
@@ -143,6 +145,8 @@ impl StrategyExecutor {
         Ok(ApproveTx { raw, request })
     }
 
+    // Reserved for future Curve integrations.
+    #[allow(dead_code)]
     pub(crate) fn build_curve_swap_payload(
         &self,
         pool: Address,
@@ -166,6 +170,8 @@ impl StrategyExecutor {
         }
     }
 
+    // Reserved for future Balancer integrations.
+    #[allow(dead_code)]
     pub(crate) fn build_balancer_single_swap_payload(
         &self,
         vault: Address,
@@ -212,7 +218,7 @@ impl StrategyExecutor {
 
     pub(crate) async fn build_executor_wrapper(
         &self,
-        approval: Option<&ApproveTx>,
+        approvals: &[ApproveTx],
         backrun: &BackrunTx,
         gas_fees: &crate::network::gas::GasFees,
         gas_limit_hint: u64,
@@ -230,7 +236,7 @@ impl StrategyExecutor {
         let mut targets = Vec::new();
         let mut payloads = Vec::new();
         let mut values = Vec::new();
-        if let Some(app) = approval {
+        for app in approvals {
             if let Some(TxKind::Call(addr)) = app.request.to {
                 targets.push(addr);
                 let bytes = app.request.input.clone().into_input().unwrap_or_default();
@@ -267,11 +273,15 @@ impl StrategyExecutor {
             return Ok(None);
         }
 
+        let approval_gas: u64 = approvals
+            .iter()
+            .map(|a| a.request.gas.unwrap_or(0))
+            .sum();
         let mut gas_limit = backrun
             .request
             .gas
             .unwrap_or(gas_limit_hint)
-            .saturating_add(approval.and_then(|a| a.request.gas).unwrap_or(0))
+            .saturating_add(approval_gas)
             .saturating_add(80_000);
 
         if unwrap_weth {
@@ -609,18 +619,15 @@ impl StrategyExecutor {
             self.chain_id,
         );
 
-        let premium = match self
-            .select_flashloan_provider(asset, amount, gas_fees)
-            .await?
-        {
-            Some(FlashloanProvider::Balancer) => {
+        let premium = match provider {
+            FlashloanProvider::Balancer => {
                 let fee = self
                     .get_balancer_flashloan_fee()
                     .await
                     .unwrap_or(U256::ZERO);
                 amount.saturating_mul(fee) / U256::from(1_000_000_000_000_000_000u128)
             }
-            Some(FlashloanProvider::AaveV3) => {
+            FlashloanProvider::AaveV3 => {
                 let premium_bps = if let Some(pool_addr) = self.aave_pool {
                     match AavePool::new(pool_addr, self.http_provider.clone())
                         .FLASHLOAN_PREMIUM_TOTAL()
@@ -702,8 +709,9 @@ impl StrategyExecutor {
         }
         let target_token = target_token(&observed.path, self.wrapped_native)
             .ok_or_else(|| AppError::Strategy("Unable to derive target token".into()))?;
+        let exec_router = self.execution_router(observed);
 
-        let value = match self
+        let amount_in = match self
             .pool_backrun_value(
                 observed,
                 wallet_balance,
@@ -723,15 +731,19 @@ impl StrategyExecutor {
             )?,
         };
 
-        let (expected_tokens, calldata, value, gas_limit, access_list) = match observed.router_kind
-        {
+        let (expected_tokens, calldata, tx_value, gas_limit, access_list, input_token) =
+            match observed.router_kind {
             RouterKind::V2Like => {
-                let path = vec![self.wrapped_native, target_token];
+                let path = if observed.path.first().copied() == Some(self.wrapped_native) {
+                    vec![self.wrapped_native, target_token]
+                } else {
+                    observed.path.clone()
+                };
                 let swap = self
                     .build_v2_swap(
-                        observed.router,
-                        path,
-                        value,
+                        exec_router,
+                        path.clone(),
+                        amount_in,
                         self.slippage_bps,
                         gas_limit_hint,
                         11,
@@ -751,6 +763,7 @@ impl StrategyExecutor {
                     swap.tx_value,
                     swap.gas_limit,
                     swap.access_list,
+                    *path.first().unwrap_or(&self.wrapped_native),
                 )
             }
             RouterKind::V3Like => {
@@ -764,11 +777,8 @@ impl StrategyExecutor {
                     encode_v3_path(&observed.path, &observed.v3_fees)
                         .ok_or_else(|| AppError::Strategy("Encode V3 path failed".into()))?
                 };
-                if observed.path.first().copied() != Some(self.wrapped_native) {
-                    return Ok(None);
-                }
-                let expected_tokens = self.quote_v3_path(&path_bytes, value).await?;
-                let ratio_ppm = StrategyExecutor::price_ratio_ppm(expected_tokens, value);
+                let expected_tokens = self.quote_v3_path(&path_bytes, amount_in).await?;
+                let ratio_ppm = StrategyExecutor::price_ratio_ppm(expected_tokens, amount_in);
                 if ratio_ppm < U256::from(1_000u64) {
                     return Ok(None);
                 }
@@ -776,11 +786,11 @@ impl StrategyExecutor {
                     .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
                     / U256::from(10_000u64);
                 let access_list =
-                    StrategyExecutor::build_access_list(observed.router, &observed.path);
+                    StrategyExecutor::build_access_list(exec_router, &observed.path);
                 let calldata = self.build_v3_swap_payload(
-                    observed.router,
+                    exec_router,
                     path_bytes.clone(),
-                    value,
+                    amount_in,
                     min_out,
                     recipient,
                 );
@@ -791,15 +801,25 @@ impl StrategyExecutor {
                 if gas_limit < 200_000 {
                     gas_limit = 200_000;
                 }
-                (expected_tokens, calldata, value, gas_limit, access_list)
+                let tx_value = if observed.path.first().copied() == Some(self.wrapped_native) {
+                    amount_in
+                } else {
+                    U256::ZERO
+                };
+                let input_token = observed
+                    .path
+                    .first()
+                    .copied()
+                    .unwrap_or(self.wrapped_native);
+                (expected_tokens, calldata, tx_value, gas_limit, access_list, input_token)
             }
         };
 
         let (raw, request, hash) = self
             .sign_swap_request(
-                observed.router,
+                exec_router,
                 gas_limit,
-                value,
+                tx_value,
                 gas_fees.max_fee_per_gas,
                 gas_fees.max_priority_fee_per_gas,
                 nonce,
@@ -811,10 +831,12 @@ impl StrategyExecutor {
         Ok(Some(FrontRunTx {
             raw,
             hash,
-            to: observed.router,
-            value,
+            to: exec_router,
+            value: tx_value,
             request,
             expected_tokens,
+            input_token,
+            input_amount: amount_in,
         }))
     }
 
@@ -830,6 +852,8 @@ impl StrategyExecutor {
     ) -> Result<BackrunTx, AppError> {
         let target_token = target_token(&observed.path, self.wrapped_native)
             .ok_or_else(|| AppError::Strategy("Unable to derive target token".into()))?;
+        let exec_router = self.execution_router(observed);
+        let has_wrapped = observed.path.contains(&self.wrapped_native);
 
         if wallet_balance.is_zero() {
             return Err(AppError::Strategy(
@@ -862,8 +886,20 @@ impl StrategyExecutor {
                             gas_fees.max_fee_per_gas,
                         )?,
                     };
-                    expected_out_token = target_token;
-                    let path = vec![self.wrapped_native, target_token];
+                    expected_out_token = if has_wrapped {
+                        target_token
+                    } else {
+                        observed
+                            .path
+                            .last()
+                            .copied()
+                            .unwrap_or(target_token)
+                    };
+                    let path = if has_wrapped {
+                        vec![self.wrapped_native, target_token]
+                    } else {
+                        observed.path.clone()
+                    };
                     let recipient = if use_flashloan {
                         self.executor.unwrap_or(self.signer.address())
                     } else {
@@ -871,7 +907,7 @@ impl StrategyExecutor {
                     };
                     let swap = self
                         .build_v2_swap(
-                            observed.router,
+                            exec_router,
                             path.clone(),
                             value,
                             self.slippage_bps,
@@ -889,7 +925,7 @@ impl StrategyExecutor {
                     let access_list = swap.access_list.clone();
                     let mut calldata = swap.calldata.clone();
                     let mut gas_limit = swap.gas_limit;
-                    if use_flashloan {
+                    if use_flashloan && has_wrapped {
                         let executor = self.executor.ok_or_else(|| {
                             AppError::Strategy("Missing flashloan executor".into())
                         })?;
@@ -909,41 +945,44 @@ impl StrategyExecutor {
                         );
                         let rev_payload = Bytes::from(rev_calldata);
                         // Keep allowances tight to reduce long-lived exposure.
-                        let approve_weth = ERC20::approveCall {
-                            spender: observed.router,
+                        let approve_weth = UnifiedHardenedExecutor::safeApproveCall {
+                            token: self.wrapped_native,
+                            spender: exec_router,
                             amount: value,
                         }
                         .abi_encode();
-                        let approve_target = ERC20::approveCall {
-                            spender: observed.router,
+                        let approve_target = UnifiedHardenedExecutor::safeApproveCall {
+                            token: target_token,
+                            spender: exec_router,
                             amount: tokens_out,
                         }
                         .abi_encode();
                         // Zero approvals after the round-trip completes.
                         let reset_weth = UnifiedHardenedExecutor::safeApproveCall {
                             token: self.wrapped_native,
-                            spender: observed.router,
+                            spender: exec_router,
                             amount: U256::ZERO,
                         }
                         .abi_encode();
                         let reset_target = UnifiedHardenedExecutor::safeApproveCall {
                             token: target_token,
-                            spender: observed.router,
+                            spender: exec_router,
                             amount: U256::ZERO,
                         }
                         .abi_encode();
+                        let exec_target = self.executor.unwrap_or(executor);
                         let callbacks = vec![
-                            (self.wrapped_native, Bytes::from(approve_weth), U256::ZERO),
-                            (target_token, Bytes::from(approve_target), U256::ZERO),
-                            (observed.router, forward_payload, U256::ZERO),
-                            (observed.router, rev_payload, U256::ZERO),
+                            (exec_target, Bytes::from(approve_weth), U256::ZERO),
+                            (exec_target, Bytes::from(approve_target), U256::ZERO),
+                            (exec_router, forward_payload, U256::ZERO),
+                            (exec_router, rev_payload, U256::ZERO),
                             (
-                                self.executor.unwrap_or(executor),
+                                exec_target,
                                 Bytes::from(reset_weth),
                                 U256::ZERO,
                             ),
                             (
-                                self.executor.unwrap_or(executor),
+                                exec_target,
                                 Bytes::from(reset_target),
                                 U256::ZERO,
                             ),
@@ -989,7 +1028,7 @@ impl StrategyExecutor {
                         });
                     }
                     if let Some(addr) = swap.access_list.0.first().map(|a| a.address) {
-                        if addr != observed.router {
+                        if addr != exec_router {
                             calldata = self.reserve_cache.build_v2_swap_payload(
                                 path,
                                 value,
@@ -1004,11 +1043,11 @@ impl StrategyExecutor {
                     return Ok(BackrunTx {
                         raw: Vec::new(),
                         hash: B256::ZERO,
-                        to: observed.router,
+                        to: exec_router,
                         value,
                         request: TransactionRequest {
                             from: Some(self.signer.address()),
-                            to: Some(TxKind::Call(observed.router)),
+                            to: Some(TxKind::Call(exec_router)),
                             max_fee_per_gas: Some(gas_fees.max_fee_per_gas),
                             max_priority_fee_per_gas: Some(gas_fees.max_priority_fee_per_gas),
                             gas: Some(gas_limit),
@@ -1028,7 +1067,15 @@ impl StrategyExecutor {
                         router_kind: observed.router_kind,
                         route_plan: self
                             .best_route_plan(
-                                self.wrapped_native,
+                                if has_wrapped {
+                                    self.wrapped_native
+                                } else {
+                                    observed
+                                        .path
+                                        .first()
+                                        .copied()
+                                        .unwrap_or(self.wrapped_native)
+                                },
                                 expected_out_token,
                                 value,
                                 gas_fees.max_fee_per_gas,
@@ -1037,8 +1084,16 @@ impl StrategyExecutor {
                             .or_else(|| {
                                 StrategyExecutor::single_leg_route(
                                     RouteVenue::UniV2,
-                                    observed.router,
-                                    self.wrapped_native,
+                                    exec_router,
+                                    if has_wrapped {
+                                        self.wrapped_native
+                                    } else {
+                                        observed
+                                            .path
+                                            .first()
+                                            .copied()
+                                            .unwrap_or(self.wrapped_native)
+                                    },
                                     expected_out_token,
                                     value,
                                     tokens_out,
@@ -1088,7 +1143,14 @@ impl StrategyExecutor {
                         .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
                         / U256::from(10_000u64);
                     let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 300);
-                    let calldata = UniV3Router::new(observed.router, self.http_provider.clone())
+                    let tx_value = if !use_flashloan
+                        && observed.path.first().copied() == Some(self.wrapped_native)
+                    {
+                        value
+                    } else {
+                        U256::ZERO
+                    };
+                    let calldata = UniV3Router::new(exec_router, self.http_provider.clone())
                         .exactInput(UniV3Router::ExactInputParams {
                             path: path_bytes.clone().into(),
                             recipient: self.signer.address(),
@@ -1099,19 +1161,19 @@ impl StrategyExecutor {
                         .calldata()
                         .to_vec();
                     let access_list =
-                        StrategyExecutor::build_access_list(observed.router, &observed.path);
+                        StrategyExecutor::build_access_list(exec_router, &observed.path);
                     return Ok(BackrunTx {
                         raw: Vec::new(),
                         hash: B256::ZERO,
-                        to: observed.router,
+                        to: exec_router,
                         value,
                         request: TransactionRequest {
                             from: Some(self.signer.address()),
-                            to: Some(TxKind::Call(observed.router)),
+                            to: Some(TxKind::Call(exec_router)),
                             max_fee_per_gas: Some(gas_fees.max_fee_per_gas),
                             max_priority_fee_per_gas: Some(gas_fees.max_priority_fee_per_gas),
                             gas: Some(gas_limit_hint.max(180_000)),
-                            value: Some(U256::ZERO),
+                            value: Some(tx_value),
                             input: TransactionInput::new(calldata.into()),
                             nonce: Some(nonce),
                             chain_id: Some(self.chain_id),
@@ -1127,7 +1189,15 @@ impl StrategyExecutor {
                         router_kind: observed.router_kind,
                         route_plan: self
                             .best_route_plan(
-                                self.wrapped_native,
+                                if has_wrapped {
+                                    self.wrapped_native
+                                } else {
+                                    observed
+                                        .path
+                                        .first()
+                                        .copied()
+                                        .unwrap_or(self.wrapped_native)
+                                },
                                 expected_out_token,
                                 value,
                                 gas_fees.max_fee_per_gas,
@@ -1136,8 +1206,16 @@ impl StrategyExecutor {
                             .or_else(|| {
                                 StrategyExecutor::single_leg_route(
                                     RouteVenue::UniV3,
-                                    observed.router,
-                                    self.wrapped_native,
+                                    exec_router,
+                                    if has_wrapped {
+                                        self.wrapped_native
+                                    } else {
+                                        observed
+                                            .path
+                                            .first()
+                                            .copied()
+                                            .unwrap_or(self.wrapped_native)
+                                    },
                                     expected_out_token,
                                     value,
                                     expected_out,
@@ -1152,10 +1230,22 @@ impl StrategyExecutor {
             let tokens_in = token_in_override.unwrap();
             let (value, expected_out, calldata, access_list) = match observed.router_kind {
                 RouterKind::V2Like => {
-                    expected_out_token = self.wrapped_native;
+                    expected_out_token = if has_wrapped {
+                        self.wrapped_native
+                    } else {
+                        observed
+                            .path
+                            .first()
+                            .copied()
+                            .unwrap_or(self.wrapped_native)
+                    };
                     let router_contract =
-                        UniV2Router::new(observed.router, self.http_provider.clone());
-                    let sell_path = vec![target_token, self.wrapped_native];
+                        UniV2Router::new(exec_router, self.http_provider.clone());
+                    let sell_path = if has_wrapped {
+                        vec![target_token, self.wrapped_native]
+                    } else {
+                        observed.path.iter().copied().rev().collect()
+                    };
                     let sell_amount = tokens_in;
                     let expected_out = if let Some(q) =
                         self.reserve_cache.quote_v2_path(&sell_path, sell_amount)
@@ -1187,7 +1277,7 @@ impl StrategyExecutor {
                         if !self
                             .probe_v2_sell_for_toxicity(
                                 target_token,
-                                observed.router,
+                                exec_router,
                                 sell_amount,
                                 expected_out,
                             )
@@ -1202,23 +1292,44 @@ impl StrategyExecutor {
                         .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
                         / U256::from(10_000u64);
                     let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 300);
-                    let calldata = router_contract
-                        .swapExactTokensForETH(
-                            sell_amount,
-                            min_out,
-                            sell_path.clone(),
-                            self.signer.address(),
-                            deadline,
-                        )
-                        .calldata()
-                        .to_vec();
+                    let calldata = if has_wrapped {
+                        router_contract
+                            .swapExactTokensForETH(
+                                sell_amount,
+                                min_out,
+                                sell_path.clone(),
+                                self.signer.address(),
+                                deadline,
+                            )
+                            .calldata()
+                            .to_vec()
+                    } else {
+                        router_contract
+                            .swapExactTokensForTokens(
+                                sell_amount,
+                                min_out,
+                                sell_path.clone(),
+                                self.signer.address(),
+                                deadline,
+                            )
+                            .calldata()
+                            .to_vec()
+                    };
                     let access_list =
-                        StrategyExecutor::build_access_list(observed.router, &sell_path);
+                        StrategyExecutor::build_access_list(exec_router, &sell_path);
                     (U256::ZERO, expected_out, calldata, access_list)
                 }
                 RouterKind::V3Like => {
-                    expected_out_token = self.wrapped_native;
-                    unwrap_to_native = true;
+                    expected_out_token = if has_wrapped {
+                        self.wrapped_native
+                    } else {
+                        observed
+                            .path
+                            .first()
+                            .copied()
+                            .unwrap_or(self.wrapped_native)
+                    };
+                    unwrap_to_native = has_wrapped;
                     let rev_path = reverse_v3_path(&observed.path, &observed.v3_fees)
                         .ok_or_else(|| AppError::Strategy("Reverse V3 path failed".into()))?;
                     let expected_out = self.quote_v3_path(&rev_path, tokens_in).await?;
@@ -1229,7 +1340,7 @@ impl StrategyExecutor {
                     if !self.dry_run {
                         if !self
                             .probe_v3_sell_for_toxicity(
-                                observed.router,
+                                exec_router,
                                 rev_path.clone(),
                                 tokens_in,
                                 expected_out,
@@ -1246,7 +1357,7 @@ impl StrategyExecutor {
                         .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
                         / U256::from(10_000u64);
                     let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 300);
-                    let calldata = UniV3Router::new(observed.router, self.http_provider.clone())
+                    let calldata = UniV3Router::new(exec_router, self.http_provider.clone())
                         .exactInput(UniV3Router::ExactInputParams {
                             path: rev_path.clone().into(),
                             recipient: self.signer.address(),
@@ -1257,7 +1368,7 @@ impl StrategyExecutor {
                         .calldata()
                         .to_vec();
                     let access_list =
-                        StrategyExecutor::build_access_list(observed.router, &observed.path);
+                        StrategyExecutor::build_access_list(exec_router, &observed.path);
                     (U256::ZERO, expected_out, calldata, access_list)
                 }
             };
@@ -1267,7 +1378,7 @@ impl StrategyExecutor {
                 .sign_with_access_list(
                     TransactionRequest {
                         from: Some(self.signer.address()),
-                        to: Some(TxKind::Call(observed.router)),
+                        to: Some(TxKind::Call(exec_router)),
                         max_fee_per_gas: Some(gas_fees.max_fee_per_gas),
                         max_priority_fee_per_gas: Some(gas_fees.max_priority_fee_per_gas),
                         gas: Some(gas_limit_hint),
@@ -1285,7 +1396,7 @@ impl StrategyExecutor {
             Ok(BackrunTx {
                 raw,
                 hash,
-                to: observed.router,
+                to: exec_router,
                 value,
                 request,
                 expected_out,
@@ -1309,7 +1420,7 @@ impl StrategyExecutor {
                                 RouterKind::V2Like => RouteVenue::UniV2,
                                 RouterKind::V3Like => RouteVenue::UniV3,
                             },
-                            observed.router,
+                            exec_router,
                             target_token,
                             expected_out_token,
                             value,

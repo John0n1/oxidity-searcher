@@ -4,6 +4,7 @@ use alloy::primitives::{Address, B256, Bytes, U160, U256, aliases::U24};
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolCall;
+use dashmap::DashSet;
 use oxidity_builder::common::constants::WETH_MAINNET;
 use oxidity_builder::core::executor::BundleSender;
 use oxidity_builder::core::portfolio::PortfolioManager;
@@ -21,7 +22,6 @@ use oxidity_builder::network::price_feed::{PriceApiKeys, PriceFeed};
 use oxidity_builder::network::provider::HttpProvider;
 use oxidity_builder::network::reserves::ReserveCache;
 use oxidity_builder::services::strategy::routers::UniV3Router;
-use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -52,17 +52,20 @@ async fn mev_share_v3_pipeline_manual() {
 
     let http = HttpProvider::new_http(Url::parse(&rpc).expect("rpc url"));
     let signer = PrivateKeySigner::from_str(&wallet_key).expect("parse signer");
+    // Discover chain id from the node so we don't assume mainnet.
+    let chain_id = http.get_chain_id().await.unwrap_or(1u64);
     let bundle_signer = PrivateKeySigner::random();
     let safety_guard = Arc::new(SafetyGuard::new());
     let bundle_sender = Arc::new(BundleSender::new(
         http.clone(),
         true,
         "https://relay.flashbots.net".to_string(),
+        "https://mev-share.flashbots.net".to_string(),
         bundle_signer.clone(),
     ));
     let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), signer.address()));
-    let gas_oracle = GasOracle::new(http.clone());
+    let gas_oracle = GasOracle::new(http.clone(), chain_id);
     let price_feed = PriceFeed::new(
         http.clone(),
         std::collections::HashMap::new(),
@@ -76,13 +79,10 @@ async fn mev_share_v3_pipeline_manual() {
 
     let (_tx, rx) = mpsc::channel::<StrategyWork>(4);
     let (_block_tx, block_rx) = broadcast::channel(4);
-    let mut router_allowlist = HashSet::new();
+    let router_allowlist = Arc::new(DashSet::new());
     let uni_v3_router =
         Address::from_str("E592427A0AEce92De3Edee1F18E0157C05861564").expect("router addr");
     router_allowlist.insert(uni_v3_router);
-
-    // Discover chain id from the node so we don't assume mainnet.
-    let chain_id = http.get_chain_id().await.unwrap_or(1u64);
 
     let exec = StrategyExecutor::new(
         rx,
@@ -95,6 +95,7 @@ async fn mev_share_v3_pipeline_manual() {
         price_feed,
         chain_id,
         200,
+        12_000,
         simulator,
         token_manager,
         stats.clone(),
@@ -104,7 +105,10 @@ async fn mev_share_v3_pipeline_manual() {
         http.clone(),
         true,
         router_allowlist,
+        None,
+        500,
         WETH_MAINNET,
+        false,
         None,
         0,
         None,

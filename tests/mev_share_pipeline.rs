@@ -6,6 +6,7 @@
 use alloy::primitives::{Address, B256, Bytes, U256};
 use alloy::signers::local::PrivateKeySigner;
 use alloy_sol_types::SolCall;
+use dashmap::DashSet;
 use oxidity_builder::common::constants::WETH_MAINNET;
 use oxidity_builder::core::executor::BundleSender;
 use oxidity_builder::core::portfolio::PortfolioManager;
@@ -22,7 +23,6 @@ use oxidity_builder::network::provider::HttpProvider;
 use oxidity_builder::network::reserves::ReserveCache;
 use oxidity_builder::services::strategy::routers::UniV2Router;
 use oxidity_builder::services::strategy::strategy::StrategyStats as Stats;
-use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -39,11 +39,12 @@ async fn mev_share_hint_round_trip() {
         http.clone(),
         true,
         "https://relay.flashbots.net".to_string(),
+        "https://mev-share.flashbots.net".to_string(),
         bundle_signer.clone(),
     ));
     let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), signer.address()));
-    let gas_oracle = GasOracle::new(http.clone());
+    let gas_oracle = GasOracle::new(http.clone(), 1);
     let price_feed = PriceFeed::new(
         http.clone(),
         std::collections::HashMap::new(),
@@ -58,7 +59,7 @@ async fn mev_share_hint_round_trip() {
     let (_tx, rx) = mpsc::channel::<StrategyWork>(4);
     let (_block_tx, block_rx) = broadcast::channel(4);
 
-    let mut allowlist = HashSet::new();
+    let allowlist = Arc::new(DashSet::new());
     let router = Address::from_str("7a250d5630B4cF539739dF2C5dAcb4c659F2488D").unwrap();
     allowlist.insert(router);
 
@@ -73,6 +74,7 @@ async fn mev_share_hint_round_trip() {
         price_feed,
         1,
         200,
+        12_000,
         simulator,
         token_manager,
         stats.clone(),
@@ -82,7 +84,10 @@ async fn mev_share_hint_round_trip() {
         http.clone(),
         true,
         allowlist,
+        None,
+        500,
         WETH_MAINNET,
+        false,
         None,
         0,
         None,

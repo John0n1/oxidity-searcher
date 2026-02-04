@@ -29,7 +29,7 @@ fn bundle_bytes(bundle: &[Vec<u8>]) -> usize {
 #[derive(Clone)]
 pub struct BundlePlan {
     pub front_run: Option<TransactionRequest>,
-    pub approval: Option<TransactionRequest>,
+    pub approvals: Vec<TransactionRequest>,
     pub main: TransactionRequest,
     pub victims: Vec<Vec<u8>>,
 }
@@ -37,7 +37,7 @@ pub struct BundlePlan {
 #[derive(Default)]
 pub struct PlanHashes {
     pub front_run: Option<B256>,
-    pub approval: Option<B256>,
+    pub approvals: Vec<B256>,
     pub main: B256,
 }
 
@@ -217,13 +217,57 @@ impl StrategyExecutor {
             state.next_nonce = state.next_nonce.max(lease.end());
         }
 
-        let state = state_guard.as_mut().unwrap();
+        let conflict = {
+            let state = state_guard.as_ref().unwrap();
+            touched_pools
+                .iter()
+                .copied()
+                .find(|pool| state.touched_pools.contains(pool))
+        };
+        if let Some(pool) = conflict {
+            tracing::warn!(
+                target: "bundle_merge",
+                pool = %format!("{:#x}", pool),
+                "Pool conflict; flushing pending bundle before merge"
+            );
+            let (flush_bundle, block_for_flush, next_nonce_flush) = {
+                let state = state_guard.as_mut().unwrap();
+                if state.raw.is_empty() {
+                    return Ok(None);
+                }
+                let flush_bundle = state.raw.clone();
+                let block_for_flush = state.block;
+                let next_nonce_flush = state.next_nonce;
+                state.raw.clear();
+                state.touched_pools.clear();
+                state.send_pending = false;
+                (flush_bundle, block_for_flush, next_nonce_flush)
+            };
+            let chain_id = self.chain_id;
+            drop(state_guard);
 
-        for pool in &touched_pools {
-            if state.touched_pools.contains(pool) {
-                tracing::warn!(target: "bundle_merge", pool=%format!("{:#x}", pool), "Pool conflict; skipping merge");
-                return Ok(None);
+            if self.dry_run {
+                tracing::info!(
+                    target: "bundle_merge",
+                    txs = flush_bundle.len(),
+                    bytes = flush_bundle.iter().map(|b| b.len()).sum::<usize>(),
+                    "Dry-run: would flush bundle due to pool conflict"
+                );
+            } else {
+                self.bundle_sender
+                    .send_bundle(&flush_bundle, chain_id)
+                    .await
+                    .map_err(|e| AppError::Strategy(format!("Flush bundle failed: {e}")))?;
             }
+
+            state_guard = self.bundle_state.lock().await;
+            *state_guard = Some(BundleState {
+                block: block_for_flush,
+                next_nonce: next_nonce_flush,
+                raw: Vec::new(),
+                touched_pools: HashSet::new(),
+                send_pending: false,
+            });
         }
 
         let mut nonce = lease.base;
@@ -249,7 +293,7 @@ impl StrategyExecutor {
             new_raw.push(victim);
         }
 
-        if let Some(mut approval) = plan.approval {
+        for mut approval in plan.approvals {
             let next = approval.nonce.unwrap_or(nonce);
             if next < nonce || next >= lease_end {
                 return Err(AppError::Strategy("approval nonce outside lease".into()));
@@ -258,7 +302,7 @@ impl StrategyExecutor {
             approval.nonce = Some(nonce);
             let fallback = approval.access_list.clone().unwrap_or_default();
             let (raw, _, hash) = self.sign_with_access_list(approval, fallback).await?;
-            hashes.approval = Some(hash);
+            hashes.approvals.push(hash);
             nonce = nonce.saturating_add(1);
             new_raw.push(raw);
         }
@@ -290,6 +334,7 @@ impl StrategyExecutor {
         }
 
         // If adding this plan would overflow builder limits, flush existing bundle first.
+        let state = state_guard.as_mut().unwrap();
         let combined_txs = state.raw.len().saturating_add(new_raw.len());
         let combined_bytes = bundle_bytes(&state.raw).saturating_add(new_raw_bytes);
         if (combined_txs > MAX_FLASHBOTS_TXS || combined_bytes > MAX_FLASHBOTS_BYTES)

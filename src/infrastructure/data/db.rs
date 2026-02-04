@@ -3,7 +3,12 @@
 
 use crate::common::error::AppError;
 use crate::data::schema::TransactionRecord;
-use sqlx::{Pool, Row, Sqlite, sqlite::SqlitePoolOptions};
+use alloy::primitives::Address;
+use sqlx::{
+    Pool, Row, Sqlite,
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+};
+use std::str::FromStr;
 
 #[derive(Clone)]
 pub struct Database {
@@ -12,9 +17,13 @@ pub struct Database {
 
 impl Database {
     pub async fn new(database_url: &str) -> Result<Self, AppError> {
+        let options = SqliteConnectOptions::from_str(database_url)
+            .map_err(|e| AppError::Initialization(format!("DB Connect failed: {}", e)))?
+            .create_if_missing(true);
+
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
-            .connect(database_url)
+            .connect_with(options)
             .await
             .map_err(|e| AppError::Initialization(format!("DB Connect failed: {}", e)))?;
 
@@ -212,6 +221,95 @@ impl Database {
         let id: i64 = row.get("id");
 
         Ok(id)
+    }
+
+    pub async fn record_router_observation(
+        &self,
+        chain_id: u64,
+        address: &str,
+        source: &str,
+        reason: &str,
+        increment: u64,
+    ) -> Result<(), AppError> {
+        let chain_id_i64 = chain_id as i64;
+        let inc_i64 = increment as i64;
+        sqlx::query(
+            r#"
+            INSERT INTO router_discovery (chain_id, address, seen_count, last_source, last_reason)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chain_id, address) DO UPDATE SET
+                seen_count = router_discovery.seen_count + excluded.seen_count,
+                last_seen = CURRENT_TIMESTAMP,
+                last_source = excluded.last_source,
+                last_reason = excluded.last_reason
+            "#,
+        )
+        .bind(chain_id_i64)
+        .bind(address)
+        .bind(inc_i64)
+        .bind(source)
+        .bind(reason)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Initialization(format!("Router discovery upsert failed: {}", e)))?;
+        Ok(())
+    }
+
+    pub async fn set_router_status(
+        &self,
+        chain_id: u64,
+        address: &str,
+        status: &str,
+        router_kind: Option<&str>,
+        notes: Option<&str>,
+    ) -> Result<(), AppError> {
+        let chain_id_i64 = chain_id as i64;
+        sqlx::query(
+            r#"
+            INSERT INTO router_discovery (chain_id, address, seen_count, status, router_kind, notes)
+            VALUES (?, ?, 0, ?, ?, ?)
+            ON CONFLICT(chain_id, address) DO UPDATE SET
+                status = excluded.status,
+                router_kind = excluded.router_kind,
+                notes = excluded.notes,
+                last_seen = CURRENT_TIMESTAMP
+            "#,
+        )
+        .bind(chain_id_i64)
+        .bind(address)
+        .bind(status)
+        .bind(router_kind)
+        .bind(notes)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Initialization(format!("Router discovery status failed: {}", e)))?;
+        Ok(())
+    }
+
+    pub async fn approved_routers(&self, chain_id: u64) -> Result<Vec<Address>, AppError> {
+        let chain_id_i64 = chain_id as i64;
+        let rows = sqlx::query(
+            "SELECT address FROM router_discovery WHERE chain_id = ? AND status = 'approved'",
+        )
+        .bind(chain_id_i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AppError::Initialization(format!("Router discovery load failed: {}", e)))?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let addr_str: String = row.get("address");
+            if let Ok(addr) = Address::from_str(&addr_str) {
+                out.push(addr);
+            } else {
+                tracing::warn!(
+                    target: "router_discovery",
+                    address = %addr_str,
+                    "Invalid router address stored"
+                );
+            }
+        }
+        Ok(out)
     }
 }
 

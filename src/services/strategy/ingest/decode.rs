@@ -2,11 +2,15 @@
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
 
 use alloy::consensus::Transaction as ConsensusTxTrait;
-use alloy::primitives::{Address, TxKind, U256, aliases::U24};
+use alloy::primitives::{Address, Bytes, TxKind, U256, aliases::U24};
 use alloy::rpc::types::eth::Transaction;
-use alloy_sol_types::SolCall;
+use alloy_sol_types::{SolCall, SolType};
 
-use crate::services::strategy::routers::{UniV2Router, UniV3Router};
+use crate::services::strategy::routers::{
+    UniV2Router, UniV3Router, UniversalRouter, UniversalRouterDeadline,
+};
+
+use alloy::sol;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ObservedSwap {
@@ -37,6 +41,40 @@ pub enum SwapDirection {
 pub struct ParsedV3Path {
     pub tokens: Vec<Address>,
     pub fees: Vec<u32>,
+}
+
+sol! {
+    struct V2SwapExactInParams {
+        address recipient;
+        uint256 amountIn;
+        uint256 amountOutMin;
+        address[] path;
+        bool payerIsUser;
+    }
+
+    struct V2SwapExactOutParams {
+        address recipient;
+        uint256 amountOut;
+        uint256 amountInMax;
+        address[] path;
+        bool payerIsUser;
+    }
+
+    struct V3SwapExactInParams {
+        address recipient;
+        uint256 amountIn;
+        uint256 amountOutMin;
+        bytes path;
+        bool payerIsUser;
+    }
+
+    struct V3SwapExactOutParams {
+        address recipient;
+        uint256 amountOut;
+        uint256 amountInMax;
+        bytes path;
+        bool payerIsUser;
+    }
 }
 
 pub fn decode_swap(tx: &Transaction) -> Option<ObservedSwap> {
@@ -132,8 +170,96 @@ pub fn decode_swap_input(router: Address, input: &[u8], eth_value: U256) -> Opti
                 router_kind: RouterKind::V3Like,
             })
         }
+        UniversalRouter::executeCall::SELECTOR => {
+            let decoded = UniversalRouter::executeCall::abi_decode(input).ok()?;
+            decode_universal_router(router, decoded.commands, decoded.inputs)
+        }
+        UniversalRouterDeadline::executeCall::SELECTOR => {
+            let decoded = UniversalRouterDeadline::executeCall::abi_decode(input).ok()?;
+            decode_universal_router(router, decoded.commands, decoded.inputs)
+        }
         _ => None,
     }
+}
+
+const UR_CMD_V3_SWAP_EXACT_IN: u8 = 0x00;
+const UR_CMD_V3_SWAP_EXACT_OUT: u8 = 0x01;
+const UR_CMD_V2_SWAP_EXACT_IN: u8 = 0x08;
+const UR_CMD_V2_SWAP_EXACT_OUT: u8 = 0x09;
+
+fn decode_universal_router(
+    router: Address,
+    commands: Bytes,
+    inputs: Vec<Bytes>,
+) -> Option<ObservedSwap> {
+    let cmd_bytes = commands.as_ref();
+    let count = std::cmp::min(cmd_bytes.len(), inputs.len());
+    for idx in 0..count {
+        let cmd = cmd_bytes[idx] & 0x3f;
+        let input = inputs.get(idx)?;
+        match cmd {
+            UR_CMD_V2_SWAP_EXACT_IN => {
+                let decoded = V2SwapExactInParams::abi_decode(input.as_ref()).ok()?;
+                return Some(ObservedSwap {
+                    router,
+                    path: decoded.path,
+                    v3_fees: Vec::new(),
+                    v3_path: None,
+                    amount_in: decoded.amountIn,
+                    min_out: decoded.amountOutMin,
+                    recipient: decoded.recipient,
+                    router_kind: RouterKind::V2Like,
+                });
+            }
+            UR_CMD_V2_SWAP_EXACT_OUT => {
+                let decoded = V2SwapExactOutParams::abi_decode(input.as_ref()).ok()?;
+                return Some(ObservedSwap {
+                    router,
+                    path: decoded.path,
+                    v3_fees: Vec::new(),
+                    v3_path: None,
+                    amount_in: decoded.amountInMax,
+                    min_out: decoded.amountOut,
+                    recipient: decoded.recipient,
+                    router_kind: RouterKind::V2Like,
+                });
+            }
+            UR_CMD_V3_SWAP_EXACT_IN => {
+                let decoded = V3SwapExactInParams::abi_decode(input.as_ref()).ok()?;
+                let Some(path) = parse_v3_path(decoded.path.as_ref()) else {
+                    continue;
+                };
+                return Some(ObservedSwap {
+                    router,
+                    path: path.tokens.clone(),
+                    v3_fees: path.fees.clone(),
+                    v3_path: Some(decoded.path.to_vec()),
+                    amount_in: decoded.amountIn,
+                    min_out: decoded.amountOutMin,
+                    recipient: decoded.recipient,
+                    router_kind: RouterKind::V3Like,
+                });
+            }
+            UR_CMD_V3_SWAP_EXACT_OUT => {
+                let decoded = V3SwapExactOutParams::abi_decode(input.as_ref()).ok()?;
+                let Some(path) = parse_v3_path(decoded.path.as_ref()) else {
+                    continue;
+                };
+                return Some(ObservedSwap {
+                    router,
+                    path: path.tokens.clone(),
+                    v3_fees: path.fees.clone(),
+                    v3_path: Some(decoded.path.to_vec()),
+                    amount_in: decoded.amountInMax,
+                    min_out: decoded.amountOut,
+                    recipient: decoded.recipient,
+                    router_kind: RouterKind::V3Like,
+                });
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 pub fn target_token(path: &[Address], wrapped_native: Address) -> Option<Address> {

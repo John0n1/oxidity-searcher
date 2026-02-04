@@ -103,11 +103,13 @@ impl StrategyExecutor {
                 skip_unknown_router = self.stats.skip_unknown_router.load(std::sync::atomic::Ordering::Relaxed),
                 skip_decode = self.stats.skip_decode_failed.load(std::sync::atomic::Ordering::Relaxed),
                 skip_missing_wrapped = self.stats.skip_missing_wrapped.load(std::sync::atomic::Ordering::Relaxed),
+                skip_non_wrapped_balance = self.stats.skip_non_wrapped_balance.load(std::sync::atomic::Ordering::Relaxed),
                 skip_gas_cap = self.stats.skip_gas_cap.load(std::sync::atomic::Ordering::Relaxed),
                 skip_sim_failed = self.stats.skip_sim_failed.load(std::sync::atomic::Ordering::Relaxed),
                 skip_profit_guard = self.stats.skip_profit_guard.load(std::sync::atomic::Ordering::Relaxed),
                 skip_unsupported_router = self.stats.skip_unsupported_router.load(std::sync::atomic::Ordering::Relaxed),
                 skip_token_call = self.stats.skip_token_call.load(std::sync::atomic::Ordering::Relaxed),
+                skip_insufficient_balance = self.stats.skip_insufficient_balance.load(std::sync::atomic::Ordering::Relaxed),
                 "Strategy loop summary"
             );
         }
@@ -120,7 +122,8 @@ impl StrategyExecutor {
         _router: Address,
         observed_swap: &ObservedSwap,
     ) -> Option<(SwapDirection, Address)> {
-        if observed_swap.amount_in.is_zero() || !observed_swap.path.contains(&self.wrapped_native) {
+        let has_wrapped = observed_swap.path.contains(&self.wrapped_native);
+        if observed_swap.amount_in.is_zero() || (!has_wrapped && !self.allow_non_wrapped_swaps) {
             self.log_skip(
                 "zero_amount_or_no_wrapped_native",
                 "path missing wrapped native or zero amount",
@@ -159,6 +162,9 @@ impl StrategyExecutor {
                 self.log_skip("token_call", "erc20 transfer/approve");
                 return Ok(None);
             }
+            if let Some(discovery) = &self.router_discovery {
+                discovery.record_unknown_router(to_addr, "mempool");
+            }
             self.log_skip("unknown_router", &format!("to={to_addr:#x}"));
             return Ok(None);
         }
@@ -188,18 +194,18 @@ impl StrategyExecutor {
         };
 
         let needed_nonces =
-            1u64 + parts.front_run.is_some() as u64 + parts.approval.is_some() as u64;
+            1u64 + parts.front_run.is_some() as u64 + parts.approvals.len() as u64;
         let lease = self.lease_nonces(needed_nonces).await?;
 
         let mut front_run = parts.front_run;
-        let mut approval = parts.approval;
+        let mut approvals = parts.approvals;
         let mut backrun = parts.backrun;
         let mut executor_request = parts.executor_request;
         let mut main_request = executor_request
             .clone()
             .unwrap_or_else(|| backrun.request.clone());
 
-        Self::apply_nonce_plan(&lease, &mut front_run, &mut approval, &mut main_request)?;
+        Self::apply_nonce_plan(&lease, &mut front_run, &mut approvals, &mut main_request)?;
         if let Some(exec) = executor_request.as_mut() {
             exec.nonce = main_request.nonce;
         }
@@ -212,7 +218,7 @@ impl StrategyExecutor {
             bundle_requests.push(f.request.clone());
         }
         bundle_requests.push(victim_request.clone());
-        if let Some(a) = &approval {
+        for a in &approvals {
             bundle_requests.push(a.request.clone());
         }
         bundle_requests.push(main_request.clone());
@@ -279,7 +285,7 @@ impl StrategyExecutor {
 
         let plan = BundlePlan {
             front_run: front_run.as_ref().map(|f| f.request.clone()),
-            approval: approval.as_ref().map(|a| a.request.clone()),
+            approvals: approvals.iter().map(|a| a.request.clone()).collect(),
             main: main_request.clone(),
             victims: vec![tx.inner.encoded_2718()],
         };
@@ -367,11 +373,13 @@ impl StrategyExecutor {
         self.portfolio
             .record_profit(self.chain_id, profit.gross_profit_wei, profit.gas_cost_wei);
 
+        let price_symbol =
+            format!("{}USD", crate::common::constants::native_symbol_for_chain(self.chain_id));
         let _ = self
             .db
             .save_market_price(
                 self.chain_id,
-                "ETHUSD",
+                &price_symbol,
                 profit.eth_quote.price,
                 &profit.eth_quote.source,
             )
@@ -401,6 +409,9 @@ impl StrategyExecutor {
         received_at: std::time::Instant,
     ) -> Result<Option<String>, AppError> {
         if !self.router_allowlist.contains(&hint.router) {
+            if let Some(discovery) = &self.router_discovery {
+                discovery.record_unknown_router(hint.router, "mev_share");
+            }
             self.log_skip("unknown_router", &format!("to={:#x}", hint.router));
             return Ok(None);
         }
@@ -432,18 +443,18 @@ impl StrategyExecutor {
         };
 
         let needed_nonces =
-            1u64 + parts.front_run.is_some() as u64 + parts.approval.is_some() as u64;
+            1u64 + parts.front_run.is_some() as u64 + parts.approvals.len() as u64;
         let lease = self.lease_nonces(needed_nonces).await?;
 
         let mut front_run = parts.front_run;
-        let mut approval = parts.approval;
+        let mut approvals = parts.approvals;
         let mut backrun = parts.backrun;
         let mut executor_request = parts.executor_request;
         let mut main_request = executor_request
             .clone()
             .unwrap_or_else(|| backrun.request.clone());
 
-        Self::apply_nonce_plan(&lease, &mut front_run, &mut approval, &mut main_request)?;
+        Self::apply_nonce_plan(&lease, &mut front_run, &mut approvals, &mut main_request)?;
         if let Some(exec) = executor_request.as_mut() {
             exec.nonce = main_request.nonce;
         }
@@ -472,7 +483,7 @@ impl StrategyExecutor {
         if let Some(f) = &front_run {
             bundle_requests.push(f.request.clone());
         }
-        if let Some(a) = &approval {
+        for a in &approvals {
             bundle_requests.push(a.request.clone());
         }
         bundle_requests.push(victim_request.clone());
@@ -564,7 +575,7 @@ impl StrategyExecutor {
             });
         }
 
-        if let Some(app) = approval.as_mut() {
+        for app in approvals.iter_mut() {
             let fallback = app.request.access_list.clone().unwrap_or_default();
             let req = app.request.clone();
             let (raw, signed_req, _) = self.sign_with_access_list(req, fallback).await?;
@@ -657,11 +668,13 @@ impl StrategyExecutor {
         self.portfolio
             .record_profit(self.chain_id, profit.gross_profit_wei, profit.gas_cost_wei);
 
+        let price_symbol =
+            format!("{}USD", crate::common::constants::native_symbol_for_chain(self.chain_id));
         let _ = self
             .db
             .save_market_price(
                 self.chain_id,
-                "ETHUSD",
+                &price_symbol,
                 profit.eth_quote.price,
                 &profit.eth_quote.source,
             )
@@ -696,20 +709,7 @@ impl StrategyExecutor {
     ) -> Result<Option<BundleParts>, AppError> {
         let mut gas_fees: GasFees = self.gas_oracle.estimate_eip1559_fees().await?;
         self.boost_fees(&mut gas_fees, fee_hints.0, fee_hints.1);
-        let dynamic_cap = gas_fees
-            .suggested_max_fee_per_gas
-            .map(U256::from)
-            .unwrap_or(U256::from(self.max_gas_price_gwei) * U256::from(1_000_000_000u64));
-        if U256::from(gas_fees.max_fee_per_gas) > dynamic_cap {
-            self.log_skip(
-                "gas_price_cap",
-                &format!(
-                    "max_fee_per_gas={} cap_wei={}",
-                    gas_fees.max_fee_per_gas, dynamic_cap
-                ),
-            );
-            return Ok(None);
-        }
+        let hard_cap = U256::from(self.max_gas_price_gwei) * U256::from(1_000_000_000u64);
 
         let real_balance = self.portfolio.update_eth_balance(self.chain_id).await?;
         let (wallet_chain_balance, _) = if self.dry_run {
@@ -723,14 +723,78 @@ impl StrategyExecutor {
             (real_balance, false)
         };
 
+        let base_plus_tip = gas_fees
+            .next_base_fee_per_gas
+            .saturating_add(gas_fees.max_priority_fee_per_gas);
+        let fallback_dynamic = {
+            let scaled = base_plus_tip
+                .saturating_mul(self.gas_cap_multiplier_bps as u128)
+                / 10_000u128;
+            scaled
+        };
+        let base_dynamic = gas_fees
+            .suggested_max_fee_per_gas
+            .unwrap_or(fallback_dynamic);
+        let balance_factor_bps = self.balance_cap_multiplier_bps(wallet_chain_balance);
+        let adjusted_dynamic = base_dynamic
+            .saturating_mul(balance_factor_bps as u128)
+            / 10_000u128;
+        let dynamic_cap = U256::from(adjusted_dynamic).min(hard_cap);
+        if U256::from(gas_fees.max_fee_per_gas) > dynamic_cap {
+            self.log_skip(
+                "gas_price_cap",
+                &format!(
+                    "max_fee_per_gas={} cap_wei={} base_plus_tip={} base_dynamic={} balance_factor_bps={} hard_cap={} wallet_wei={}",
+                    gas_fees.max_fee_per_gas,
+                    dynamic_cap,
+                    base_plus_tip,
+                    base_dynamic,
+                    balance_factor_bps,
+                    hard_cap,
+                    wallet_chain_balance
+                ),
+            );
+            return Ok(None);
+        }
+
+        let has_wrapped = observed_swap.path.contains(&self.wrapped_native);
+        let mut trade_balance = wallet_chain_balance;
+        if !has_wrapped && self.allow_non_wrapped_swaps {
+            let token_in = observed_swap
+                .path
+                .first()
+                .copied()
+                .unwrap_or(self.wrapped_native);
+            let token_balance = self
+                .portfolio
+                .update_token_balance(self.chain_id, token_in)
+                .await?;
+            if token_balance.is_zero() {
+                self.log_skip("non_wrapped_balance", &format!("token={token_in:#x}"));
+                return Ok(None);
+            }
+            tracing::info!(
+                target: "strategy",
+                token_in = %format!("{token_in:#x}"),
+                balance = %token_balance,
+                router = %format!("{:#x}", observed_swap.router),
+                router_kind = ?observed_swap.router_kind,
+                path = ?observed_swap.path,
+                "Non-wrapped path accepted"
+            );
+            trade_balance = token_balance;
+        }
+
         let mut attack_value_eth = U256::ZERO;
         let mut front_run: Option<FrontRunTx> = None;
-        if direction == SwapDirection::BuyWithEth && self.sandwich_attacks_enabled {
+        let allow_front_run =
+            self.sandwich_attacks_enabled && (direction == SwapDirection::BuyWithEth || !has_wrapped);
+        if allow_front_run {
             match self
                 .build_front_run_tx(
                     observed_swap,
                     &gas_fees,
-                    wallet_chain_balance,
+                    trade_balance,
                     gas_limit_hint,
                     0,
                 )
@@ -748,16 +812,33 @@ impl StrategyExecutor {
             }
         }
 
-        let mut approval: Option<ApproveTx> = None;
+        let mut approvals: Vec<ApproveTx> = Vec::new();
         if let Some(f) = &front_run {
+            let exec_router = self.execution_router(observed_swap);
+            if (f.input_token != self.wrapped_native || f.value.is_zero())
+                && self
+                    .needs_approval(f.input_token, exec_router, f.input_amount)
+                    .await?
+            {
+                approvals.push(
+                    self.build_approval_tx(
+                        f.input_token,
+                        exec_router,
+                        gas_fees.max_fee_per_gas,
+                        gas_fees.max_priority_fee_per_gas,
+                        0,
+                    )
+                    .await?,
+                );
+            }
             if self
-                .needs_approval(target_token, observed_swap.router, f.expected_tokens)
+                .needs_approval(target_token, exec_router, f.expected_tokens)
                 .await?
             {
-                approval = Some(
+                approvals.push(
                     self.build_approval_tx(
                         target_token,
-                        observed_swap.router,
+                        exec_router,
                         gas_fees.max_fee_per_gas,
                         gas_fees.max_priority_fee_per_gas,
                         0,
@@ -768,14 +849,14 @@ impl StrategyExecutor {
         }
 
         let required_value = victim_value.saturating_add(attack_value_eth);
-        let use_flashloan =
-            self.should_use_flashloan(required_value, wallet_chain_balance, &gas_fees)
-                && front_run.is_none();
+        let use_flashloan = has_wrapped
+            && self.should_use_flashloan(required_value, wallet_chain_balance, &gas_fees)
+            && front_run.is_none();
         // For sizing, flashloans can extend to wallet balance plus victim value instead of a fixed 10k override.
         let trade_balance = if use_flashloan {
             wallet_chain_balance.saturating_add(victim_value)
         } else {
-            wallet_chain_balance
+            trade_balance
         };
 
         let backrun = match self
@@ -798,7 +879,7 @@ impl StrategyExecutor {
         };
 
         let executor_request = self
-            .build_executor_wrapper(approval.as_ref(), &backrun, &gas_fees, gas_limit_hint, 0)
+            .build_executor_wrapper(&approvals, &backrun, &gas_fees, gas_limit_hint, 0)
             .await?;
 
         let bribe_wei = if let Some((_, req, _)) = executor_request.as_ref() {
@@ -818,7 +899,7 @@ impl StrategyExecutor {
             attack_value_eth,
             bribe_wei,
             front_run,
-            approval,
+            approvals,
             backrun,
             executor_request: executor_request.map(|(_, req, _)| req),
         }))
@@ -827,10 +908,10 @@ impl StrategyExecutor {
     fn apply_nonce_plan(
         lease: &NonceLease,
         front_run: &mut Option<FrontRunTx>,
-        approval: &mut Option<ApproveTx>,
+        approvals: &mut Vec<ApproveTx>,
         main: &mut TransactionRequest,
     ) -> Result<(), AppError> {
-        let needed = 1 + front_run.is_some() as u64 + approval.is_some() as u64;
+        let needed = 1 + front_run.is_some() as u64 + approvals.len() as u64;
         if needed > lease.count && lease.count != 0 {
             return Err(AppError::Strategy("nonce lease too small".into()));
         }
@@ -839,7 +920,7 @@ impl StrategyExecutor {
             f.request.nonce = Some(nonce_cursor);
             nonce_cursor = nonce_cursor.saturating_add(1);
         }
-        if let Some(app) = approval.as_mut() {
+        for app in approvals.iter_mut() {
             app.request.nonce = Some(nonce_cursor);
             nonce_cursor = nonce_cursor.saturating_add(1);
         }
@@ -928,8 +1009,9 @@ impl StrategyExecutor {
             );
             return Ok(None);
         }
-        let Some(native_out) =
-            self.ensure_native_out(backrun.expected_out, backrun.expected_out_token)
+        let Some(native_out) = self
+            .estimate_native_out(backrun.expected_out, backrun.expected_out_token)
+            .await
         else {
             self.log_skip("profit_or_gas_guard", "non_native_expected_out");
             return Ok(None);
@@ -963,7 +1045,23 @@ impl StrategyExecutor {
             return Ok(None);
         }
 
-        let eth_quote = self.price_feed.get_price("ETHUSD").await?;
+        let native_symbol = crate::common::constants::native_symbol_for_chain(self.chain_id);
+        let price_symbol = format!("{native_symbol}USD");
+        let eth_quote = match self.price_feed.get_price(&price_symbol).await {
+            Ok(q) => q,
+            Err(e) => {
+                tracing::warn!(
+                    target: "price_feed",
+                    error = %e,
+                    symbol = %price_symbol,
+                    "Price fetch failed; continuing with placeholder quote"
+                );
+                PriceQuote {
+                    price: 0.0,
+                    source: "unavailable".into(),
+                }
+            }
+        };
         let profit_eth_f64 = self.amount_to_display(gross_profit_wei, self.wrapped_native);
         let gas_cost_eth_f64 = self.amount_to_display(gas_cost_wei, self.wrapped_native);
         let net_profit_eth_f64 = self.amount_to_display(net_profit_wei, self.wrapped_native);
@@ -989,7 +1087,7 @@ struct BundleParts {
     attack_value_eth: U256,
     bribe_wei: U256,
     front_run: Option<FrontRunTx>,
-    approval: Option<ApproveTx>,
+    approvals: Vec<ApproveTx>,
     backrun: BackrunTx,
     executor_request: Option<TransactionRequest>,
 }
@@ -1026,17 +1124,19 @@ mod tests {
             value: U256::ZERO,
             request: TransactionRequest::default(),
             expected_tokens: U256::ZERO,
+            input_token: Address::ZERO,
+            input_amount: U256::ZERO,
         });
-        let mut approval = Some(ApproveTx {
+        let mut approvals = vec![ApproveTx {
             raw: Vec::new(),
             request: TransactionRequest::default(),
-        });
+        }];
         let mut main = TransactionRequest::default();
 
-        StrategyExecutor::apply_nonce_plan(&lease, &mut front, &mut approval, &mut main).unwrap();
+        StrategyExecutor::apply_nonce_plan(&lease, &mut front, &mut approvals, &mut main).unwrap();
 
         assert_eq!(front.unwrap().request.nonce, Some(7));
-        assert_eq!(approval.unwrap().request.nonce, Some(8));
+        assert_eq!(approvals[0].request.nonce, Some(8));
         assert_eq!(main.nonce, Some(9));
     }
 
@@ -1048,7 +1148,7 @@ mod tests {
             count: 1,
         };
         let mut main = TransactionRequest::default();
-        StrategyExecutor::apply_nonce_plan(&lease, &mut None, &mut None, &mut main).unwrap();
+        StrategyExecutor::apply_nonce_plan(&lease, &mut None, &mut Vec::new(), &mut main).unwrap();
         assert_eq!(main.nonce, Some(42));
     }
 }

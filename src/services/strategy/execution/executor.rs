@@ -31,6 +31,7 @@ pub struct BundleSender {
     provider: HttpProvider,
     dry_run: bool,
     relay_url: String,
+    mev_share_relay_url: String,
     signer: PrivateKeySigner,
 }
 
@@ -42,12 +43,14 @@ impl BundleSender {
         provider: HttpProvider,
         dry_run: bool,
         relay_url: String,
+        mev_share_relay_url: String,
         signer: PrivateKeySigner,
     ) -> Self {
         Self {
             provider,
             dry_run,
             relay_url,
+            mev_share_relay_url,
             signer,
         }
     }
@@ -90,11 +93,11 @@ impl BundleSender {
         let mut attempts = 0;
         loop {
             attempts += 1;
-            let resp = client
-                .post(&self.relay_url)
-                .header("Content-Type", "application/json")
-                .header(
-                    "X-Flashbots-Signature",
+        let resp = client
+            .post(&self.mev_share_relay_url)
+            .header("Content-Type", "application/json")
+            .header(
+                "X-Flashbots-Signature",
                     HeaderValue::from_str(&sig_header).map_err(|e| {
                         AppError::Connection(format!("Signature header invalid: {}", e))
                     })?,
@@ -107,7 +110,7 @@ impl BundleSender {
             let status = resp.status();
             let body_text = resp.text().await.unwrap_or_default();
             if status.is_success() {
-                tracing::info!(target: "executor", relay=%self.relay_url, block=block_number + 1, legs=body.len(), body=%body_text, "MEV-Share bundle submitted");
+                tracing::info!(target: "executor", relay=%self.mev_share_relay_url, block=block_number + 1, legs=body.len(), body=%body_text, "MEV-Share bundle submitted");
                 break;
             } else if attempts < 2 {
                 tracing::warn!(target: "executor", status=%status, body=%body_text, attempt=attempts, "Relay rejected mev_sendBundle, retrying");

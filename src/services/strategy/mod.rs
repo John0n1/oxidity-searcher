@@ -18,3 +18,4 @@ pub use state::{inventory, portfolio};
 
 pub mod routers;
 pub mod simulation;
+pub mod router_discovery;

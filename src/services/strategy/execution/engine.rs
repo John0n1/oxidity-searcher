@@ -17,9 +17,11 @@ use crate::network::nonce::NonceManager;
 use crate::network::price_feed::PriceFeed;
 use crate::network::provider::{HttpProvider, WsProvider};
 use crate::network::reserves::ReserveCache;
+use crate::services::strategy::router_discovery::RouterDiscovery;
 use alloy::primitives::Address;
+use dashmap::DashSet;
+use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
-use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -38,6 +40,8 @@ pub struct Engine {
     price_feed: PriceFeed,
     chain_id: u64,
     relay_url: String,
+    mev_share_relay_url: String,
+    wallet_signer: PrivateKeySigner,
     bundle_signer: PrivateKeySigner,
     executor: Option<Address>,
     executor_bribe_bps: u64,
@@ -46,13 +50,17 @@ pub struct Engine {
     flashloan_providers: Vec<crate::services::strategy::strategy::FlashloanProvider>,
     aave_pool: Option<Address>,
     max_gas_price_gwei: u64,
+    gas_cap_multiplier_bps: u64,
     simulator: Simulator,
     token_manager: Arc<TokenManager>,
     metrics_port: u16,
     strategy_enabled: bool,
     slippage_bps: u64,
-    router_allowlist: HashSet<Address>,
+    router_allowlist: Arc<DashSet<Address>>,
+    router_discovery: Option<Arc<RouterDiscovery>>,
+    skip_log_every: u64,
     wrapped_native: Address,
+    allow_non_wrapped_swaps: bool,
     mev_share_stream_url: String,
     mev_share_history_limit: u32,
     mev_share_enabled: bool,
@@ -75,6 +83,8 @@ impl Engine {
         price_feed: PriceFeed,
         chain_id: u64,
         relay_url: String,
+        mev_share_relay_url: String,
+        wallet_signer: PrivateKeySigner,
         bundle_signer: PrivateKeySigner,
         executor: Option<Address>,
         executor_bribe_bps: u64,
@@ -83,13 +93,17 @@ impl Engine {
         flashloan_providers: Vec<crate::services::strategy::strategy::FlashloanProvider>,
         aave_pool: Option<Address>,
         max_gas_price_gwei: u64,
+        gas_cap_multiplier_bps: u64,
         simulator: Simulator,
         token_manager: Arc<TokenManager>,
         metrics_port: u16,
         strategy_enabled: bool,
         slippage_bps: u64,
-        router_allowlist: HashSet<Address>,
+        router_allowlist: Arc<DashSet<Address>>,
+        router_discovery: Option<Arc<RouterDiscovery>>,
+        skip_log_every: u64,
         wrapped_native: Address,
+        allow_non_wrapped_swaps: bool,
         mev_share_stream_url: String,
         mev_share_history_limit: u32,
         mev_share_enabled: bool,
@@ -109,6 +123,8 @@ impl Engine {
             price_feed,
             chain_id,
             relay_url,
+            mev_share_relay_url,
+            wallet_signer,
             bundle_signer,
             executor,
             executor_bribe_bps,
@@ -117,13 +133,17 @@ impl Engine {
             flashloan_providers,
             aave_pool,
             max_gas_price_gwei,
+            gas_cap_multiplier_bps,
             simulator,
             token_manager,
             metrics_port,
             strategy_enabled,
             slippage_bps,
             router_allowlist,
+            router_discovery,
+            skip_log_every,
             wrapped_native,
+            allow_non_wrapped_swaps,
             mev_share_stream_url,
             mev_share_history_limit,
             mev_share_enabled,
@@ -134,6 +154,25 @@ impl Engine {
     }
 
     pub async fn run(self) -> Result<(), AppError> {
+        if self.flashloan_enabled && self.executor.is_none() {
+            return Err(AppError::Config(
+                "flashloan_enabled requires executor_address".into(),
+            ));
+        }
+        if let Some(exec) = self.executor {
+            let code = self
+                .http_provider
+                .get_code_at(exec)
+                .await
+                .map_err(|e| AppError::Initialization(format!("Executor code check failed: {e}")))?;
+            if code.is_empty() {
+                return Err(AppError::Config(format!(
+                    "executor_address {:#x} has no code deployed",
+                    exec
+                )));
+            }
+        }
+
         let stats = Arc::new(StrategyStats::default());
         let (tx_sender, tx_receiver) = mpsc::channel::<StrategyWork>(INGEST_QUEUE_BOUND);
         let (block_sender, block_receiver) = broadcast::channel(32);
@@ -153,6 +192,7 @@ impl Engine {
             self.http_provider.clone(),
             self.dry_run,
             self.relay_url.clone(),
+            self.mev_share_relay_url.clone(),
             self.bundle_signer.clone(),
         ));
         let reserve_cache = Arc::new(ReserveCache::new(self.http_provider.clone()));
@@ -188,16 +228,20 @@ impl Engine {
                 self.price_feed,
                 self.chain_id,
                 self.max_gas_price_gwei,
+                self.gas_cap_multiplier_bps,
                 self.simulator,
                 self.token_manager.clone(),
                 stats.clone(),
-                self.bundle_signer.clone(),
+                self.wallet_signer.clone(),
                 self.nonce_manager.clone(),
                 self.slippage_bps,
                 self.http_provider.clone(),
                 self.dry_run,
                 self.router_allowlist.clone(),
+                self.router_discovery.clone(),
+                self.skip_log_every,
                 self.wrapped_native,
+                self.allow_non_wrapped_swaps,
                 self.executor,
                 self.executor_bribe_bps,
                 self.executor_bribe_recipient,

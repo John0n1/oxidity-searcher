@@ -88,7 +88,8 @@ impl MevShareClient {
             base_url,
             history_url,
             client: Client::builder()
-                .timeout(Duration::from_secs(10))
+                // Use a connect timeout, but keep the stream alive beyond 15s SSE pings.
+                .connect_timeout(Duration::from_secs(10))
                 .build()
                 .unwrap(),
             chain_id,
@@ -181,7 +182,8 @@ impl MevShareClient {
         while let Some(chunk) = stream.next().await {
             let chunk =
                 chunk.map_err(|e| AppError::Connection(format!("SSE chunk error: {}", e)))?;
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            let normalized = String::from_utf8_lossy(&chunk);
+            buffer.push_str(&normalized.replace("\r\n", "\n"));
 
             while let Some(idx) = buffer.find("\n\n") {
                 let event = buffer[..idx].to_string();

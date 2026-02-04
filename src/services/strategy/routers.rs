@@ -46,6 +46,18 @@ sol! {
 
     #[derive(Debug, PartialEq, Eq)]
     #[sol(rpc)]
+    contract UniversalRouter {
+        function execute(bytes commands, bytes[] inputs) external payable;
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
+    contract UniversalRouterDeadline {
+        function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable;
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
     contract ERC20 {
         function balanceOf(address) external view returns (uint256);
         function allowance(address owner, address spender) external view returns (uint256);

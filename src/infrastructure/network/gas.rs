@@ -14,6 +14,7 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct GasOracle {
     provider: HttpProvider,
+    chain_id: u64,
 }
 
 #[derive(Debug)]
@@ -33,8 +34,8 @@ pub struct GasFees {
 }
 
 impl GasOracle {
-    pub fn new(provider: HttpProvider) -> Self {
-        Self { provider }
+    pub fn new(provider: HttpProvider, chain_id: u64) -> Self {
+        Self { provider, chain_id }
     }
 
     pub async fn estimate_eip1559_fees(&self) -> Result<GasFees, AppError> {
@@ -140,11 +141,13 @@ impl GasOracle {
     }
 
     async fn fallback_estimate(&self) -> Result<GasFees, AppError> {
-        // 1) Try Etherscan gas oracle if API key present
-        if let Ok(key) = env::var("ETHERSCAN_API_KEY") {
-            if !key.is_empty() {
-                if let Ok(fees) = self.etherscan_gas_oracle(&key).await {
-                    return Ok(fees);
+        // 1) Try Etherscan gas oracle if API key present (mainnet only)
+        if self.chain_id == 1 {
+            if let Ok(key) = env::var("ETHERSCAN_API_KEY") {
+                if !key.is_empty() {
+                    if let Ok(fees) = self.etherscan_gas_oracle(&key).await {
+                        return Ok(fees);
+                    }
                 }
             }
         }
