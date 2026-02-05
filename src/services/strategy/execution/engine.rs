@@ -19,9 +19,9 @@ use crate::network::provider::{HttpProvider, WsProvider};
 use crate::network::reserves::ReserveCache;
 use crate::services::strategy::router_discovery::RouterDiscovery;
 use alloy::primitives::Address;
-use dashmap::DashSet;
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
+use dashmap::DashSet;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -160,11 +160,9 @@ impl Engine {
             ));
         }
         if let Some(exec) = self.executor {
-            let code = self
-                .http_provider
-                .get_code_at(exec)
-                .await
-                .map_err(|e| AppError::Initialization(format!("Executor code check failed: {e}")))?;
+            let code = self.http_provider.get_code_at(exec).await.map_err(|e| {
+                AppError::Initialization(format!("Executor code check failed: {e}"))
+            })?;
             if code.is_empty() {
                 return Err(AppError::Config(format!(
                     "executor_address {:#x} has no code deployed",

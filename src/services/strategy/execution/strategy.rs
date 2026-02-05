@@ -2,12 +2,12 @@
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
 
 use crate::common::error::AppError;
-use crate::domain::constants;
 use crate::core::executor::SharedBundleSender;
 use crate::core::portfolio::PortfolioManager;
 use crate::core::safety::SafetyGuard;
 use crate::core::simulation::Simulator;
 use crate::data::db::Database;
+use crate::domain::constants;
 use crate::infrastructure::data::token_manager::TokenManager;
 use crate::network::gas::GasOracle;
 use crate::network::mev_share::MevShareHint;
@@ -154,7 +154,8 @@ pub struct StrategyExecutor {
     pub(in crate::services::strategy) http_provider: HttpProvider,
     pub(in crate::services::strategy) dry_run: bool,
     pub(in crate::services::strategy) router_allowlist: Arc<DashSet<Address>>,
-    pub(in crate::services::strategy) router_discovery: Option<Arc<crate::services::strategy::router_discovery::RouterDiscovery>>,
+    pub(in crate::services::strategy) router_discovery:
+        Option<Arc<crate::services::strategy::router_discovery::RouterDiscovery>>,
     pub(in crate::services::strategy) skip_log_every: u64,
     pub(in crate::services::strategy) wrapped_native: Address,
     pub(in crate::services::strategy) allow_non_wrapped_swaps: bool,
@@ -314,45 +315,49 @@ impl StrategyExecutor {
 
     pub(in crate::services::strategy) fn log_skip(&self, reason: &str, detail: &str) {
         let count = match reason {
-            "unknown_router" => self
-                .stats
-                .skip_unknown_router
-                .fetch_add(1, Ordering::Relaxed)
-                + 1,
-            "decode_failed" => self
-                .stats
-                .skip_decode_failed
-                .fetch_add(1, Ordering::Relaxed)
-                + 1,
-            "zero_amount_or_no_wrapped_native" => self
-                .stats
-                .skip_missing_wrapped
-                .fetch_add(1, Ordering::Relaxed)
-                + 1,
-            "non_wrapped_balance" => self
-                .stats
-                .skip_non_wrapped_balance
-                .fetch_add(1, Ordering::Relaxed)
-                + 1,
-            "gas_price_cap" => self.stats.skip_gas_cap.fetch_add(1, Ordering::Relaxed) + 1,
-            "simulation_failed" => {
-                self.stats.skip_sim_failed.fetch_add(1, Ordering::Relaxed) + 1
+            "unknown_router" => {
+                self.stats
+                    .skip_unknown_router
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1
             }
+            "decode_failed" => {
+                self.stats
+                    .skip_decode_failed
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1
+            }
+            "zero_amount_or_no_wrapped_native" => {
+                self.stats
+                    .skip_missing_wrapped
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1
+            }
+            "non_wrapped_balance" => {
+                self.stats
+                    .skip_non_wrapped_balance
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1
+            }
+            "gas_price_cap" => self.stats.skip_gas_cap.fetch_add(1, Ordering::Relaxed) + 1,
+            "simulation_failed" => self.stats.skip_sim_failed.fetch_add(1, Ordering::Relaxed) + 1,
             "profit_or_gas_guard" => {
                 self.stats.skip_profit_guard.fetch_add(1, Ordering::Relaxed) + 1
             }
-            "unsupported_router_type" => self
-                .stats
-                .skip_unsupported_router
-                .fetch_add(1, Ordering::Relaxed)
-                + 1,
+            "unsupported_router_type" => {
+                self.stats
+                    .skip_unsupported_router
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1
+            }
             "token_call" => self.stats.skip_token_call.fetch_add(1, Ordering::Relaxed) + 1,
             "toxic_token" => self.stats.skip_toxic_token.fetch_add(1, Ordering::Relaxed) + 1,
-            "insufficient_balance" => self
-                .stats
-                .skip_insufficient_balance
-                .fetch_add(1, Ordering::Relaxed)
-                + 1,
+            "insufficient_balance" => {
+                self.stats
+                    .skip_insufficient_balance
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1
+            }
             _ => 0,
         };
 
@@ -393,7 +398,10 @@ impl StrategyExecutor {
         }
     }
 
-    pub(in crate::services::strategy) fn execution_router(&self, observed: &ObservedSwap) -> Address {
+    pub(in crate::services::strategy) fn execution_router(
+        &self,
+        observed: &ObservedSwap,
+    ) -> Address {
         if Some(observed.router) == self.universal_router {
             match observed.router_kind {
                 crate::services::strategy::decode::RouterKind::V2Like => {

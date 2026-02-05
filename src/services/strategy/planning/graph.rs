@@ -78,22 +78,23 @@ impl QuoteGraph {
             let mut next: Vec<Path> = Vec::new();
             for path in frontier.into_iter() {
                 // Expand outgoing edges from current token.
-                for edge in self.edges.iter().filter(|e| e.token_in == path.current_token) {
+                for edge in self
+                    .edges
+                    .iter()
+                    .filter(|e| e.token_in == path.current_token)
+                {
                     // Size adjust expected_out linearly; edge.amount_in > 0 guaranteed by construction.
                     if edge.amount_in.is_zero() {
                         continue;
                     }
-                    let scaled_out = path
-                        .current_amount
-                        .saturating_mul(edge.expected_out)
-                        / edge.amount_in;
+                    let scaled_out =
+                        path.current_amount.saturating_mul(edge.expected_out) / edge.amount_in;
                     if scaled_out.is_zero() {
                         continue;
                     }
                     // Basic liquidity ratio pruning.
-                    let ratio_ppm = scaled_out
-                        .saturating_mul(U256::from(1_000_000u64))
-                        / path.current_amount;
+                    let ratio_ppm =
+                        scaled_out.saturating_mul(U256::from(1_000_000u64)) / path.current_amount;
                     if ratio_ppm < U256::from(opts.min_ratio_ppm) {
                         continue;
                     }
@@ -103,10 +104,7 @@ impl QuoteGraph {
                     if gas == 0 {
                         gas = edge.gas_overhead;
                     }
-                    let min_out = edge
-                        .min_out
-                        .saturating_mul(path.current_amount)
-                        / edge.amount_in;
+                    let min_out = edge.min_out.saturating_mul(path.current_amount) / edge.amount_in;
                     new_legs.push(QuoteEdge {
                         venue: edge.venue,
                         pool: edge.pool,
@@ -123,8 +121,7 @@ impl QuoteGraph {
 
                     let mut score = scaled_out;
                     // Subtract paid in (first leg amount) and gas cost.
-                    let gas_cost = U256::from(opts.gas_price)
-                        .saturating_mul(U256::from(gas));
+                    let gas_cost = U256::from(opts.gas_price).saturating_mul(U256::from(gas));
                     score = score.saturating_sub(amount_in);
                     score = score.saturating_sub(gas_cost);
 

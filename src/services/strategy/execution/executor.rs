@@ -93,11 +93,11 @@ impl BundleSender {
         let mut attempts = 0;
         loop {
             attempts += 1;
-        let resp = client
-            .post(&self.mev_share_relay_url)
-            .header("Content-Type", "application/json")
-            .header(
-                "X-Flashbots-Signature",
+            let resp = client
+                .post(&self.mev_share_relay_url)
+                .header("Content-Type", "application/json")
+                .header(
+                    "X-Flashbots-Signature",
                     HeaderValue::from_str(&sig_header).map_err(|e| {
                         AppError::Connection(format!("Signature header invalid: {}", e))
                     })?,

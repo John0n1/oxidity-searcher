@@ -108,7 +108,13 @@ impl RouterDiscovery {
             let source = source.to_string();
             tokio::spawn(async move {
                 let _ = db
-                    .record_router_observation(chain_id, &addr, &source, "unknown_router", increment)
+                    .record_router_observation(
+                        chain_id,
+                        &addr,
+                        &source,
+                        "unknown_router",
+                        increment,
+                    )
                     .await;
             });
         }
@@ -227,9 +233,7 @@ impl RouterDiscovery {
             }
             let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("");
             match name {
-                "swapExactTokensForTokens"
-                | "swapExactETHForTokens"
-                | "swapExactTokensForETH" => {
+                "swapExactTokensForTokens" | "swapExactETHForTokens" | "swapExactTokensForETH" => {
                     has_v2 = true;
                 }
                 "exactInput" | "exactInputSingle" => {

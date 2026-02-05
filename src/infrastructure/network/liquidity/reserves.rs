@@ -8,7 +8,7 @@ use crate::services::strategy::routers::{
     CurveRegistry, UniV2Router,
 };
 use crate::services::strategy::time_utils::current_unix;
-use alloy::primitives::{Address, B256, I256, U256, Bytes, keccak256};
+use alloy::primitives::{Address, B256, Bytes, I256, U256, keccak256};
 use alloy::providers::Provider;
 use alloy::rpc::types::eth::{Filter, Log};
 use alloy::sol;
@@ -21,7 +21,7 @@ use std::fs;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, sleep, timeout};
 
 sol! {
     #[derive(Debug, PartialEq, Eq)]
@@ -186,7 +186,10 @@ impl ReserveCache {
             (&self.curve_pool_coins, &self.curve_pool_decimals)
         };
         if let Some(coins) = map_addr.get(&pool) {
-            let decs = map_dec.get(&pool).map(|d| d.value().clone()).unwrap_or_default();
+            let decs = map_dec
+                .get(&pool)
+                .map(|d| d.value().clone())
+                .unwrap_or_default();
             return Some((coins.value().clone(), decs));
         }
 
@@ -351,7 +354,17 @@ impl ReserveCache {
     }
 
     pub async fn run_v2_log_listener(self: Arc<Self>, ws: WsProvider) {
-        let filter = Filter::new().event("Sync(uint112,uint112)");
+        // Seed a small set of pairs if none are known yet.
+        if self.v2_reserves.is_empty() {
+            self.seed_pairs_from_ws(ws.clone()).await;
+        }
+
+        // Restrict to known pair addresses to avoid a firehose of all V2 pairs on chain.
+        let mut filter = Filter::new().event("Sync(uint112,uint112)");
+        let addresses: Vec<Address> = self.v2_reserves.iter().map(|entry| entry.key().0).collect();
+        if !addresses.is_empty() {
+            filter = filter.address(addresses);
+        }
         loop {
             match ws.subscribe_logs(&filter).await {
                 Ok(sub) => {
@@ -369,6 +382,27 @@ impl ReserveCache {
                 }
             }
             sleep(Duration::from_secs(2)).await;
+        }
+    }
+
+    /// One-time bounded discovery: listen briefly for Sync logs without address filter to seed pairs.
+    async fn seed_pairs_from_ws(self: &Arc<Self>, ws: WsProvider) {
+        let filter = Filter::new().event("Sync(uint112,uint112)");
+        let Ok(sub) = ws.subscribe_logs(&filter).await else {
+            return;
+        };
+        let mut stream = sub.into_stream();
+        let max_samples = 30usize;
+        let window = Duration::from_secs(3);
+        let start = std::time::Instant::now();
+        while self.v2_reserves.len() < max_samples && start.elapsed() < window {
+            match timeout(Duration::from_millis(500), stream.next()).await {
+                Ok(Some(log)) => {
+                    // Populate reserves/pair maps; schedule lookups if tokens unknown.
+                    let _ = self.handle_v2_log(log).await;
+                }
+                _ => break,
+            }
         }
     }
 

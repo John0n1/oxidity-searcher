@@ -293,6 +293,8 @@ impl StrategyExecutor {
             new_raw.push(victim);
         }
 
+        // Approvals are signed only when not wrapped inside the executor. The wrapper path
+        // encodes approvals internally, so `plan.approvals` is empty in that case.
         for mut approval in plan.approvals {
             let next = approval.nonce.unwrap_or(nonce);
             if next < nonce || next >= lease_end {

@@ -2,12 +2,12 @@
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
 
 pub mod bundles;
+pub mod graph;
 pub mod routes;
 pub mod swaps;
-pub mod graph;
 
-pub use routes::{RouteLeg, RoutePlan, RouteVenue};
 pub use graph::{QuoteEdge, QuoteGraph, QuoteSearchOptions};
+pub use routes::{RouteLeg, RoutePlan, RouteVenue};
 
 use crate::common::constants::{default_balancer_vault_for_chain, default_routers_for_chain};
 use crate::common::error::AppError;
@@ -17,13 +17,13 @@ use crate::network::gas::GasFees;
 use crate::services::strategy::decode::{
     ObservedSwap, RouterKind, encode_v3_path, reverse_v3_path, target_token,
 };
-use crate::services::strategy::time_utils::current_unix;
 use crate::services::strategy::routers::{
     AavePool, AaveV2LendingPool, BalancerProtocolFees, BalancerVault, BalancerVaultFees,
     CurvePoolSwap,
 };
 use crate::services::strategy::routers::{ERC20, UniV2Router, UniV3Router};
 use crate::services::strategy::strategy::{FlashloanProvider, StrategyExecutor};
+use crate::services::strategy::time_utils::current_unix;
 use alloy::eips::eip2930::AccessList;
 use alloy::primitives::{Address, B256, Bytes, I256, TxKind, U256};
 use alloy::rpc::types::eth::{TransactionInput, TransactionRequest};
@@ -273,10 +273,7 @@ impl StrategyExecutor {
             return Ok(None);
         }
 
-        let approval_gas: u64 = approvals
-            .iter()
-            .map(|a| a.request.gas.unwrap_or(0))
-            .sum();
+        let approval_gas: u64 = approvals.iter().map(|a| a.request.gas.unwrap_or(0)).sum();
         let mut gas_limit = backrun
             .request
             .gas
@@ -367,9 +364,11 @@ impl StrategyExecutor {
         let routers = default_routers_for_chain(self.chain_id);
 
         // UniV2 / Sushi (reuse V2 cache)
-        if let Some(out) = self.reserve_cache.quote_v2_path(&[token_in, token_out], amount_in) {
-            let min_out = out
-                .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+        if let Some(out) = self
+            .reserve_cache
+            .quote_v2_path(&[token_in, token_out], amount_in)
+        {
+            let min_out = out.saturating_mul(U256::from(10_000u64 - self.slippage_bps))
                 / U256::from(10_000u64);
             if let Some(router) = routers.get("uniswap_v2_router02").copied() {
                 graph.add_edge(QuoteEdge {
@@ -410,8 +409,7 @@ impl StrategyExecutor {
                 .quote_curve_pool(pool, token_in, token_out, amount_in)
                 .await
             {
-                let min_out = out
-                    .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+                let min_out = out.saturating_mul(U256::from(10_000u64 - self.slippage_bps))
                     / U256::from(10_000u64);
                 let mut param_bytes = Vec::with_capacity(3);
                 param_bytes.push(if underlying { 1 } else { 0 });
@@ -440,8 +438,7 @@ impl StrategyExecutor {
                 .quote_balancer_single(pool, token_in, token_out, amount_in)
                 .await
             {
-                let min_out = out
-                    .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+                let min_out = out.saturating_mul(U256::from(10_000u64 - self.slippage_bps))
                     / U256::from(10_000u64);
                 graph.add_edge(QuoteEdge {
                     venue: RouteVenue::BalancerPool,
@@ -461,7 +458,10 @@ impl StrategyExecutor {
 
         // Flash legs: allow Balancer / Aave flash loans if enabled
         if self.flashloan_enabled {
-            if self.flashloan_providers.contains(&FlashloanProvider::Balancer) {
+            if self
+                .flashloan_providers
+                .contains(&FlashloanProvider::Balancer)
+            {
                 if let Some(vault) = default_balancer_vault_for_chain(self.chain_id) {
                     graph.add_edge(QuoteEdge {
                         venue: RouteVenue::BalancerFlash,
@@ -478,8 +478,12 @@ impl StrategyExecutor {
                     });
                 }
             }
-            if self.flashloan_providers.contains(&FlashloanProvider::AaveV3)
-                || self.flashloan_providers.contains(&FlashloanProvider::AaveV2)
+            if self
+                .flashloan_providers
+                .contains(&FlashloanProvider::AaveV3)
+                || self
+                    .flashloan_providers
+                    .contains(&FlashloanProvider::AaveV2)
             {
                 if let Some(pool) = self.aave_pool {
                     graph.add_edge(QuoteEdge {
@@ -519,7 +523,10 @@ impl StrategyExecutor {
             beam_size: 8,
             min_ratio_ppm: 900,
         };
-        graph.k_best(token_in, token_out, amount_in, 1, opts).into_iter().next()
+        graph
+            .k_best(token_in, token_out, amount_in, 1, opts)
+            .into_iter()
+            .next()
     }
 
     // Exposed for integration testing of encoded flashloan callbacks.
@@ -733,87 +740,94 @@ impl StrategyExecutor {
 
         let (expected_tokens, calldata, tx_value, gas_limit, access_list, input_token) =
             match observed.router_kind {
-            RouterKind::V2Like => {
-                let path = if observed.path.first().copied() == Some(self.wrapped_native) {
-                    vec![self.wrapped_native, target_token]
-                } else {
-                    observed.path.clone()
-                };
-                let swap = self
-                    .build_v2_swap(
-                        exec_router,
-                        path.clone(),
-                        amount_in,
-                        self.slippage_bps,
-                        gas_limit_hint,
-                        11,
-                        10,
-                        160_000,
-                        false,
-                        self.signer.address(),
-                        false,
+                RouterKind::V2Like => {
+                    let path = if observed.path.first().copied() == Some(self.wrapped_native) {
+                        vec![self.wrapped_native, target_token]
+                    } else {
+                        observed.path.clone()
+                    };
+                    let swap = self
+                        .build_v2_swap(
+                            exec_router,
+                            path.clone(),
+                            amount_in,
+                            self.slippage_bps,
+                            gas_limit_hint,
+                            11,
+                            10,
+                            160_000,
+                            false,
+                            self.signer.address(),
+                            false,
+                        )
+                        .await?;
+                    let Some(swap) = swap else {
+                        return Ok(None);
+                    };
+                    (
+                        swap.expected_out,
+                        swap.calldata,
+                        swap.tx_value,
+                        swap.gas_limit,
+                        swap.access_list,
+                        *path.first().unwrap_or(&self.wrapped_native),
                     )
-                    .await?;
-                let Some(swap) = swap else {
-                    return Ok(None);
-                };
-                (
-                    swap.expected_out,
-                    swap.calldata,
-                    swap.tx_value,
-                    swap.gas_limit,
-                    swap.access_list,
-                    *path.first().unwrap_or(&self.wrapped_native),
-                )
-            }
-            RouterKind::V3Like => {
-                if observed.path.len() < 2 {
-                    return Err(AppError::Strategy("V3 path too short".into()));
                 }
-                let recipient = self.signer.address();
-                let path_bytes = if let Some(p) = observed.v3_path.clone() {
-                    p
-                } else {
-                    encode_v3_path(&observed.path, &observed.v3_fees)
-                        .ok_or_else(|| AppError::Strategy("Encode V3 path failed".into()))?
-                };
-                let expected_tokens = self.quote_v3_path(&path_bytes, amount_in).await?;
-                let ratio_ppm = StrategyExecutor::price_ratio_ppm(expected_tokens, amount_in);
-                if ratio_ppm < U256::from(1_000u64) {
-                    return Ok(None);
+                RouterKind::V3Like => {
+                    if observed.path.len() < 2 {
+                        return Err(AppError::Strategy("V3 path too short".into()));
+                    }
+                    let recipient = self.signer.address();
+                    let path_bytes = if let Some(p) = observed.v3_path.clone() {
+                        p
+                    } else {
+                        encode_v3_path(&observed.path, &observed.v3_fees)
+                            .ok_or_else(|| AppError::Strategy("Encode V3 path failed".into()))?
+                    };
+                    let expected_tokens = self.quote_v3_path(&path_bytes, amount_in).await?;
+                    let ratio_ppm = StrategyExecutor::price_ratio_ppm(expected_tokens, amount_in);
+                    if ratio_ppm < U256::from(1_000u64) {
+                        return Ok(None);
+                    }
+                    let min_out = expected_tokens
+                        .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+                        / U256::from(10_000u64);
+                    let access_list =
+                        StrategyExecutor::build_access_list(exec_router, &observed.path);
+                    let calldata = self.build_v3_swap_payload(
+                        exec_router,
+                        path_bytes.clone(),
+                        amount_in,
+                        min_out,
+                        recipient,
+                    );
+                    let mut gas_limit = gas_limit_hint
+                        .saturating_mul(12)
+                        .checked_div(10)
+                        .unwrap_or(320_000);
+                    if gas_limit < 200_000 {
+                        gas_limit = 200_000;
+                    }
+                    let tx_value = if observed.path.first().copied() == Some(self.wrapped_native) {
+                        amount_in
+                    } else {
+                        U256::ZERO
+                    };
+                    let input_token = observed
+                        .path
+                        .first()
+                        .copied()
+                        .unwrap_or(self.wrapped_native);
+                    (
+                        expected_tokens,
+                        calldata,
+                        tx_value,
+                        gas_limit,
+                        access_list,
+                        input_token,
+                    )
                 }
-                let min_out = expected_tokens
-                    .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
-                    / U256::from(10_000u64);
-                let access_list =
-                    StrategyExecutor::build_access_list(exec_router, &observed.path);
-                let calldata = self.build_v3_swap_payload(
-                    exec_router,
-                    path_bytes.clone(),
-                    amount_in,
-                    min_out,
-                    recipient,
-                );
-                let mut gas_limit = gas_limit_hint
-                    .saturating_mul(12)
-                    .checked_div(10)
-                    .unwrap_or(320_000);
-                if gas_limit < 200_000 {
-                    gas_limit = 200_000;
-                }
-                let tx_value = if observed.path.first().copied() == Some(self.wrapped_native) {
-                    amount_in
-                } else {
-                    U256::ZERO
-                };
-                let input_token = observed
-                    .path
-                    .first()
-                    .copied()
-                    .unwrap_or(self.wrapped_native);
-                (expected_tokens, calldata, tx_value, gas_limit, access_list, input_token)
-            }
-        };
+            };
 
         let (raw, request, hash) = self
             .sign_swap_request(
@@ -889,11 +903,7 @@ impl StrategyExecutor {
                     expected_out_token = if has_wrapped {
                         target_token
                     } else {
-                        observed
-                            .path
-                            .last()
-                            .copied()
-                            .unwrap_or(target_token)
+                        observed.path.last().copied().unwrap_or(target_token)
                     };
                     let path = if has_wrapped {
                         vec![self.wrapped_native, target_token]
@@ -976,16 +986,8 @@ impl StrategyExecutor {
                             (exec_target, Bytes::from(approve_target), U256::ZERO),
                             (exec_router, forward_payload, U256::ZERO),
                             (exec_router, rev_payload, U256::ZERO),
-                            (
-                                exec_target,
-                                Bytes::from(reset_weth),
-                                U256::ZERO,
-                            ),
-                            (
-                                exec_target,
-                                Bytes::from(reset_target),
-                                U256::ZERO,
-                            ),
+                            (exec_target, Bytes::from(reset_weth), U256::ZERO),
+                            (exec_target, Bytes::from(reset_target), U256::ZERO),
                         ];
                         let (raw, req, hash, premium, overhead_gas) = self
                             .build_flashloan_transaction(
@@ -1239,8 +1241,7 @@ impl StrategyExecutor {
                             .copied()
                             .unwrap_or(self.wrapped_native)
                     };
-                    let router_contract =
-                        UniV2Router::new(exec_router, self.http_provider.clone());
+                    let router_contract = UniV2Router::new(exec_router, self.http_provider.clone());
                     let sell_path = if has_wrapped {
                         vec![target_token, self.wrapped_native]
                     } else {
@@ -1315,8 +1316,7 @@ impl StrategyExecutor {
                             .calldata()
                             .to_vec()
                     };
-                    let access_list =
-                        StrategyExecutor::build_access_list(exec_router, &sell_path);
+                    let access_list = StrategyExecutor::build_access_list(exec_router, &sell_path);
                     (U256::ZERO, expected_out, calldata, access_list)
                 }
                 RouterKind::V3Like => {
@@ -1435,7 +1435,6 @@ impl StrategyExecutor {
             })
         }
     }
-
 }
 // ------------------------------------------------------------------
 // Flashloan provider scoring
@@ -1600,8 +1599,8 @@ impl StrategyExecutor {
             .saturating_mul(premium_bps)
             .checked_div(U256::from(10_000u64))
             .unwrap_or(U256::MAX);
-        let gas_cost = U256::from(AAVE_V2_FLASHLOAN_OVERHEAD_GAS)
-            .saturating_mul(U256::from(max_fee_per_gas));
+        let gas_cost =
+            U256::from(AAVE_V2_FLASHLOAN_OVERHEAD_GAS).saturating_mul(U256::from(max_fee_per_gas));
         Ok(Some((
             premium.saturating_add(gas_cost),
             AAVE_V2_FLASHLOAN_OVERHEAD_GAS,

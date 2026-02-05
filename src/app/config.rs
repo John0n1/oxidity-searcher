@@ -542,10 +542,7 @@ impl GlobalSettings {
             parsed.set_path("");
             parsed.set_query(None);
             parsed.set_fragment(None);
-            return parsed
-                .to_string()
-                .trim_end_matches('/')
-                .to_string();
+            return parsed.to_string().trim_end_matches('/').to_string();
         }
         self.mev_share_stream_url.clone()
     }

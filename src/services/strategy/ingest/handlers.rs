@@ -193,8 +193,7 @@ impl StrategyExecutor {
             None => return Ok(None),
         };
 
-        let needed_nonces =
-            1u64 + parts.front_run.is_some() as u64 + parts.approvals.len() as u64;
+        let needed_nonces = 1u64 + parts.front_run.is_some() as u64 + parts.approvals.len() as u64;
         let lease = self.lease_nonces(needed_nonces).await?;
 
         let mut front_run = parts.front_run;
@@ -204,6 +203,12 @@ impl StrategyExecutor {
         let mut main_request = executor_request
             .clone()
             .unwrap_or_else(|| backrun.request.clone());
+
+        // If we're wrapping everything inside the executor, drop standalone approval txes to
+        // avoid double approvals (they are already encoded in the executor payload).
+        if executor_request.is_some() {
+            approvals.clear();
+        }
 
         Self::apply_nonce_plan(&lease, &mut front_run, &mut approvals, &mut main_request)?;
         if let Some(exec) = executor_request.as_mut() {
@@ -373,8 +378,10 @@ impl StrategyExecutor {
         self.portfolio
             .record_profit(self.chain_id, profit.gross_profit_wei, profit.gas_cost_wei);
 
-        let price_symbol =
-            format!("{}USD", crate::common::constants::native_symbol_for_chain(self.chain_id));
+        let price_symbol = format!(
+            "{}USD",
+            crate::common::constants::native_symbol_for_chain(self.chain_id)
+        );
         let _ = self
             .db
             .save_market_price(
@@ -442,8 +449,7 @@ impl StrategyExecutor {
             None => return Ok(None),
         };
 
-        let needed_nonces =
-            1u64 + parts.front_run.is_some() as u64 + parts.approvals.len() as u64;
+        let needed_nonces = 1u64 + parts.front_run.is_some() as u64 + parts.approvals.len() as u64;
         let lease = self.lease_nonces(needed_nonces).await?;
 
         let mut front_run = parts.front_run;
@@ -453,6 +459,11 @@ impl StrategyExecutor {
         let mut main_request = executor_request
             .clone()
             .unwrap_or_else(|| backrun.request.clone());
+
+        // Approvals are already embedded in the executor bundle; skip sending them as separate txes.
+        if executor_request.is_some() {
+            approvals.clear();
+        }
 
         Self::apply_nonce_plan(&lease, &mut front_run, &mut approvals, &mut main_request)?;
         if let Some(exec) = executor_request.as_mut() {
@@ -668,8 +679,10 @@ impl StrategyExecutor {
         self.portfolio
             .record_profit(self.chain_id, profit.gross_profit_wei, profit.gas_cost_wei);
 
-        let price_symbol =
-            format!("{}USD", crate::common::constants::native_symbol_for_chain(self.chain_id));
+        let price_symbol = format!(
+            "{}USD",
+            crate::common::constants::native_symbol_for_chain(self.chain_id)
+        );
         let _ = self
             .db
             .save_market_price(
@@ -727,18 +740,15 @@ impl StrategyExecutor {
             .next_base_fee_per_gas
             .saturating_add(gas_fees.max_priority_fee_per_gas);
         let fallback_dynamic = {
-            let scaled = base_plus_tip
-                .saturating_mul(self.gas_cap_multiplier_bps as u128)
-                / 10_000u128;
+            let scaled =
+                base_plus_tip.saturating_mul(self.gas_cap_multiplier_bps as u128) / 10_000u128;
             scaled
         };
         let base_dynamic = gas_fees
             .suggested_max_fee_per_gas
             .unwrap_or(fallback_dynamic);
         let balance_factor_bps = self.balance_cap_multiplier_bps(wallet_chain_balance);
-        let adjusted_dynamic = base_dynamic
-            .saturating_mul(balance_factor_bps as u128)
-            / 10_000u128;
+        let adjusted_dynamic = base_dynamic.saturating_mul(balance_factor_bps as u128) / 10_000u128;
         let dynamic_cap = U256::from(adjusted_dynamic).min(hard_cap);
         if U256::from(gas_fees.max_fee_per_gas) > dynamic_cap {
             self.log_skip(
@@ -787,17 +797,11 @@ impl StrategyExecutor {
 
         let mut attack_value_eth = U256::ZERO;
         let mut front_run: Option<FrontRunTx> = None;
-        let allow_front_run =
-            self.sandwich_attacks_enabled && (direction == SwapDirection::BuyWithEth || !has_wrapped);
+        let allow_front_run = self.sandwich_attacks_enabled
+            && (direction == SwapDirection::BuyWithEth || !has_wrapped);
         if allow_front_run {
             match self
-                .build_front_run_tx(
-                    observed_swap,
-                    &gas_fees,
-                    trade_balance,
-                    gas_limit_hint,
-                    0,
-                )
+                .build_front_run_tx(observed_swap, &gas_fees, trade_balance, gas_limit_hint, 0)
                 .await
             {
                 Ok(Some(f)) => {

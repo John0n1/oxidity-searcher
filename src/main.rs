@@ -2,8 +2,8 @@
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
 
 use alloy::signers::local::PrivateKeySigner;
-use dashmap::DashSet;
 use clap::Parser;
+use dashmap::DashSet;
 use futures::future::try_join_all;
 use oxidity_builder::app::config::GlobalSettings;
 use oxidity_builder::app::logging::setup_logging;
