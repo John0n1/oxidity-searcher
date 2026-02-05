@@ -54,6 +54,7 @@ pub struct GlobalSettings {
     pub executor_bribe_bps: u64,
     pub executor_bribe_recipient: Option<Address>,
     pub tokenlist_path: Option<String>,
+    pub address_registry_path: Option<String>,
     #[serde(default = "default_metrics_port")]
     pub metrics_port: u16,
     #[serde(default = "default_true")]
@@ -89,6 +90,8 @@ pub struct GlobalSettings {
     pub router_discovery_check_interval_secs: u64,
     #[serde(default = "default_router_discovery_auto_allow")]
     pub router_discovery_auto_allow: bool,
+    #[serde(default = "default_router_discovery_max_entries")]
+    pub router_discovery_max_entries: usize,
 
     // Per-chain maps
     pub router_allowlist_by_chain: Option<HashMap<String, HashMap<String, String>>>,
@@ -107,10 +110,10 @@ fn default_debug() -> bool {
     false
 }
 fn default_chain() -> Vec<u64> {
-    vec![1]
+    Vec::new()
 }
 fn default_max_gas() -> u64 {
-    200
+    0
 }
 fn default_true() -> bool {
     true
@@ -119,7 +122,7 @@ fn default_metrics_port() -> u16 {
     9000
 }
 fn default_slippage_bps() -> u64 {
-    50
+    0
 }
 fn default_gas_cap_multiplier_bps() -> u64 {
     12_000
@@ -158,7 +161,10 @@ fn default_router_discovery_check_interval_secs() -> u64 {
     300
 }
 fn default_router_discovery_auto_allow() -> bool {
-    true
+    false
+}
+fn default_router_discovery_max_entries() -> usize {
+    2000
 }
 
 fn deserialize_chain_list<'de, D>(deserializer: D) -> Result<Vec<u64>, D::Error>
@@ -244,6 +250,25 @@ impl GlobalSettings {
 
     pub fn load() -> Result<Self, AppError> {
         Self::load_with_path(None)
+    }
+
+    /// Best-effort primary HTTP RPC URL for chain auto-detection.
+    pub fn primary_http_url(&self) -> Option<String> {
+        // Prefer explicit map entry with smallest key
+        if let Some(map) = &self.rpc_urls {
+            if let Some((_, v)) = map.iter().min_by_key(|(k, _)| k.parse::<u64>().ok()) {
+                return Some(v.clone());
+            }
+            if let Some((_, v)) = map.iter().next() {
+                return Some(v.clone());
+            }
+        }
+        // Environment fallbacks
+        std::env::var("RPC_URL").ok().filter(|s| !s.is_empty()).or_else(|| {
+            std::env::var("RPC_URL_1")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
     }
 
     /// Helper to get RPC URL for a specific chain
@@ -336,6 +361,13 @@ impl GlobalSettings {
             .ok()
             .or_else(|| self.tokenlist_path.clone())
             .unwrap_or_else(|| "data/tokenlist.json".to_string())
+    }
+
+    pub fn address_registry_path(&self) -> String {
+        std::env::var("ADDRESS_REGISTRY_PATH")
+            .ok()
+            .or_else(|| self.address_registry_path.clone())
+            .unwrap_or_else(|| "data/address_registry.json".to_string())
     }
 
     pub fn database_url(&self) -> String {
@@ -732,7 +764,7 @@ mod tests {
     fn base_settings() -> GlobalSettings {
         GlobalSettings {
             debug: default_debug(),
-            chains: vec![1],
+            chains: Vec::new(),
             database_url: None,
             wallet_key: "0x0".to_string(),
             wallet_address: Address::ZERO,
@@ -753,6 +785,7 @@ mod tests {
             executor_bribe_bps: default_bribe_bps(),
             executor_bribe_recipient: None,
             tokenlist_path: None,
+            address_registry_path: None,
             metrics_port: default_metrics_port(),
             strategy_enabled: default_true(),
             strategy_workers: None,
@@ -772,6 +805,7 @@ mod tests {
             router_discovery_flush_every: default_router_discovery_flush_every(),
             router_discovery_check_interval_secs: default_router_discovery_check_interval_secs(),
             router_discovery_auto_allow: default_router_discovery_auto_allow(),
+            router_discovery_max_entries: default_router_discovery_max_entries(),
             router_allowlist_by_chain: None,
             chainlink_feeds_by_chain: None,
             chainlink_feeds_by_chain_eth: None,

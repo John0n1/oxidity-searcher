@@ -23,6 +23,7 @@ pub struct RouterDiscovery {
     min_hits: u64,
     flush_every: u64,
     check_interval: Duration,
+    max_entries: usize,
     state: Arc<DashMap<Address, DiscoveryState>>,
 }
 
@@ -46,6 +47,7 @@ impl RouterDiscovery {
         min_hits: u64,
         flush_every: u64,
         check_interval: Duration,
+        max_entries: usize,
     ) -> Self {
         Self {
             chain_id,
@@ -61,12 +63,22 @@ impl RouterDiscovery {
             min_hits: min_hits.max(1),
             flush_every: flush_every.max(1),
             check_interval,
+            max_entries: max_entries.max(1),
             state: Arc::new(DashMap::new()),
         }
     }
 
     pub fn record_unknown_router(&self, router: Address, source: &str) {
         if !self.enabled {
+            return;
+        }
+        if self.state.len() >= self.max_entries && !self.state.contains_key(&router) {
+            tracing::debug!(
+                target: "router_discovery",
+                len = self.state.len(),
+                max = self.max_entries,
+                "Router discovery at capacity; dropping new router"
+            );
             return;
         }
 

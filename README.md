@@ -104,7 +104,7 @@
 
 ## 11. Configuration
 
-- `config.toml` / `.dev`: wallet/bundle signer, routers per chain, Chainlink feeds, RPC/WS/IPC maps, slippage, gas caps, flash-loan toggle, sandwich toggle, MEV-Share enable/URL/history limit, metrics bind/token, executor address/bribe.
+- `config.toml` / `.dev`: wallet/bundle signer, routers per chain, Chainlink feeds, RPC/WS/IPC maps, slippage/gas caps (set to `0` for auto-tuned), flash-loan toggle, sandwich toggle, MEV-Share enable/URL/history limit, metrics bind/token, executor address/bribe, and `address_registry_path`.
 - Env overrides:
   - `ETHERSCAN_API_KEY`
   - `RPC_URL_n` / `WS_URL_n`
@@ -185,4 +185,9 @@
 
 ---
 
-Updated: **28/01/2026**
+Updated: **05/02/2026**
+
+### Mainnet operator notes (Nethermind + relays)
+- Enable Nethermind modules: `JsonRpc.EnabledModules = ["Eth","Trace","WebSockets"]`, `TraceStore.Enabled = true`, and expose IPC/WS locally for low-latency simulate/trace.
+- For mainnet bundle submission configure builders: Flashbots (`https://relay.flashbots.net`), Beaver, Titan, Ultrasound, Agnostic (builder0x69), bloXroute ethical. All use Flashbots-style signed headers.
+- Always provide `WALLET_KEY`, `BUNDLE_SIGNER_KEY`, `METRICS_TOKEN`, and RPC URLs via environment; repo configs are placeholders only.

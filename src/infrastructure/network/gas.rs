@@ -10,14 +10,16 @@ use alloy::rpc::types::eth::FeeHistory;
 use serde::Deserialize;
 use std::env;
 use std::time::Duration;
+use std::sync::Mutex;
 
 #[derive(Clone)]
 pub struct GasOracle {
     provider: HttpProvider,
     chain_id: u64,
+    last_good: std::sync::Arc<Mutex<Option<GasFees>>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GasFees {
     pub max_fee_per_gas: u128,
     pub max_priority_fee_per_gas: u128,
@@ -35,13 +37,26 @@ pub struct GasFees {
 
 impl GasOracle {
     pub fn new(provider: HttpProvider, chain_id: u64) -> Self {
-        Self { provider, chain_id }
+        Self { provider, chain_id, last_good: std::sync::Arc::new(Mutex::new(None)) }
     }
 
     pub async fn estimate_eip1559_fees(&self) -> Result<GasFees, AppError> {
         match self.with_retry_history().await {
-            Ok(history) => Self::fees_from_history(history),
-            Err(_) => self.fallback_estimate().await,
+            Ok(history) => {
+                let fees = Self::fees_from_history(history)?;
+                if let Ok(mut guard) = self.last_good.lock() {
+                    *guard = Some(fees.clone());
+                }
+                Ok(fees)
+            }
+            Err(_) => {
+                if let Ok(guard) = self.last_good.lock() {
+                    if let Some(fees) = guard.clone() {
+                        return Ok(fees);
+                    }
+                }
+                self.fallback_estimate().await
+            }
         }
     }
 }

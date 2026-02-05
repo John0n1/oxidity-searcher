@@ -97,7 +97,12 @@ impl StrategyExecutor {
                 expected_out
             };
 
-        let min_eth = U256::from(10_000_000_000_000_000u128);
+        let gas_floor = U256::from(180_000u64)
+            .saturating_mul(U256::from(gas_fees.max_fee_per_gas));
+        let min_eth = gas_floor
+            .saturating_mul(U256::from(120u64))
+            .checked_div(U256::from(100u64))
+            .unwrap_or(gas_floor);
         if expected_out < min_eth {
             return Ok(());
         }
@@ -113,7 +118,7 @@ impl StrategyExecutor {
         {
             return Ok(());
         }
-        let min_out = expected_out.saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+        let min_out = expected_out.saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
             / U256::from(10_000u64);
         let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 300);
 
@@ -137,10 +142,18 @@ impl StrategyExecutor {
                     nonce,
                 )
                 .await?;
-            let _ = self
+            if let Err(e) = self
                 .bundle_sender
                 .send_bundle(&[approval.raw.clone()], self.chain_id)
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    target: "inventory",
+                    error = %e,
+                    "Bundle submit failed for approval; falling back to public send"
+                );
+                let _ = self.bundle_sender.send_public_tx(&approval.raw).await;
+            }
         }
 
         let nonce_sell = nonce_cursor;
@@ -174,7 +187,14 @@ impl StrategyExecutor {
             )
             .await;
         let (raw, _, _) = self.sign_with_access_list(request, access_list).await?;
-        let _ = self.bundle_sender.send_bundle(&[raw], self.chain_id).await;
+        if let Err(e) = self.bundle_sender.send_bundle(&[raw.clone()], self.chain_id).await {
+            tracing::warn!(
+                target: "inventory",
+                error = %e,
+                "Bundle submit failed for inventory swap; falling back to public send"
+            );
+            let _ = self.bundle_sender.send_public_tx(&raw).await;
+        }
 
         Ok(())
     }

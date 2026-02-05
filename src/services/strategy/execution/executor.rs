@@ -152,6 +152,22 @@ impl BundleSender {
         }
     }
 
+    /// Broadcast a raw transaction directly to the public mempool.
+    pub async fn send_public_tx(&self, raw_tx: &[u8]) -> Result<(), AppError> {
+        if self.dry_run {
+            tracing::info!(target: "executor", "Dry-run: would send public tx");
+            return Ok(());
+        }
+        let res = self.provider.send_raw_transaction(raw_tx).await;
+        match res {
+            Ok(_) => Ok(()),
+            Err(e) => Err(AppError::Connection(format!(
+                "Public tx send failed: {}",
+                e
+            ))),
+        }
+    }
+
     async fn send_direct(&self, raw_txs: &[Vec<u8>]) -> Result<(), AppError> {
         for raw in raw_txs {
             let mut attempts = 0;
@@ -205,10 +221,13 @@ impl BundleSender {
         )
         .await?;
 
-        // Secondary: beaver (no auth) and titan (signed best-effort)
+        // Secondary: broader builder set, signed where supported
         let secondary = [
             ("https://rpc.beaverbuild.org", false, "beaver"),
             ("https://rpc.titanbuilder.xyz", true, "titan"),
+            ("https://rpc.ultrasound.money", true, "ultrasound"),
+            ("https://builder0x69.io", true, "agnostic"),
+            ("https://rpc.blxrbdn.com", true, "bloxroute"),
         ];
         for (url, with_sig, name) in secondary {
             if let Err(e) = self

@@ -9,6 +9,7 @@ use oxidity_builder::app::config::GlobalSettings;
 use oxidity_builder::app::logging::setup_logging;
 use oxidity_builder::domain::error::AppError;
 use oxidity_builder::infrastructure::data::db::Database;
+use oxidity_builder::infrastructure::data::address_registry::validate_address_map;
 use oxidity_builder::infrastructure::data::token_manager::TokenManager;
 use oxidity_builder::infrastructure::network::gas::GasOracle;
 use oxidity_builder::infrastructure::network::nonce::NonceManager;
@@ -20,6 +21,7 @@ use oxidity_builder::services::strategy::safety::SafetyGuard;
 use oxidity_builder::services::strategy::simulation::{SimulationBackend, Simulator};
 use std::str::FromStr;
 use std::sync::Arc;
+use alloy::providers::Provider;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Oxidity Builder")]
@@ -71,10 +73,6 @@ async fn main() -> Result<(), AppError> {
     let database_url = settings.database_url();
     let db = Database::new(&database_url).await?;
 
-    if settings.chains.is_empty() {
-        return Err(AppError::Config("No chains configured".into()));
-    }
-
     let wallet_signer = PrivateKeySigner::from_str(&settings.wallet_key)
         .map_err(|e| AppError::Config(format!("Invalid wallet key: {}", e)))?;
     let wallet_address = wallet_signer.address();
@@ -84,6 +82,25 @@ async fn main() -> Result<(), AppError> {
             settings.wallet_address, wallet_address
         )));
     }
+
+    // Auto-detect chain if not explicitly configured
+    let mut chains: Vec<u64> = if settings.chains.is_empty() {
+        if let Some(url) = settings.primary_http_url() {
+            let http = ConnectionFactory::http(&url)?;
+            let cid_u64: u64 = http
+                .get_chain_id()
+                .await
+                .map_err(|e| AppError::Connection(format!("chain_id detect failed: {e}")))?;
+            tracing::info!(target: "config", detected_chain = cid_u64, rpc = %url, "Auto-detected chain_id from RPC");
+            vec![cid_u64]
+        } else {
+            return Err(AppError::Config(
+                "No chains configured and no RPC_URL available to auto-detect".into(),
+            ));
+        }
+    } else {
+        settings.chains.clone()
+    };
 
     let relay_url = settings.flashbots_relay_url();
     let bundle_signer = PrivateKeySigner::from_str(&settings.bundle_signer_key())
@@ -115,7 +132,7 @@ async fn main() -> Result<(), AppError> {
 
     let mut engine_tasks = Vec::new();
 
-    for (idx, chain_id) in settings.chains.iter().copied().enumerate() {
+    for (idx, chain_id) in chains.iter().copied().enumerate() {
         let ipc_url = settings.get_ipc_url(chain_id);
         let (ws_provider, http_provider) = if let Some(ipc_path) = ipc_url {
             let ipc = ConnectionFactory::ipc(&ipc_path).await.map_err(|e| {
@@ -153,7 +170,9 @@ async fn main() -> Result<(), AppError> {
         let safety_guard = Arc::new(SafetyGuard::new());
         let gas_oracle = GasOracle::new(http_provider.clone(), chain_id);
 
-        let chainlink_feeds = settings.chainlink_feeds_for_chain(chain_id)?;
+        let chainlink_feeds_raw = settings.chainlink_feeds_for_chain(chain_id)?;
+        let chainlink_feeds =
+            validate_address_map(&http_provider, chainlink_feeds_raw, "chainlink_feeds").await;
         if chainlink_feeds.is_empty() {
             tracing::warn!("No Chainlink feeds configured for chain {}", chain_id);
         }
@@ -194,13 +213,14 @@ async fn main() -> Result<(), AppError> {
                     settings.router_discovery_min_hits,
                     settings.router_discovery_flush_every,
                     settings.router_discovery_check_interval(),
+                    settings.router_discovery_max_entries,
                 ),
             ))
         } else {
             None
         };
 
-        let metrics_port = if settings.chains.len() > 1 {
+        let metrics_port = if chains.len() > 1 {
             metrics_base.saturating_add(idx as u16)
         } else {
             metrics_base
@@ -247,6 +267,7 @@ async fn main() -> Result<(), AppError> {
             settings.sandwich_attacks_enabled,
             settings.simulation_backend.clone(),
             worker_limit,
+            settings.address_registry_path(),
         );
 
         engine_tasks.push(tokio::spawn(async move { engine.run().await }));

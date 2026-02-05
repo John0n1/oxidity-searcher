@@ -9,7 +9,8 @@ use crate::network::mev_share::MevShareHint;
 use crate::network::price_feed::PriceQuote;
 use crate::services::strategy::bundles::BundlePlan;
 use crate::services::strategy::decode::{
-    ObservedSwap, SwapDirection, decode_swap, decode_swap_input, direction, target_token,
+    ObservedSwap, RouterKind, SwapDirection, decode_swap, decode_swap_input, direction,
+    target_token,
 };
 use crate::services::strategy::planning::bundles::NonceLease;
 use crate::services::strategy::planning::{ApproveTx, BackrunTx, FrontRunTx};
@@ -219,13 +220,13 @@ impl StrategyExecutor {
         let victim_request = tx.clone().into_request();
 
         let mut bundle_requests: Vec<TransactionRequest> = Vec::new();
+        for a in &approvals {
+            bundle_requests.push(a.request.clone());
+        }
         if let Some(f) = &front_run {
             bundle_requests.push(f.request.clone());
         }
         bundle_requests.push(victim_request.clone());
-        for a in &approvals {
-            bundle_requests.push(a.request.clone());
-        }
         bundle_requests.push(main_request.clone());
 
         let overrides = StateOverridesBuilder::default()
@@ -243,6 +244,7 @@ impl StrategyExecutor {
                 parts.wallet_balance,
                 tx.gas_limit(),
                 &parts.gas_fees,
+                observed_swap.router,
             )
             .await?
         {
@@ -491,11 +493,11 @@ impl StrategyExecutor {
         };
 
         let mut bundle_requests: Vec<TransactionRequest> = Vec::new();
-        if let Some(f) = &front_run {
-            bundle_requests.push(f.request.clone());
-        }
         for a in &approvals {
             bundle_requests.push(a.request.clone());
+        }
+        if let Some(f) = &front_run {
+            bundle_requests.push(f.request.clone());
         }
         bundle_requests.push(victim_request.clone());
         bundle_requests.push(main_request.clone());
@@ -515,6 +517,7 @@ impl StrategyExecutor {
                 parts.wallet_balance,
                 gas_limit_hint,
                 &parts.gas_fees,
+                observed_swap.router,
             )
             .await?
         {
@@ -722,7 +725,11 @@ impl StrategyExecutor {
     ) -> Result<Option<BundleParts>, AppError> {
         let mut gas_fees: GasFees = self.gas_oracle.estimate_eip1559_fees().await?;
         self.boost_fees(&mut gas_fees, fee_hints.0, fee_hints.1);
-        let hard_cap = U256::from(self.max_gas_price_gwei) * U256::from(1_000_000_000u64);
+        let hard_cap = if self.max_gas_price_gwei == 0 {
+            U256::MAX
+        } else {
+            U256::from(self.max_gas_price_gwei) * U256::from(1_000_000_000u64)
+        };
 
         let real_balance = self.portfolio.update_eth_balance(self.chain_id).await?;
         let (wallet_chain_balance, _) = if self.dry_run {
@@ -735,6 +742,36 @@ impl StrategyExecutor {
         } else {
             (real_balance, false)
         };
+
+        if self.router_is_risky(observed_swap.router) {
+            self.log_skip("router_revert_rate", "router failure rate too high");
+            return Ok(None);
+        }
+        if !self.liquidity_depth_ok(observed_swap, wallet_chain_balance) {
+            self.log_skip("liquidity_depth", "price impact too high");
+            return Ok(None);
+        }
+        if observed_swap.router_kind == RouterKind::V2Like {
+            if let Some(expected_out) =
+                self.reserve_cache
+                    .quote_v2_path(&observed_swap.path, observed_swap.amount_in)
+            {
+                if !expected_out.is_zero() && !observed_swap.min_out.is_zero() {
+                    let min_ratio = observed_swap
+                        .min_out
+                        .saturating_mul(U256::from(10_000u64))
+                        / expected_out;
+                    let slippage_room_bps =
+                        10_000u64.saturating_sub(min_ratio.to::<u64>());
+                    if slippage_room_bps > 1_500 && wallet_chain_balance
+                        < U256::from(100_000_000_000_000_000u128)
+                    {
+                        self.log_skip("sandwich_risk", "victim slippage too loose for small wallet");
+                        return Ok(None);
+                    }
+                }
+            }
+        }
 
         let base_plus_tip = gas_fees
             .next_base_fee_per_gas
@@ -920,12 +957,12 @@ impl StrategyExecutor {
             return Err(AppError::Strategy("nonce lease too small".into()));
         }
         let mut nonce_cursor = lease.base;
-        if let Some(f) = front_run.as_mut() {
-            f.request.nonce = Some(nonce_cursor);
-            nonce_cursor = nonce_cursor.saturating_add(1);
-        }
         for app in approvals.iter_mut() {
             app.request.nonce = Some(nonce_cursor);
+            nonce_cursor = nonce_cursor.saturating_add(1);
+        }
+        if let Some(f) = front_run.as_mut() {
+            f.request.nonce = Some(nonce_cursor);
             nonce_cursor = nonce_cursor.saturating_add(1);
         }
         main.nonce = Some(nonce_cursor);
@@ -942,6 +979,7 @@ impl StrategyExecutor {
         wallet_chain_balance: U256,
         gas_limit_hint: u64,
         gas_fees: &GasFees,
+        router: Address,
     ) -> Result<Option<ProfitOutcome>, AppError> {
         for req in bundle_requests.iter_mut() {
             self.populate_access_list(req).await;
@@ -963,6 +1001,7 @@ impl StrategyExecutor {
         )
         .await?;
         if let Some(failure) = bundle_sims.iter().find(|o| !o.success) {
+            self.record_router_sim(router, false);
             let detail = failure
                 .reason
                 .clone()
@@ -970,6 +1009,7 @@ impl StrategyExecutor {
             self.log_skip("simulation_failed", &detail);
             return Ok(None);
         }
+        self.record_router_sim(router, true);
 
         let mut gas_used_total = 0u64;
         for sim in &bundle_sims {
@@ -1134,13 +1174,14 @@ mod tests {
         let mut approvals = vec![ApproveTx {
             raw: Vec::new(),
             request: TransactionRequest::default(),
+            token: Address::ZERO,
         }];
         let mut main = TransactionRequest::default();
 
         StrategyExecutor::apply_nonce_plan(&lease, &mut front, &mut approvals, &mut main).unwrap();
 
-        assert_eq!(front.unwrap().request.nonce, Some(7));
-        assert_eq!(approvals[0].request.nonce, Some(8));
+        assert_eq!(approvals[0].request.nonce, Some(7));
+        assert_eq!(front.unwrap().request.nonce, Some(8));
         assert_eq!(main.nonce, Some(9));
     }
 

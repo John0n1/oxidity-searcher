@@ -14,6 +14,7 @@ use alloy::rpc::types::eth::{
 use alloy::rpc::types::trace::geth::{DefaultFrame, GethDebugTracingCallOptions};
 use alloy::sol_types::SolInterface;
 use alloy_sol_types::{Revert, SolError};
+use std::sync::OnceLock;
 
 #[derive(Debug, Clone)]
 pub struct SimulationOutcome {
@@ -22,6 +23,9 @@ pub struct SimulationOutcome {
     pub return_data: Vec<u8>,
     pub reason: Option<String>,
 }
+
+static ETH_SIMULATE_MISSING: OnceLock<()> = OnceLock::new();
+static DEBUG_TRACE_MISSING: OnceLock<()> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SimulationBackendMethod {
@@ -162,12 +166,22 @@ impl Simulator {
                 }
             }
             Err(e) => {
-                tracing::warn!(
-                    target: "simulation",
-                    backend = "eth_simulate",
-                    error = %e,
-                    "simulate_request eth_simulate failed"
-                );
+                let msg = e.to_string().to_lowercase();
+                if msg.contains("method") && msg.contains("not found") {
+                    if ETH_SIMULATE_MISSING.set(()).is_ok() {
+                        tracing::warn!(
+                            target: "simulation",
+                            "eth_simulateV1 not available on node; falling back"
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        target: "simulation",
+                        backend = "eth_simulate",
+                        error = %e,
+                        "simulate_request eth_simulate failed"
+                    );
+                }
             }
         }
         Ok(None)
@@ -197,13 +211,24 @@ impl Simulator {
                 }
             },
             Err(e) => {
-                tracing::warn!(
-                    target: "simulation",
-                    backend = "debug_trace_call",
-                    error = %e,
-                    "debug_trace_call failed"
-                );
-                Ok(None)
+                let msg = e.to_string().to_lowercase();
+                if msg.contains("method") && msg.contains("not found") {
+                    if DEBUG_TRACE_MISSING.set(()).is_ok() {
+                        tracing::warn!(
+                            target: "simulation",
+                            "debug_traceCall not available on node; falling back"
+                        );
+                    }
+                    Ok(None)
+                } else {
+                    tracing::warn!(
+                        target: "simulation",
+                        backend = "debug_trace_call",
+                        error = %e,
+                        "debug_trace_call failed"
+                    );
+                    Ok(None)
+                }
             }
         }
     }

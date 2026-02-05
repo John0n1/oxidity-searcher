@@ -7,7 +7,9 @@ use crate::core::portfolio::PortfolioManager;
 use crate::core::safety::SafetyGuard;
 use crate::core::simulation::Simulator;
 use crate::core::strategy::{StrategyExecutor, StrategyStats, StrategyWork};
+use crate::common::constants::default_balancer_vault_for_chain;
 use crate::data::db::Database;
+use crate::infrastructure::data::address_registry::AddressRegistry;
 use crate::infrastructure::data::token_manager::TokenManager;
 use crate::network::block_listener::BlockListener;
 use crate::network::gas::GasOracle;
@@ -67,6 +69,7 @@ pub struct Engine {
     sandwich_attacks_enabled: bool,
     simulation_backend: String,
     worker_limit: usize,
+    address_registry_path: String,
 }
 
 impl Engine {
@@ -110,6 +113,7 @@ impl Engine {
         sandwich_attacks_enabled: bool,
         simulation_backend: String,
         worker_limit: usize,
+        address_registry_path: String,
     ) -> Self {
         Self {
             http_provider,
@@ -150,6 +154,7 @@ impl Engine {
             sandwich_attacks_enabled,
             simulation_backend,
             worker_limit,
+            address_registry_path,
         }
     }
 
@@ -195,11 +200,111 @@ impl Engine {
         ));
         let reserve_cache = Arc::new(ReserveCache::new(self.http_provider.clone()));
         if Path::new("data/pairs.json").exists() {
-            if let Err(e) = reserve_cache.load_pairs_from_file("data/pairs.json") {
+            if let Err(e) = reserve_cache
+                .load_pairs_from_file_validated("data/pairs.json", &self.http_provider)
+                .await
+            {
                 tracing::warn!(target: "reserves", error=%e, "Failed to preload pairs.json");
-            } else {
-                tracing::info!(target: "reserves", "Preloaded pairs.json");
             }
+        }
+
+        let mut aave_pool = self.aave_pool;
+        // Address registry: validate and apply optional protocol addresses.
+        if let Ok(registry) = AddressRegistry::load_from_file(&self.address_registry_path) {
+            if let Some(chain_reg) = registry.chain(self.chain_id) {
+                let chain_reg = chain_reg.validate_with_provider(&self.http_provider).await;
+                for addr in chain_reg.routers.values().copied() {
+                    self.router_allowlist.insert(addr);
+                }
+                if let Some(vault) = chain_reg.balancer_vault {
+                    reserve_cache.set_balancer_vault(vault).await;
+                }
+                for addr in chain_reg.curve_registries {
+                    reserve_cache.add_curve_registry(addr);
+                }
+                for addr in chain_reg.curve_meta_registries {
+                    reserve_cache.add_curve_meta_registry(addr);
+                }
+                for addr in chain_reg.curve_crypto_registries {
+                    reserve_cache.add_curve_crypto_registry(addr);
+                }
+                if let Some(aave_pool_reg) = chain_reg.aave_pool {
+                    if aave_pool.is_none() {
+                        tracing::info!(
+                            target: "registry",
+                            chain_id = self.chain_id,
+                            pool = %format!("{:#x}", aave_pool_reg),
+                            "Using Aave pool from registry"
+                        );
+                        aave_pool = Some(aave_pool_reg);
+                    }
+                }
+            }
+        } else {
+            tracing::warn!(
+                target: "registry",
+                path = %self.address_registry_path,
+                "Address registry not loaded; proceeding with defaults"
+            );
+        }
+
+        if let Some(vault) = default_balancer_vault_for_chain(self.chain_id) {
+            reserve_cache.set_balancer_vault(vault).await;
+        }
+
+        if let Some(pool) = aave_pool {
+            match self.http_provider.get_code_at(pool).await {
+                Ok(code) => {
+                    if code.is_empty() {
+                        tracing::warn!(
+                            target: "registry",
+                            pool = %format!("{:#x}", pool),
+                            "Aave pool has no code; disabling"
+                        );
+                        aave_pool = None;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "registry",
+                        pool = %format!("{:#x}", pool),
+                        error = %e,
+                        "Failed to validate Aave pool; disabling"
+                    );
+                    aave_pool = None;
+                }
+            }
+        }
+
+        // Validate router allowlist against on-chain code.
+        let mut invalid_routers = Vec::new();
+        for addr in self.router_allowlist.iter() {
+            match self.http_provider.get_code_at(*addr).await {
+                Ok(code) => {
+                    if code.is_empty() {
+                        invalid_routers.push(*addr);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "router",
+                        address = %format!("{:#x}", *addr),
+                        error = %e,
+                        "Failed to validate router; dropping"
+                    );
+                    invalid_routers.push(*addr);
+                }
+            }
+        }
+        for addr in invalid_routers.iter() {
+            self.router_allowlist.remove(addr);
+        }
+        if !invalid_routers.is_empty() {
+            tracing::warn!(
+                target: "router",
+                count = invalid_routers.len(),
+                "Dropped routers with missing code"
+            );
         }
         {
             let cache = reserve_cache.clone();
@@ -215,6 +320,20 @@ impl Engine {
         )
         .await;
         if self.strategy_enabled {
+            // Validate tokenlist addresses for this chain before strategy uses them.
+            let invalid = self
+                .token_manager
+                .validate_chain_addresses(&self.http_provider, self.chain_id)
+                .await;
+            if invalid > 0 {
+                tracing::warn!(
+                    target: "token_manager",
+                    chain_id = self.chain_id,
+                    invalid,
+                    "Tokenlist contains addresses without code; filtered"
+                );
+            }
+
             let strategy = StrategyExecutor::new(
                 tx_receiver,
                 block_receiver,
@@ -245,7 +364,7 @@ impl Engine {
                 self.executor_bribe_recipient,
                 self.flashloan_enabled,
                 self.flashloan_providers.clone(),
-                self.aave_pool,
+                aave_pool,
                 reserve_cache.clone(),
                 self.sandwich_attacks_enabled,
                 self.simulation_backend.clone(),

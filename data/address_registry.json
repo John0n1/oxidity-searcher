@@ -1,0 +1,26 @@
+{
+  "chains": {
+    "1": {
+      "routers": {
+        "UNISWAP_V2_ROUTER02": "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
+        "UNISWAP_V3_ROUTER": "0xE592427A0AEce92De3Edee1F18E0157C05861564",
+        "UNISWAP_V3_ROUTER02": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",
+        "UNISWAP_UNIVERSAL_ROUTER": "0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af",
+        "UNISWAP_PERMIT2": "0x000000000022D473030F116dDEE9F6B43aC78BA3",
+        "SUSHISWAP_ROUTER": "0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F"
+      },
+      "balancer_vault": "0xBA12222222228d8Ba445958a75a0704d566BF2C8",
+      "curve_registries": [
+        "0x0000000022D53366457F9d5E68Ec105046FC4383"
+      ],
+      "curve_meta_registries": [],
+      "curve_crypto_registries": [],
+      "aave_pool": "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
+      "aave_addresses_provider": "0x2f39d218133AFaB8F2B819B1066c7E434Ad94E9e",
+      "chainlink_feeds": {
+        "ETH_USD": "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419",
+        "BTC_USD": "0xF4030086522a5bEEa4988F8cA5B36dbC97BeE88c"
+      }
+    }
+  }
+}

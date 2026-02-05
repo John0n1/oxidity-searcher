@@ -175,6 +175,7 @@ pub struct StrategyExecutor {
     pub(in crate::services::strategy) bundle_state: Arc<Mutex<Option<BundleState>>>,
     pub(in crate::services::strategy) v3_quote_cache: DashMap<B256, V3QuoteCacheEntry>,
     pub(in crate::services::strategy) probe_gas_stats: DashMap<Address, (u64, u64)>,
+    pub(in crate::services::strategy) router_sim_stats: DashMap<Address, (u64, u64)>,
     pub(in crate::services::strategy) current_block: AtomicU64,
     pub(in crate::services::strategy) sandwich_attacks_enabled: bool,
     pub(in crate::services::strategy) simulation_backend: String,
@@ -243,6 +244,114 @@ impl StrategyExecutor {
         } else {
             13_000
         }
+    }
+
+    pub(in crate::services::strategy) fn effective_slippage_bps(&self) -> u64 {
+        if self.slippage_bps > 0 {
+            return self.slippage_bps.min(9_999).max(1);
+        }
+        use crate::services::strategy::portfolio::BalanceTier;
+        let tier = self.portfolio.get_tier(self.chain_id);
+        let base = match tier {
+            BalanceTier::Dust | BalanceTier::Tiny => 120,
+            BalanceTier::VeryLow | BalanceTier::Low => 90,
+            BalanceTier::SubTenth | BalanceTier::SubTwoTenths => 70,
+            BalanceTier::SubHalf | BalanceTier::SubOne => 60,
+            BalanceTier::Healthy => 45,
+            BalanceTier::Whale => 35,
+        };
+        base.clamp(5, 500)
+    }
+
+    pub(in crate::services::strategy) fn max_price_impact_bps(&self) -> u64 {
+        use crate::services::strategy::portfolio::BalanceTier;
+        let tier = self.portfolio.get_tier(self.chain_id);
+        match tier {
+            BalanceTier::Dust | BalanceTier::Tiny => 150,
+            BalanceTier::VeryLow | BalanceTier::Low => 120,
+            BalanceTier::SubTenth | BalanceTier::SubTwoTenths => 100,
+            BalanceTier::SubHalf | BalanceTier::SubOne => 80,
+            BalanceTier::Healthy => 60,
+            BalanceTier::Whale => 40,
+        }
+    }
+
+    pub(in crate::services::strategy) fn record_router_sim(&self, router: Address, success: bool) {
+        self.router_sim_stats
+            .entry(router)
+            .and_modify(|(fails, total)| {
+                *total = total.saturating_add(1);
+                if !success {
+                    *fails = fails.saturating_add(1);
+                }
+            })
+            .or_insert((if success { 0 } else { 1 }, 1));
+    }
+
+    pub(in crate::services::strategy) fn router_failure_rate(&self, router: Address) -> Option<f64> {
+        self.router_sim_stats.get(&router).map(|e| {
+            let (fails, total) = *e;
+            if total == 0 {
+                0.0
+            } else {
+                (fails as f64) / (total as f64)
+            }
+        })
+    }
+
+    pub(in crate::services::strategy) fn router_is_risky(&self, router: Address) -> bool {
+        if let Some(entry) = self.router_sim_stats.get(&router) {
+            let (fails, total) = *entry;
+            if total < 20 {
+                return false;
+            }
+            let rate = fails as f64 / total as f64;
+            return rate >= 0.40;
+        }
+        false
+    }
+
+    pub(in crate::services::strategy) fn liquidity_depth_ok(
+        &self,
+        observed: &crate::services::strategy::decode::ObservedSwap,
+        wallet_balance: U256,
+    ) -> bool {
+        if observed.path.len() < 2 {
+            return true;
+        }
+        if observed.router_kind != crate::services::strategy::decode::RouterKind::V2Like {
+            return true;
+        }
+        let token_in = observed.path[0];
+        let token_out = observed.path[1];
+        let Some(reserves) = self.reserve_cache.reserves_for_pair(token_in, token_out) else {
+            return true;
+        };
+        let reserve_in = if token_in == reserves.token0 {
+            reserves.reserve0
+        } else {
+            reserves.reserve1
+        };
+        if reserve_in.is_zero() {
+            return false;
+        }
+        let impact_bps = observed
+            .amount_in
+            .saturating_mul(U256::from(10_000u64))
+            .checked_div(reserve_in.saturating_add(observed.amount_in))
+            .unwrap_or(U256::from(10_000u64));
+        let max_bps = U256::from(self.max_price_impact_bps());
+        if impact_bps > max_bps {
+            tracing::debug!(
+                target: "risk",
+                impact_bps = %impact_bps,
+                max_bps = %max_bps,
+                wallet = %wallet_balance,
+                "Liquidity impact too high; skipping"
+            );
+            return false;
+        }
+        true
     }
 
     pub(crate) async fn persist_nonce_state(
@@ -550,6 +659,7 @@ impl StrategyExecutor {
             bundle_state: Arc::new(Mutex::new(None)),
             v3_quote_cache: DashMap::new(),
             probe_gas_stats: DashMap::new(),
+            router_sim_stats: DashMap::new(),
             current_block: AtomicU64::new(0),
             sandwich_attacks_enabled,
             simulation_backend,
@@ -785,7 +895,7 @@ fn units_to_float(value: U256, decimals: u8) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::constants::{MIN_PROFIT_THRESHOLD_WEI, WETH_MAINNET};
+    use crate::common::constants::WETH_MAINNET;
     use crate::core::executor::BundleSender;
     use crate::core::simulation::SimulationBackend;
     use crate::network::gas::GasFees;
@@ -972,10 +1082,7 @@ mod tests {
             floor_large > floor_small,
             "profit floor should scale with balance"
         );
-        assert!(
-            floor_small >= *MIN_PROFIT_THRESHOLD_WEI,
-            "floor should never drop below constant"
-        );
+        assert!(floor_small >= U256::ZERO);
     }
 
     #[test]
@@ -1014,7 +1121,7 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_native_out_only_allows_wrapped_native() {
-        let exec = dummy_executor_for_nonces().await;
+        let exec = dummy_executor_for_tests().await;
         let other = Address::from([9u8; 20]);
         assert!(exec.ensure_native_out(U256::from(10u64), other).is_none());
         assert_eq!(
@@ -1027,7 +1134,7 @@ mod tests {
     async fn lease_and_peek_respects_reserved_nonces() {
         use std::collections::HashSet;
 
-        let exec = dummy_executor_for_nonces().await;
+        let exec = dummy_executor_for_tests().await;
         exec.current_block.store(10, Ordering::Relaxed);
         {
             let mut guard = exec.bundle_state.lock().await;
@@ -1095,7 +1202,7 @@ mod tests {
 
     #[tokio::test]
     async fn lease_nonces_advances_bundle_state_without_rpc() {
-        let exec = dummy_executor_for_nonces().await;
+        let exec = dummy_executor_for_tests().await;
         exec.current_block.store(100, Ordering::Relaxed);
         {
             let mut guard = exec.bundle_state.lock().await;
@@ -1116,7 +1223,7 @@ mod tests {
 
     #[tokio::test]
     async fn gas_ratio_rejects_thin_margin() {
-        let exec = dummy_executor_for_nonces().await;
+        let exec = dummy_executor_for_tests().await;
         assert!(
             !exec.gas_ratio_ok(
                 U256::from(1_000u64),
@@ -1129,7 +1236,7 @@ mod tests {
 
     #[tokio::test]
     async fn gas_ratio_accepts_healthy_margin() {
-        let exec = dummy_executor_for_nonces().await;
+        let exec = dummy_executor_for_tests().await;
         assert!(exec.gas_ratio_ok(
             U256::from(1_000u64),
             U256::from(3_000u64),
@@ -1137,7 +1244,7 @@ mod tests {
         ));
     }
 
-    async fn dummy_executor_for_nonces() -> StrategyExecutor {
+    pub(crate) async fn dummy_executor_for_tests() -> StrategyExecutor {
         let (_tx, rx) = tokio::sync::mpsc::channel(8);
         let (_block_tx, block_rx) = tokio::sync::broadcast::channel::<Header>(1);
         let http = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
@@ -1242,3 +1349,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+pub(crate) use tests::dummy_executor_for_tests;

@@ -285,7 +285,7 @@ impl MevShareClient {
             .as_deref()
             .and_then(parse_u64_hex)
             .map(|cid| cid == self.chain_id)
-            .unwrap_or(true);
+            .unwrap_or(false);
         if !chain_ok {
             return None;
         }

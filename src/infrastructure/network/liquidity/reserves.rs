@@ -353,6 +353,81 @@ impl ReserveCache {
         Ok(())
     }
 
+    /// Preload from JSON and drop entries whose contracts are missing on-chain.
+    pub async fn load_pairs_from_file_validated(
+        &self,
+        path: &str,
+        provider: &HttpProvider,
+    ) -> Result<(), AppError> {
+        let raw = fs::read_to_string(path)
+            .map_err(|e| AppError::Config(format!("pairs.json read failed: {}", e)))?;
+        #[derive(Deserialize)]
+        struct PairEntry {
+            pair: String,
+            token0: String,
+            token1: String,
+        }
+        let entries: Vec<PairEntry> = serde_json::from_str(&raw)
+            .map_err(|e| AppError::Config(format!("pairs.json parse failed: {}", e)))?;
+
+        let mut kept = 0usize;
+        for entry in entries {
+            let pair = match Address::from_str(&entry.pair) {
+                Ok(p) => p,
+                Err(_) => {
+                    tracing::warn!(target: "reserves", "Invalid pair address in pairs.json; skipping");
+                    continue;
+                }
+            };
+            let token0 = match Address::from_str(&entry.token0) {
+                Ok(t) => t,
+                Err(_) => {
+                    tracing::warn!(target: "reserves", "Invalid token0 in pairs.json; skipping");
+                    continue;
+                }
+            };
+            let token1 = match Address::from_str(&entry.token1) {
+                Ok(t) => t,
+                Err(_) => {
+                    tracing::warn!(target: "reserves", "Invalid token1 in pairs.json; skipping");
+                    continue;
+                }
+            };
+
+            let pair_code = provider.get_code_at(pair).await;
+            let t0_code = provider.get_code_at(token0).await;
+            let t1_code = provider.get_code_at(token1).await;
+            if pair_code.map(|c| c.is_empty()).unwrap_or(true)
+                || t0_code.map(|c| c.is_empty()).unwrap_or(true)
+                || t1_code.map(|c| c.is_empty()).unwrap_or(true)
+            {
+                tracing::warn!(
+                    target: "reserves",
+                    pair = %format!("{:#x}", pair),
+                    token0 = %format!("{:#x}", token0),
+                    token1 = %format!("{:#x}", token1),
+                    "pairs.json entry has missing code; skipping"
+                );
+                continue;
+            }
+
+            let key = Self::token_pair_key(token0, token1);
+            self.v2_pairs_by_tokens.insert((key, pair));
+            self.v2_reserves.insert((
+                pair,
+                V2Reserves {
+                    token0,
+                    token1,
+                    reserve0: U256::ZERO,
+                    reserve1: U256::ZERO,
+                },
+            ));
+            kept += 1;
+        }
+        tracing::info!(target: "reserves", kept, "Validated pairs.json entries loaded");
+        Ok(())
+    }
+
     pub async fn run_v2_log_listener(self: Arc<Self>, ws: WsProvider) {
         // Seed a small set of pairs if none are known yet.
         if self.v2_reserves.is_empty() {

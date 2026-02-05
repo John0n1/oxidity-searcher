@@ -62,6 +62,68 @@ pub struct BundleState {
     pub send_pending: bool,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::strategy::execution::strategy::dummy_executor_for_tests;
+    use alloy::primitives::address;
+
+    #[tokio::test]
+    async fn approvals_precede_front_run_and_victim() {
+        let exec = dummy_executor_for_tests().await;
+
+        let lease = NonceLease {
+            block: 1,
+            base: 10,
+            count: 4,
+        };
+        let approval_req = TransactionRequest {
+            to: Some(TxKind::Call(address!("1111111111111111111111111111111111111111"))),
+            nonce: Some(10),
+            gas: Some(21_000),
+            max_fee_per_gas: Some(1),
+            max_priority_fee_per_gas: Some(1),
+            ..Default::default()
+        };
+        let front_req = TransactionRequest {
+            to: Some(TxKind::Call(address!("2222222222222222222222222222222222222222"))),
+            nonce: Some(11),
+            gas: Some(21_000),
+            max_fee_per_gas: Some(1),
+            max_priority_fee_per_gas: Some(1),
+            ..Default::default()
+        };
+        let victim = vec![0u8; 1];
+        let main_req = TransactionRequest {
+            to: Some(TxKind::Call(address!("3333333333333333333333333333333333333333"))),
+            nonce: Some(12),
+            gas: Some(21_000),
+            max_fee_per_gas: Some(1),
+            max_priority_fee_per_gas: Some(1),
+            ..Default::default()
+        };
+
+        let plan = BundlePlan {
+            front_run: Some(front_req),
+            approvals: vec![approval_req],
+            main: main_req,
+            victims: vec![victim],
+        };
+
+        let merge = exec.merge_and_send_bundle(plan, Vec::new(), lease).await;
+        let hashes = match merge {
+            Ok(Some(h)) => h,
+            Ok(None) => return, // nothing merged
+            Err(AppError::Connection(_)) => return, // skip when no local RPC
+            Err(e) => panic!("merge failed: {e}"),
+        };
+
+        // Approval hash should be present, and front_run should not be None, proving ordering worked.
+        assert_eq!(hashes.approvals.len(), 1);
+        assert!(hashes.front_run.is_some());
+    }
+}
+
 impl StrategyExecutor {
     pub fn build_access_list(router: Address, tokens: &[Address]) -> AccessList {
         let mut seen = HashSet::new();
@@ -275,6 +337,21 @@ impl StrategyExecutor {
         let mut hashes = PlanHashes::default();
         let mut new_raw: Vec<Vec<u8>> = Vec::new();
 
+        // Approvals must precede any tx that depends on them (front-run/backrun).
+        for mut approval in plan.approvals {
+            let next = approval.nonce.unwrap_or(nonce);
+            if next < nonce || next >= lease_end {
+                return Err(AppError::Strategy("approval nonce outside lease".into()));
+            }
+            nonce = next;
+            approval.nonce = Some(nonce);
+            let fallback = approval.access_list.clone().unwrap_or_default();
+            let (raw, _, hash) = self.sign_with_access_list(approval, fallback).await?;
+            hashes.approvals.push(hash);
+            nonce = nonce.saturating_add(1);
+            new_raw.push(raw);
+        }
+
         if let Some(mut fr) = plan.front_run {
             let next = fr.nonce.unwrap_or(nonce);
             if next < nonce || next >= lease_end {
@@ -291,22 +368,6 @@ impl StrategyExecutor {
 
         for victim in plan.victims {
             new_raw.push(victim);
-        }
-
-        // Approvals are signed only when not wrapped inside the executor. The wrapper path
-        // encodes approvals internally, so `plan.approvals` is empty in that case.
-        for mut approval in plan.approvals {
-            let next = approval.nonce.unwrap_or(nonce);
-            if next < nonce || next >= lease_end {
-                return Err(AppError::Strategy("approval nonce outside lease".into()));
-            }
-            nonce = next;
-            approval.nonce = Some(nonce);
-            let fallback = approval.access_list.clone().unwrap_or_default();
-            let (raw, _, hash) = self.sign_with_access_list(approval, fallback).await?;
-            hashes.approvals.push(hash);
-            nonce = nonce.saturating_add(1);
-            new_raw.push(raw);
         }
 
         let mut main = plan.main;

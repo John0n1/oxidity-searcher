@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
 
 pub mod abi;
+pub mod address_registry;
 pub mod db;
 pub mod executor;
 pub mod schema;

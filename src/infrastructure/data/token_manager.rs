@@ -5,9 +5,12 @@ use std::collections::HashMap;
 use std::fs;
 
 use alloy::primitives::Address;
+use alloy::providers::Provider;
+use dashmap::DashSet;
 use serde::Deserialize;
 
 use crate::domain::error::AppError;
+use crate::network::provider::HttpProvider;
 
 /// Minimal token metadata used for decimal-aware profit checks and logging.
 #[derive(Debug, Clone)]
@@ -20,6 +23,7 @@ pub struct TokenInfo {
 #[derive(Debug, Clone)]
 pub struct TokenManager {
     tokens_by_chain: HashMap<u64, HashMap<Address, TokenInfo>>,
+    invalid_tokens: DashSet<(u64, Address)>,
 }
 
 #[derive(Deserialize)]
@@ -58,10 +62,16 @@ impl TokenManager {
             }
         }
 
-        Ok(Self { tokens_by_chain })
+        Ok(Self {
+            tokens_by_chain,
+            invalid_tokens: DashSet::new(),
+        })
     }
 
     pub fn decimals(&self, chain_id: u64, address: Address) -> Option<u8> {
+        if self.invalid_tokens.contains(&(chain_id, address)) {
+            return None;
+        }
         self.tokens_by_chain
             .get(&chain_id)
             .and_then(|m| m.get(&address))
@@ -69,6 +79,9 @@ impl TokenManager {
     }
 
     pub fn info(&self, chain_id: u64, address: Address) -> Option<&TokenInfo> {
+        if self.invalid_tokens.contains(&(chain_id, address)) {
+            return None;
+        }
         self.tokens_by_chain
             .get(&chain_id)
             .and_then(|m| m.get(&address))
@@ -77,12 +90,45 @@ impl TokenManager {
     pub fn is_empty(&self) -> bool {
         self.tokens_by_chain.is_empty()
     }
+
+    pub async fn validate_chain_addresses(
+        &self,
+        provider: &HttpProvider,
+        chain_id: u64,
+    ) -> usize {
+        let Some(tokens) = self.tokens_by_chain.get(&chain_id) else {
+            return 0;
+        };
+        let mut invalid = 0usize;
+        for addr in tokens.keys() {
+            match provider.get_code_at(*addr).await {
+                Ok(code) => {
+                    if code.is_empty() {
+                        self.invalid_tokens.insert((chain_id, *addr));
+                        invalid += 1;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "token_manager",
+                        address = %format!("{:#x}", addr),
+                        error = %e,
+                        "Failed to validate token code; marking invalid"
+                    );
+                    self.invalid_tokens.insert((chain_id, *addr));
+                    invalid += 1;
+                }
+            }
+        }
+        invalid
+    }
 }
 
 impl Default for TokenManager {
     fn default() -> Self {
         Self {
             tokens_by_chain: HashMap::new(),
+            invalid_tokens: DashSet::new(),
         }
     }
 }

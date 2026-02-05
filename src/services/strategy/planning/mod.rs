@@ -28,6 +28,8 @@ use alloy::eips::eip2930::AccessList;
 use alloy::primitives::{Address, B256, Bytes, I256, TxKind, U256};
 use alloy::rpc::types::eth::{TransactionInput, TransactionRequest};
 use alloy::sol_types::{SolCall, SolValue};
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
 use std::time::Duration;
 
 pub struct BackrunTx {
@@ -60,6 +62,7 @@ pub struct FrontRunTx {
 pub struct ApproveTx {
     pub raw: Vec<u8>,
     pub request: TransactionRequest,
+    pub token: Address,
 }
 
 const BALANCER_FLASHLOAN_OVERHEAD_GAS: u64 = 180_000;
@@ -68,6 +71,12 @@ const AAVE_V2_FLASHLOAN_OVERHEAD_GAS: u64 = 220_000;
 const V2_SWAP_OVERHEAD_GAS: u64 = 160_000;
 const CURVE_SWAP_OVERHEAD_GAS: u64 = 220_000;
 const BALANCER_SWAP_OVERHEAD_GAS: u64 = 200_000;
+const FEE_TTL: Duration = Duration::from_secs(300);
+
+static BALANCER_FEE_CACHE: Lazy<DashMap<u64, (U256, std::time::Instant)>> =
+    Lazy::new(DashMap::new);
+static AAVE_FEE_CACHE: Lazy<DashMap<Address, (U256, std::time::Instant)>> =
+    Lazy::new(DashMap::new);
 
 impl StrategyExecutor {
     fn single_leg_route(
@@ -142,7 +151,7 @@ impl StrategyExecutor {
             )
             .await?;
 
-        Ok(ApproveTx { raw, request })
+        Ok(ApproveTx { raw, request, token })
     }
 
     // Reserved for future Curve integrations.
@@ -236,35 +245,40 @@ impl StrategyExecutor {
         let mut targets = Vec::new();
         let mut payloads = Vec::new();
         let mut values = Vec::new();
+        let mut reset_tokens: Vec<(Address, Address)> = Vec::new();
         for app in approvals {
             if let Some(TxKind::Call(addr)) = app.request.to {
                 targets.push(addr);
                 let bytes = app.request.input.clone().into_input().unwrap_or_default();
                 payloads.push(bytes);
                 values.push(U256::ZERO);
+                reset_tokens.push((app.token, addr));
             }
         }
-        if let Some(TxKind::Call(addr)) = backrun.request.to {
-            targets.push(addr);
-            let bytes = backrun
-                .request
-                .input
-                .clone()
-                .into_input()
-                .unwrap_or_default();
-            payloads.push(bytes);
-            values.push(backrun.value);
-        }
-
         let unwrap_weth = (backrun.unwrap_to_native
             || (backrun.router_kind == RouterKind::V3Like
                 && backrun.expected_out_token == self.wrapped_native))
             && backrun.expected_out > U256::ZERO;
+        let mut balance_check_token = backrun.expected_out_token;
+        let mut unwrap_amount: Option<U256> = None;
         if unwrap_weth {
+            // Use a conservative amount (min_out) to avoid reverting if actual output < expected_out.
+            let slippage_bps = self.effective_slippage_bps().min(9_999);
+            let min_out = backrun
+                .expected_out
+                .saturating_mul(U256::from(10_000u64 - slippage_bps))
+                / U256::from(10_000u64);
+            if min_out > U256::ZERO {
+                unwrap_amount = Some(min_out);
+            }
+            // Unwrapping reduces WETH balance, so disable balance invariant.
+            balance_check_token = Address::ZERO;
+        }
+        if let Some(amount) = unwrap_amount {
             targets.push(self.wrapped_native);
             let mut withdraw_calldata = Vec::with_capacity(4 + 32);
             withdraw_calldata.extend_from_slice(&[0x2e, 0x1a, 0x7d, 0x4d]); // withdraw(uint256)
-            withdraw_calldata.extend_from_slice(&backrun.expected_out.to_be_bytes::<32>());
+            withdraw_calldata.extend_from_slice(&amount.to_be_bytes::<32>());
             payloads.push(Bytes::from(withdraw_calldata));
             values.push(U256::ZERO);
         }
@@ -283,6 +297,22 @@ impl StrategyExecutor {
 
         if unwrap_weth {
             gas_limit = gas_limit.saturating_add(30_000);
+        }
+
+        // Zero approvals after execution to limit allowance exposure.
+        if !reset_tokens.is_empty() {
+            gas_limit = gas_limit.saturating_add(30_000u64.saturating_mul(reset_tokens.len() as u64));
+        }
+        for (token, spender) in reset_tokens.iter().copied() {
+            let reset = UnifiedHardenedExecutor::safeApproveCall {
+                token,
+                spender,
+                amount: U256::ZERO,
+            }
+            .abi_encode();
+            targets.push(exec_addr);
+            payloads.push(Bytes::from(reset));
+            values.push(U256::ZERO);
         }
 
         if gas_limit < 150_000 {
@@ -310,7 +340,7 @@ impl StrategyExecutor {
             bribeRecipient: bribe_recipient,
             bribeAmount: bribe,
             allowPartial: true,
-            balanceCheckToken: self.wrapped_native,
+            balanceCheckToken: balance_check_token,
         };
         let calldata = exec_call.abi_encode();
 
@@ -342,7 +372,8 @@ impl StrategyExecutor {
         if !self.has_usable_flashloan_provider() {
             return false;
         }
-        let safety_buffer = U256::from(2_000_000_000_000_000u128); // 0.002 ETH
+        let safety_buffer = U256::from(gas_fees.max_fee_per_gas)
+            .saturating_mul(U256::from(120_000u64));
         if wallet_balance < required_value.saturating_add(safety_buffer) {
             return true;
         }
@@ -368,7 +399,7 @@ impl StrategyExecutor {
             .reserve_cache
             .quote_v2_path(&[token_in, token_out], amount_in)
         {
-            let min_out = out.saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+            let min_out = out.saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
                 / U256::from(10_000u64);
             if let Some(router) = routers.get("uniswap_v2_router02").copied() {
                 graph.add_edge(QuoteEdge {
@@ -409,7 +440,7 @@ impl StrategyExecutor {
                 .quote_curve_pool(pool, token_in, token_out, amount_in)
                 .await
             {
-                let min_out = out.saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+                let min_out = out.saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
                     / U256::from(10_000u64);
                 let mut param_bytes = Vec::with_capacity(3);
                 param_bytes.push(if underlying { 1 } else { 0 });
@@ -438,7 +469,7 @@ impl StrategyExecutor {
                 .quote_balancer_single(pool, token_in, token_out, amount_in)
                 .await
             {
-                let min_out = out.saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+                let min_out = out.saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
                     / U256::from(10_000u64);
                 graph.add_edge(QuoteEdge {
                     venue: RouteVenue::BalancerPool,
@@ -722,7 +753,7 @@ impl StrategyExecutor {
             .pool_backrun_value(
                 observed,
                 wallet_balance,
-                self.slippage_bps,
+                self.effective_slippage_bps(),
                 gas_limit_hint,
                 gas_fees,
             )
@@ -732,7 +763,7 @@ impl StrategyExecutor {
             None => StrategyExecutor::dynamic_backrun_value(
                 observed.amount_in,
                 wallet_balance,
-                self.slippage_bps,
+                self.effective_slippage_bps(),
                 gas_limit_hint,
                 gas_fees.max_fee_per_gas,
             )?,
@@ -751,7 +782,7 @@ impl StrategyExecutor {
                             exec_router,
                             path.clone(),
                             amount_in,
-                            self.slippage_bps,
+                            self.effective_slippage_bps(),
                             gas_limit_hint,
                             11,
                             10,
@@ -790,7 +821,7 @@ impl StrategyExecutor {
                         return Ok(None);
                     }
                     let min_out = expected_tokens
-                        .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+                        .saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
                         / U256::from(10_000u64);
                     let access_list =
                         StrategyExecutor::build_access_list(exec_router, &observed.path);
@@ -885,7 +916,7 @@ impl StrategyExecutor {
                         .pool_backrun_value(
                             observed,
                             wallet_balance,
-                            self.slippage_bps,
+                            self.effective_slippage_bps(),
                             gas_limit_hint,
                             gas_fees,
                         )
@@ -895,7 +926,7 @@ impl StrategyExecutor {
                         None => StrategyExecutor::dynamic_backrun_value(
                             observed.amount_in,
                             wallet_balance,
-                            self.slippage_bps,
+                            self.effective_slippage_bps(),
                             gas_limit_hint,
                             gas_fees.max_fee_per_gas,
                         )?,
@@ -920,7 +951,7 @@ impl StrategyExecutor {
                             exec_router,
                             path.clone(),
                             value,
-                            self.slippage_bps,
+                            self.effective_slippage_bps(),
                             gas_limit_hint,
                             12,
                             10,
@@ -943,7 +974,7 @@ impl StrategyExecutor {
                         let forward_payload = Bytes::from(calldata);
                         let rev_path = vec![target_token, self.wrapped_native];
                         let rev_min_out = tokens_out
-                            .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+                            .saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
                             / U256::from(10_000u64);
                         let rev_calldata = self.reserve_cache.build_v2_swap_payload(
                             rev_path.clone(),
@@ -1110,7 +1141,7 @@ impl StrategyExecutor {
                         .pool_backrun_value(
                             observed,
                             wallet_balance,
-                            self.slippage_bps,
+                            self.effective_slippage_bps(),
                             gas_limit_hint,
                             gas_fees,
                         )
@@ -1120,7 +1151,7 @@ impl StrategyExecutor {
                         None => StrategyExecutor::dynamic_backrun_value(
                             observed.amount_in,
                             wallet_balance,
-                            self.slippage_bps,
+                            self.effective_slippage_bps(),
                             gas_limit_hint,
                             gas_fees.max_fee_per_gas,
                         )?,
@@ -1142,7 +1173,7 @@ impl StrategyExecutor {
                         return Err(AppError::Strategy("V3 liquidity too low".into()));
                     }
                     let min_out = expected_out
-                        .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+                        .saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
                         / U256::from(10_000u64);
                     let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 300);
                     let tx_value = if !use_flashloan
@@ -1290,7 +1321,7 @@ impl StrategyExecutor {
                         }
                     }
                     let min_out = expected_out
-                        .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+                        .saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
                         / U256::from(10_000u64);
                     let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 300);
                     let calldata = if has_wrapped {
@@ -1354,7 +1385,7 @@ impl StrategyExecutor {
                         }
                     }
                     let min_out = expected_out
-                        .saturating_mul(U256::from(10_000u64 - self.slippage_bps))
+                        .saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
                         / U256::from(10_000u64);
                     let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 300);
                     let calldata = UniV3Router::new(exec_router, self.http_provider.clone())
@@ -1516,6 +1547,11 @@ impl StrategyExecutor {
     }
 
     async fn get_balancer_flashloan_fee(&self) -> Option<U256> {
+        if let Some((fee, ts)) = BALANCER_FEE_CACHE.get(&self.chain_id).map(|v| v.clone()) {
+            if ts.elapsed() <= FEE_TTL {
+                return Some(fee);
+            }
+        }
         let vault = default_balancer_vault_for_chain(self.chain_id)?;
         let vault_contract = BalancerVaultFees::new(vault, self.http_provider.clone());
         let collector_addr: Address = vault_contract
@@ -1524,7 +1560,9 @@ impl StrategyExecutor {
             .await
             .ok()?;
         let collector = BalancerProtocolFees::new(collector_addr, self.http_provider.clone());
-        collector.getFlashLoanFeePercentage().call().await.ok()
+        let fee = collector.getFlashLoanFeePercentage().call().await.ok()?;
+        BALANCER_FEE_CACHE.insert(self.chain_id, (fee, std::time::Instant::now()));
+        Some(fee)
     }
 
     async fn quote_aave_flashloan(
@@ -1545,13 +1583,16 @@ impl StrategyExecutor {
         if balance < amount {
             return Ok(None);
         }
-        let premium_bps: U256 = match AavePool::new(pool, self.http_provider.clone())
-            .FLASHLOAN_PREMIUM_TOTAL()
-            .call()
-            .await
+        let premium_bps: U256 = if let Some((v, ts)) = AAVE_FEE_CACHE.get(&pool).map(|v| v.clone())
         {
-            Ok(v) => U256::from(v),
-            Err(_) => return Ok(None), // If premium unknown, skip provider instead of guessing
+            if ts.elapsed() <= FEE_TTL {
+                v
+            } else {
+                AAVE_FEE_CACHE.remove(&pool);
+                self.fetch_aave_premium(pool).await?
+            }
+        } else {
+            self.fetch_aave_premium(pool).await?
         };
 
         let premium = amount
@@ -1564,6 +1605,17 @@ impl StrategyExecutor {
             premium.saturating_add(gas_cost),
             AAVE_FLASHLOAN_OVERHEAD_GAS,
         )))
+    }
+
+    async fn fetch_aave_premium(&self, pool: Address) -> Result<U256, AppError> {
+        let v: U256 = AavePool::new(pool, self.http_provider.clone())
+            .FLASHLOAN_PREMIUM_TOTAL()
+            .call()
+            .await
+            .map(U256::from)
+            .map_err(|e| AppError::Strategy(format!("Aave premium fetch failed: {}", e)))?;
+        AAVE_FEE_CACHE.insert(pool, (v, std::time::Instant::now()));
+        Ok(v)
     }
 
     async fn quote_aave_v2_flashloan(
@@ -1586,13 +1638,16 @@ impl StrategyExecutor {
         }
 
         // Aave v2 premium is FLASHLOAN_PREMIUM_TOTAL / 10_000
-        let premium_bps: U256 = match AaveV2LendingPool::new(pool, self.http_provider.clone())
-            .FLASHLOAN_PREMIUM_TOTAL()
-            .call()
-            .await
+        let premium_bps: U256 = if let Some((v, ts)) = AAVE_FEE_CACHE.get(&pool).map(|v| v.clone())
         {
-            Ok(v) => U256::from(v),
-            Err(_) => return Ok(None),
+            if ts.elapsed() <= FEE_TTL {
+                v
+            } else {
+                AAVE_FEE_CACHE.remove(&pool);
+                self.fetch_aave_v2_premium(pool).await?
+            }
+        } else {
+            self.fetch_aave_v2_premium(pool).await?
         };
 
         let premium = amount
@@ -1605,5 +1660,16 @@ impl StrategyExecutor {
             premium.saturating_add(gas_cost),
             AAVE_V2_FLASHLOAN_OVERHEAD_GAS,
         )))
+    }
+
+    async fn fetch_aave_v2_premium(&self, pool: Address) -> Result<U256, AppError> {
+        let v: U256 = AaveV2LendingPool::new(pool, self.http_provider.clone())
+            .FLASHLOAN_PREMIUM_TOTAL()
+            .call()
+            .await
+            .map(U256::from)
+            .map_err(|e| AppError::Strategy(format!("Aave v2 premium fetch failed: {}", e)))?;
+        AAVE_FEE_CACHE.insert(pool, (v, std::time::Instant::now()));
+        Ok(v)
     }
 }

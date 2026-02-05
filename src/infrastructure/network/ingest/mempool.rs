@@ -70,9 +70,48 @@ impl MempoolScanner {
                     tracing::warn!(
                         target: "mempool",
                         error = %e,
-                        "WS pending sub failed; falling back to polling filter"
+                        "Full pending sub failed; trying hash-only subscription"
                     );
-                    self.poll_filter_loop().await?;
+                    match self.provider.subscribe_pending_transactions().await {
+                        Ok(sub) => {
+                            tracing::info!(target: "mempool", "Subscribed to pending tx hashes");
+                            let mut stream = sub.into_stream();
+                            while let Some(hash) = stream.next().await {
+                                if !self.mark_seen(hash).await {
+                                    continue;
+                                }
+                                match self.provider.get_transaction_by_hash(hash).await {
+                                    Ok(Some(tx)) => {
+                                        if tx.input().len() > 4 {
+                                            self.enqueue(StrategyWork::Mempool {
+                                                tx,
+                                                received_at: std::time::Instant::now(),
+                                            });
+                                        }
+                                    }
+                                    Ok(None) => {
+                                        // Hash not yet available; skip
+                                    }
+                                    Err(err) => {
+                                        tracing::debug!(
+                                            target: "mempool",
+                                            error = %err,
+                                            "Failed to fetch pending tx by hash"
+                                        );
+                                    }
+                                }
+                            }
+                            tracing::warn!(target: "mempool", "Pending hash subscription ended, retrying after backoff");
+                        }
+                        Err(e2) => {
+                            tracing::warn!(
+                                target: "mempool",
+                                error = %e2,
+                                "Hash-only subscription failed; falling back to polling filter"
+                            );
+                            self.poll_filter_loop().await?;
+                        }
+                    }
                 }
             }
 
@@ -83,35 +122,88 @@ impl MempoolScanner {
 
 impl MempoolScanner {
     async fn poll_filter_loop(&self) -> Result<(), AppError> {
-        let filter_id = self
-            .provider
-            .new_pending_transactions_filter(true)
-            .await
-            .map_err(|err| AppError::Connection(format!("Filter create failed: {}", err)))?;
+        let mut full = true;
+        let filter_id = match self.provider.new_pending_transactions_filter(true).await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(
+                    target: "mempool",
+                    error = %e,
+                    "Full pending filter unsupported; falling back to hash filter"
+                );
+                full = false;
+                self.provider
+                    .new_pending_transactions_filter(false)
+                    .await
+                    .map_err(|err| AppError::Connection(format!("Filter create failed: {}", err)))?
+            }
+        };
 
         loop {
-            match self
-                .provider
-                .get_filter_changes::<Transaction>(filter_id)
-                .await
-            {
-                Ok(txs) => {
-                    for tx in txs {
-                        if tx.input().len() > 4 && self.mark_seen(tx.tx_hash()).await {
-                            self.enqueue(StrategyWork::Mempool {
-                                tx,
-                                received_at: std::time::Instant::now(),
-                            });
+            if full {
+                match self
+                    .provider
+                    .get_filter_changes::<Transaction>(filter_id)
+                    .await
+                {
+                    Ok(txs) => {
+                        for tx in txs {
+                            if tx.input().len() > 4 && self.mark_seen(tx.tx_hash()).await {
+                                self.enqueue(StrategyWork::Mempool {
+                                    tx,
+                                    received_at: std::time::Instant::now(),
+                                });
+                            }
                         }
                     }
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "mempool",
+                            error = %err,
+                            "poll get_filter_changes failed"
+                        );
+                        break;
+                    }
                 }
-                Err(err) => {
-                    tracing::warn!(
-                        target: "mempool",
-                        error = %err,
-                        "poll get_filter_changes failed"
-                    );
-                    break;
+            } else {
+                match self
+                    .provider
+                    .get_filter_changes::<B256>(filter_id)
+                    .await
+                {
+                    Ok(hashes) => {
+                        for hash in hashes {
+                            if !self.mark_seen(hash).await {
+                                continue;
+                            }
+                            match self.provider.get_transaction_by_hash(hash).await {
+                                Ok(Some(tx)) => {
+                                    if tx.input().len() > 4 {
+                                        self.enqueue(StrategyWork::Mempool {
+                                            tx,
+                                            received_at: std::time::Instant::now(),
+                                        });
+                                    }
+                                }
+                                Ok(None) => {}
+                                Err(err) => {
+                                    tracing::debug!(
+                                        target: "mempool",
+                                        error = %err,
+                                        "poll hash fetch failed"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "mempool",
+                            error = %err,
+                            "poll get_filter_changes failed"
+                        );
+                        break;
+                    }
                 }
             }
             sleep(Duration::from_millis(1200)).await;

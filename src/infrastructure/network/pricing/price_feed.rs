@@ -123,6 +123,12 @@ impl PriceFeed {
             return Ok(q);
         }
 
+        // 3b. OKX public ticker
+        if let Some(q) = self.try_okx(&normalized).await? {
+            self.store_cache(&normalized.cache_key, q.clone()).await;
+            return Ok(q);
+        }
+
         // 4. CoinMarketCap (API key)
         if let Some(q) = self.try_coinmarketcap(&normalized).await? {
             self.store_cache(&normalized.cache_key, q.clone()).await;
@@ -203,6 +209,52 @@ impl PriceFeed {
                     }
                 }
             }
+        }
+        Ok(None)
+    }
+
+    async fn try_okx(
+        &self,
+        normalized: &NormalizedSymbols,
+    ) -> Result<Option<PriceQuote>, AppError> {
+        if normalized.chainlink_symbol.len() > 8 {
+            return Ok(None);
+        }
+        let inst = format!("{}-USDT", normalized.chainlink_symbol);
+        let url = format!("https://www.okx.com/api/v5/market/ticker?instId={}", inst);
+        if !self.allow("okx", 60).await {
+            return Ok(None);
+        }
+        let resp = self.client.get(&url).send().await;
+        let resp = match resp {
+            Ok(r) => r,
+            Err(_) => return Ok(None),
+        };
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+        #[derive(Deserialize)]
+        struct OkxResp {
+            data: Vec<OkxTicker>,
+        }
+        #[derive(Deserialize)]
+        struct OkxTicker {
+            #[serde(rename = "last")]
+            last: String,
+        }
+        let parsed: OkxResp = resp
+            .json()
+            .await
+            .map_err(|e| AppError::Initialization(format!("OKX decode failed: {}", e)))?;
+        let price = parsed
+            .data
+            .first()
+            .and_then(|d| d.last.parse::<f64>().ok());
+        if let Some(p) = price {
+            return Ok(Some(PriceQuote {
+                price: p,
+                source: "okx".into(),
+            }));
         }
         Ok(None)
     }
