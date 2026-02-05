@@ -23,7 +23,9 @@ use crate::services::strategy::router_discovery::RouterDiscovery;
 use alloy::primitives::Address;
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
+use alloy_rpc_client::NoParams;
 use dashmap::DashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -158,6 +160,70 @@ impl Engine {
         }
     }
 
+    async fn log_rpc_modules(&self, label: &str, provider: &HttpProvider, require_subscribe: bool) {
+        let modules: Result<HashMap<String, String>, _> =
+            provider.raw_request("rpc_modules".into(), NoParams::default()).await;
+        match modules {
+            Ok(module_map) => {
+                let mut names: Vec<String> = module_map.keys().cloned().collect();
+                names.sort();
+                tracing::info!(
+                    target: "rpc",
+                    transport = label,
+                    modules = %names.join(","),
+                    "RPC modules reported"
+                );
+                let lower: HashSet<String> = names.into_iter().map(|m| m.to_lowercase()).collect();
+                if !lower.contains("eth") {
+                    tracing::warn!(
+                        target: "rpc",
+                        transport = label,
+                        "RPC module 'eth' missing; core calls may fail"
+                    );
+                }
+                if !lower.contains("debug") {
+                    tracing::warn!(
+                        target: "rpc",
+                        transport = label,
+                        "RPC module 'debug' missing; debug_traceCall fallbacks disabled"
+                    );
+                }
+                if require_subscribe && !lower.contains("subscribe") {
+                    tracing::warn!(
+                        target: "rpc",
+                        transport = label,
+                        "RPC module 'subscribe' missing; eth_subscribe streaming may fail (Nethermind: JsonRpc.EnabledModules should include Subscribe)"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "rpc",
+                    transport = label,
+                    error = %e,
+                    "rpc_modules call failed; cannot verify enabled namespaces"
+                );
+            }
+        }
+    }
+
+    async fn log_rpc_capabilities(&self) {
+        match self.http_provider.get_client_version().await {
+            Ok(version) => {
+                tracing::info!(target: "rpc", client = %version, "RPC client version");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "rpc",
+                    error = %e,
+                    "web3_clientVersion failed; continuing"
+                );
+            }
+        }
+        self.log_rpc_modules("http", &self.http_provider, false).await;
+        self.log_rpc_modules("ws", &self.ws_provider, true).await;
+    }
+
     pub async fn run(self) -> Result<(), AppError> {
         if self.flashloan_enabled && self.executor.is_none() {
             return Err(AppError::Config(
@@ -175,6 +241,9 @@ impl Engine {
                 )));
             }
         }
+
+        self.log_rpc_capabilities().await;
+        self.simulator.probe_eth_simulate_v1().await;
 
         let stats = Arc::new(StrategyStats::default());
         let (tx_sender, tx_receiver) = mpsc::channel::<StrategyWork>(INGEST_QUEUE_BOUND);

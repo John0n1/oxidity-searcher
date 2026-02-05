@@ -6,6 +6,7 @@ use crate::data::executor::UnifiedHardenedExecutor;
 use crate::network::provider::HttpProvider;
 use alloy::providers::Provider;
 use alloy::providers::ext::DebugApi;
+use alloy::primitives::{Address, TxKind, U256};
 use alloy::rpc::types::eth::simulate::{SimBlock, SimCallResult, SimulatePayload};
 use alloy::rpc::types::eth::state::StateOverride;
 use alloy::rpc::types::eth::{
@@ -66,9 +67,14 @@ impl SimulationBackendMethod {
                     return Self::DebugTraceCall;
                 }
                 "eth_call" | "ethcall" | "call" => return Self::EthCall,
-                "eth_simulate" | "ethsimulate" | "simulate" | "revm" | "revmv1" | "anvil" => {
-                    return Self::EthSimulate;
-                }
+                "eth_simulate"
+                | "ethsimulate"
+                | "eth_simulatev1"
+                | "ethsimulatev1"
+                | "simulate"
+                | "revm"
+                | "revmv1"
+                | "anvil" => return Self::EthSimulate,
                 _ => {}
             }
         }
@@ -96,6 +102,50 @@ pub struct Simulator {
 impl Simulator {
     pub fn new(provider: HttpProvider, backend: SimulationBackend) -> Self {
         Self { provider, backend }
+    }
+
+    pub async fn probe_eth_simulate_v1(&self) {
+        if ETH_SIMULATE_MISSING.get().is_some() {
+            return;
+        }
+        let mut req = TransactionRequest::default();
+        req.from = Some(Address::ZERO);
+        req.to = Some(TxKind::Call(Address::ZERO));
+        req.value = Some(U256::ZERO);
+
+        let block = SimBlock {
+            block_overrides: None,
+            state_overrides: None,
+            calls: vec![req],
+        };
+        let payload = SimulatePayload {
+            block_state_calls: vec![block],
+            trace_transfers: false,
+            validation: false,
+            return_full_transactions: false,
+        };
+
+        match self.provider.simulate(&payload).await {
+            Ok(_) => {
+                tracing::info!(target: "simulation", "eth_simulateV1 available");
+            }
+            Err(e) => {
+                let msg = e.to_string().to_lowercase();
+                if msg.contains("method") && msg.contains("not found") {
+                    let _ = ETH_SIMULATE_MISSING.set(());
+                    tracing::warn!(
+                        target: "simulation",
+                        "eth_simulateV1 not available on node; falling back"
+                    );
+                } else {
+                    tracing::warn!(
+                        target: "simulation",
+                        error = %e,
+                        "eth_simulateV1 probe failed; falling back"
+                    );
+                }
+            }
+        }
     }
 
     pub async fn simulate_transaction(
@@ -147,6 +197,9 @@ impl Simulator {
         req: TransactionRequest,
         state_override: Option<StateOverride>,
     ) -> Result<Option<SimulationOutcome>, AppError> {
+        if ETH_SIMULATE_MISSING.get().is_some() {
+            return Ok(None);
+        }
         let block = SimBlock {
             block_overrides: None,
             state_overrides: state_override.clone(),
@@ -191,6 +244,9 @@ impl Simulator {
         &self,
         req: TransactionRequest,
     ) -> Result<Option<SimulationOutcome>, AppError> {
+        if DEBUG_TRACE_MISSING.get().is_some() {
+            return Ok(None);
+        }
         let trace_options = GethDebugTracingCallOptions::default();
         let block = BlockId::Number(BlockNumberOrTag::Pending);
         match self
@@ -325,6 +381,9 @@ impl Simulator {
         txs: &[TransactionRequest],
         state_override: Option<StateOverride>,
     ) -> Result<Option<Vec<SimulationOutcome>>, AppError> {
+        if ETH_SIMULATE_MISSING.get().is_some() {
+            return Ok(None);
+        }
         let block = SimBlock {
             block_overrides: None,
             state_overrides: state_override.clone(),
@@ -367,6 +426,9 @@ impl Simulator {
         &self,
         txs: &[TransactionRequest],
     ) -> Result<Option<Vec<SimulationOutcome>>, AppError> {
+        if DEBUG_TRACE_MISSING.get().is_some() {
+            return Ok(None);
+        }
         if txs.is_empty() {
             return Ok(Some(Vec::new()));
         }

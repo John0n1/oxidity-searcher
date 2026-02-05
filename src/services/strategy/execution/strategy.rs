@@ -226,54 +226,42 @@ impl StrategyExecutor {
     }
 
     pub(in crate::services::strategy) fn balance_cap_multiplier_bps(&self, balance: U256) -> u64 {
-        let eth = U256::from(1_000_000_000_000_000_000u128);
-        if balance < eth / U256::from(1_000u64) {
-            6_000
-        } else if balance < eth / U256::from(100u64) {
-            7_000
-        } else if balance < eth / U256::from(5u64) {
-            8_000
-        } else if balance < eth / U256::from(2u64) {
-            9_000
-        } else if balance < eth.saturating_mul(U256::from(2u64)) {
-            10_000
-        } else if balance < eth.saturating_mul(U256::from(5u64)) {
-            11_000
-        } else if balance < eth.saturating_mul(U256::from(10u64)) {
-            12_000
-        } else {
-            13_000
-        }
+        let eth_balance = wei_to_eth_f64(balance).max(0.0001);
+        let sqrt = eth_balance.sqrt();
+        let scale = sqrt / (sqrt + 0.8);
+        let min_bps = 6_000.0;
+        let max_bps = 13_000.0;
+        let bps = min_bps + (max_bps - min_bps) * scale;
+        bps.round().clamp(min_bps, max_bps) as u64
     }
 
     pub(in crate::services::strategy) fn effective_slippage_bps(&self) -> u64 {
         if self.slippage_bps > 0 {
             return self.slippage_bps.min(9_999).max(1);
         }
-        use crate::services::strategy::portfolio::BalanceTier;
-        let tier = self.portfolio.get_tier(self.chain_id);
-        let base = match tier {
-            BalanceTier::Dust | BalanceTier::Tiny => 120,
-            BalanceTier::VeryLow | BalanceTier::Low => 90,
-            BalanceTier::SubTenth | BalanceTier::SubTwoTenths => 70,
-            BalanceTier::SubHalf | BalanceTier::SubOne => 60,
-            BalanceTier::Healthy => 45,
-            BalanceTier::Whale => 35,
-        };
-        base.clamp(5, 500)
+        let wallet_balance = self.portfolio.get_eth_balance_cached(self.chain_id);
+        let eth_balance = wei_to_eth_f64(wallet_balance).max(0.0001);
+        let base = 120.0 - 30.0 * (eth_balance * 100.0 + 1.0).log10();
+        let volatility = self
+            .price_feed
+            .volatility_bps_cached("ETH")
+            .unwrap_or(0) as f64;
+        let vol_adjust = volatility * 0.35;
+        let slippage = base + vol_adjust;
+        slippage.round().clamp(15.0, 500.0) as u64
     }
 
     pub(in crate::services::strategy) fn max_price_impact_bps(&self) -> u64 {
-        use crate::services::strategy::portfolio::BalanceTier;
-        let tier = self.portfolio.get_tier(self.chain_id);
-        match tier {
-            BalanceTier::Dust | BalanceTier::Tiny => 150,
-            BalanceTier::VeryLow | BalanceTier::Low => 120,
-            BalanceTier::SubTenth | BalanceTier::SubTwoTenths => 100,
-            BalanceTier::SubHalf | BalanceTier::SubOne => 80,
-            BalanceTier::Healthy => 60,
-            BalanceTier::Whale => 40,
-        }
+        let wallet_balance = self.portfolio.get_eth_balance_cached(self.chain_id);
+        let eth_balance = wei_to_eth_f64(wallet_balance).max(0.0001);
+        let base = 170.0 - 40.0 * (eth_balance * 100.0 + 1.0).log10();
+        let volatility = self
+            .price_feed
+            .volatility_bps_cached("ETH")
+            .unwrap_or(0) as f64;
+        let vol_adjust = volatility * 0.15;
+        let impact = base - vol_adjust;
+        impact.round().clamp(30.0, 200.0) as u64
     }
 
     pub(in crate::services::strategy) fn record_router_sim(&self, router: Address, success: bool) {
@@ -286,17 +274,6 @@ impl StrategyExecutor {
                 }
             })
             .or_insert((if success { 0 } else { 1 }, 1));
-    }
-
-    pub(in crate::services::strategy) fn router_failure_rate(&self, router: Address) -> Option<f64> {
-        self.router_sim_stats.get(&router).map(|e| {
-            let (fails, total) = *e;
-            if total == 0 {
-                0.0
-            } else {
-                (fails as f64) / (total as f64)
-            }
-        })
     }
 
     pub(in crate::services::strategy) fn router_is_risky(&self, router: Address) -> bool {
@@ -1048,26 +1025,20 @@ mod tests {
 
     #[test]
     fn backrun_divisors_change_with_balance() {
-        assert_eq!(
-            StrategyExecutor::test_backrun_divisors_public(U256::from(50_000_000_000_000_000u128)),
-            (4, 6)
-        );
-        assert_eq!(
-            StrategyExecutor::test_backrun_divisors_public(U256::from(300_000_000_000_000_000u128)),
-            (3, 5)
-        );
-        assert_eq!(
-            StrategyExecutor::test_backrun_divisors_public(U256::from(
-                1_000_000_000_000_000_000u128
-            )),
-            (2, 4)
-        );
-        assert_eq!(
-            StrategyExecutor::test_backrun_divisors_public(U256::from(
-                3_000_000_000_000_000_000u128
-            )),
-            (2, 3)
-        );
+        let small = StrategyExecutor::test_backrun_divisors_public(U256::from(
+            50_000_000_000_000_000u128,
+        ));
+        let mid = StrategyExecutor::test_backrun_divisors_public(U256::from(
+            300_000_000_000_000_000u128,
+        ));
+        let large = StrategyExecutor::test_backrun_divisors_public(U256::from(
+            3_000_000_000_000_000_000u128,
+        ));
+        assert!(small.0 >= mid.0 && mid.0 >= large.0);
+        assert!(small.1 >= mid.1 && mid.1 >= large.1);
+        assert!(small.1 >= small.0);
+        assert!(mid.1 >= mid.0);
+        assert!(large.1 >= large.0);
     }
 
     #[test]

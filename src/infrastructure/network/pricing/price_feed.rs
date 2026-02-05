@@ -54,6 +54,8 @@ pub struct PriceFeed {
     client: Client,
     // Map: Symbol -> (Price, Timestamp)
     cache: Arc<RwLock<HashMap<String, (PriceQuote, Instant)>>>,
+    volatility_cache: Arc<Mutex<HashMap<String, (u64, Instant)>>>,
+    last_price: Arc<Mutex<HashMap<String, (f64, Instant)>>>,
     chainlink_feeds: HashMap<String, Address>,
     provider: HttpProvider,
     decimals_cache: Arc<Mutex<HashMap<Address, u8>>>,
@@ -88,6 +90,8 @@ impl PriceFeed {
                 .build()
                 .unwrap(),
             cache: Arc::new(RwLock::new(HashMap::new())),
+            volatility_cache: Arc::new(Mutex::new(HashMap::new())),
+            last_price: Arc::new(Mutex::new(HashMap::new())),
             chainlink_feeds,
             provider,
             decimals_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -601,32 +605,61 @@ impl PriceFeed {
         };
         let url =
             format!("https://api.etherscan.io/api?module=stats&action=ethprice&apikey={api_key}");
-        let resp = self
+        let resp = match self
             .client
             .get(&url)
             .header(header::ACCEPT, "application/json")
             .send()
             .await
-            .map_err(|e| AppError::Connection(format!("Etherscan price failed: {}", e)))?;
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                tracing::warn!(
+                    target: "price_feed",
+                    error = %e,
+                    "Etherscan price request failed; falling back"
+                );
+                return Ok(None);
+            }
+        };
         if !resp.status().is_success() {
-            return Err(AppError::ApiCall {
-                provider: "Etherscan price".into(),
-                status: resp.status().as_u16(),
-            });
+            tracing::warn!(
+                target: "price_feed",
+                status = resp.status().as_u16(),
+                "Etherscan price returned non-200; falling back"
+            );
+            return Ok(None);
         }
-        let parsed: EtherscanPriceResponse = resp
-            .json()
-            .await
-            .map_err(|e| AppError::Initialization(format!("Etherscan price decode failed: {e}")))?;
+        let parsed: EtherscanPriceResponse = match resp.json().await {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                tracing::warn!(
+                    target: "price_feed",
+                    error = %e,
+                    "Etherscan price decode failed; falling back"
+                );
+                return Ok(None);
+            }
+        };
 
-        let result = parsed
-            .result
-            .ok_or_else(|| AppError::Initialization("Etherscan price missing result".into()))?;
+        let result = match parsed.result {
+            Some(result) => result,
+            None => {
+                tracing::warn!(target: "price_feed", "Etherscan price missing result; falling back");
+                return Ok(None);
+            }
+        };
 
-        let price: f64 = result
-            .ethusd
-            .parse()
-            .map_err(|_| AppError::Initialization("Invalid ethusd from Etherscan".into()))?;
+        let price: f64 = match result.ethusd.parse() {
+            Ok(price) => price,
+            Err(_) => {
+                tracing::warn!(
+                    target: "price_feed",
+                    "Invalid ethusd from Etherscan; falling back"
+                );
+                return Ok(None);
+            }
+        };
 
         Ok(Some(PriceQuote {
             price,
@@ -634,9 +667,46 @@ impl PriceFeed {
         }))
     }
 
+    pub fn volatility_bps_cached(&self, symbol: &str) -> Option<u64> {
+        let upper = symbol.to_uppercase();
+        let mut guard = self.volatility_cache.lock().ok()?;
+        let (bps, ts) = guard.get(&upper).copied()?;
+        if ts.elapsed().as_secs() > STALE_CACHE_GRACE_SECS {
+            guard.remove(&upper);
+            return None;
+        }
+        Some(bps)
+    }
+
     async fn store_cache(&self, symbol: &str, price: PriceQuote) {
+        let price_value = price.price;
         let mut write_guard = self.cache.write().await;
         write_guard.insert(symbol.to_string(), (price, Instant::now()));
+        drop(write_guard);
+        self.update_volatility(symbol, price_value);
+    }
+
+    fn update_volatility(&self, symbol: &str, price: f64) {
+        if price <= 0.0 {
+            return;
+        }
+        let upper = symbol.to_uppercase();
+        let now = Instant::now();
+        if let Ok(mut last_guard) = self.last_price.lock() {
+            if let Some((prev_price, prev_ts)) = last_guard.get(&upper).copied() {
+                let elapsed = now.duration_since(prev_ts).as_secs().max(1);
+                let delta = (price - prev_price).abs();
+                if prev_price > 0.0 {
+                    let raw_bps = (delta / prev_price) * 10_000.0;
+                    let scaled = raw_bps * (60.0 / elapsed as f64);
+                    let vol_bps = scaled.round().clamp(0.0, 2_000.0) as u64;
+                    if let Ok(mut vol_guard) = self.volatility_cache.lock() {
+                        vol_guard.insert(upper.clone(), (vol_bps, now));
+                    }
+                }
+            }
+            last_guard.insert(upper, (price, now));
+        }
     }
 
     async fn cached_if_fresh(&self, key: &str) -> Option<PriceQuote> {

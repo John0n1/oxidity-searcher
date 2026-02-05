@@ -12,6 +12,11 @@ use alloy::primitives::{I256, U256};
 use std::ops::Neg;
 
 impl StrategyExecutor {
+    fn balance_to_eth_f64(balance: U256) -> f64 {
+        let num = balance.to_string().parse::<f64>().unwrap_or(0.0);
+        num / 1e18f64
+    }
+
     pub(crate) fn price_ratio_ppm(amount_out: U256, amount_in: U256) -> U256 {
         if amount_in.is_zero() {
             return U256::ZERO;
@@ -349,17 +354,15 @@ impl StrategyExecutor {
     }
 
     pub(crate) fn backrun_divisors(wallet_balance: U256) -> (u64, u64) {
-        let thresholds = [
-            (U256::from(100_000_000_000_000_000u128), (4u64, 6u64)), // <0.1 ETH
-            (U256::from(500_000_000_000_000_000u128), (3u64, 5u64)), // <0.5 ETH
-            (U256::from(2_000_000_000_000_000_000u128), (2u64, 4u64)), // <2 ETH
-        ];
-        for (limit, divisors) in thresholds {
-            if wallet_balance < limit {
-                return divisors;
-            }
-        }
-        (2, 3)
+        let eth_balance = Self::balance_to_eth_f64(wallet_balance).max(0.0001);
+        let raw = 6.0 - 2.0 * (eth_balance * 100.0 + 1.0).log10();
+        let max_div = raw.round().clamp(2.0, 6.0) as u64;
+        let gas_div = if max_div <= 2 {
+            3
+        } else {
+            (max_div + 2).min(6)
+        };
+        (max_div, gas_div)
     }
 
     #[cfg(test)]
@@ -369,28 +372,21 @@ impl StrategyExecutor {
 
     pub(crate) fn dynamic_gas_ratio_limit(&self, wallet_balance: U256) -> u64 {
         let pnl = self.portfolio.get_net_profit_i256(self.chain_id);
-        let base = if wallet_balance < U256::from(100_000_000_000_000_000u128) {
-            5000
-        } else if wallet_balance < U256::from(500_000_000_000_000_000u128) {
-            6500
-        } else if wallet_balance < U256::from(2_000_000_000_000_000_000u128) {
-            8000
-        } else {
-            9000
-        };
+        let eth_balance = Self::balance_to_eth_f64(wallet_balance).max(0.0001);
+        let base = 5000.0 + 1500.0 * (eth_balance * 100.0 + 1.0).log10();
+        let mut base = base.round().clamp(4500.0, 9000.0) as u64;
 
         // Convert U256 PnL thresholds to I256 for comparison
         let neg_0_05 = I256::from_raw(U256::from(50_000_000_000_000_000u128)).neg();
         let pos_0_2 = I256::from_raw(U256::from(200_000_000_000_000_000u128));
 
         if pnl < neg_0_05 {
-            (base * 85 / 100).max(3500) // tighten 15%
+            base = (base * 85 / 100).max(3500); // tighten 15%
         } else if pnl.is_negative() {
-            (base * 92 / 100).max(4000) // tighten 8%
+            base = (base * 92 / 100).max(4000); // tighten 8%
         } else if pnl > pos_0_2 {
-            (base * 105 / 100).min(9500)
-        } else {
-            base
+            base = (base * 105 / 100).min(9500);
         }
+        base
     }
 }

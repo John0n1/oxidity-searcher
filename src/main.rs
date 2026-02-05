@@ -84,7 +84,7 @@ async fn main() -> Result<(), AppError> {
     }
 
     // Auto-detect chain if not explicitly configured
-    let mut chains: Vec<u64> = if settings.chains.is_empty() {
+    let chains: Vec<u64> = if settings.chains.is_empty() {
         if let Some(url) = settings.primary_http_url() {
             let http = ConnectionFactory::http(&url)?;
             let cid_u64: u64 = http

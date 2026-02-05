@@ -9,20 +9,6 @@ use alloy::providers::Provider;
 use dashmap::DashMap;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum BalanceTier {
-    Dust,         // < 0.005 ETH
-    Tiny,         // < 0.01 ETH
-    VeryLow,      // < 0.05 ETH
-    Low,          // < 0.09 ETH
-    SubTenth,     // < 0.10 ETH
-    SubTwoTenths, // < 0.20 ETH
-    SubHalf,      // < 0.50 ETH
-    SubOne,       // < 1.00 ETH
-    Healthy,      // 1–5 ETH
-    Whale,        // > 5.0 ETH
-}
-
 pub struct PortfolioManager {
     provider: HttpProvider,
     wallet_address: Address,
@@ -70,44 +56,11 @@ impl PortfolioManager {
         Ok(bal)
     }
 
-    pub fn get_tier(&self, chain_id: u64) -> BalanceTier {
-        let bal = self
-            .eth_balance
+    pub fn get_eth_balance_cached(&self, chain_id: u64) -> U256 {
+        self.eth_balance
             .get(&chain_id)
             .map(|v| *v)
-            .unwrap_or(U256::ZERO);
-
-        let t_dust = U256::from(5_000_000_000_000_000u64); // 0.005
-        let t_tiny = U256::from(10_000_000_000_000_000u64); // 0.01
-        let t_vlow = U256::from(50_000_000_000_000_000u64); // 0.05
-        let t_low = U256::from(90_000_000_000_000_000u64); // 0.09
-        let t_sub_tenth = U256::from(100_000_000_000_000_000u64); // 0.10
-        let t_sub_two_tenths = U256::from(200_000_000_000_000_000u64); // 0.20
-        let t_sub_half = U256::from(500_000_000_000_000_000u64); // 0.50
-        let t_sub_one = U256::from(1_000_000_000_000_000_000u64); // 1.00
-        let t_whale = U256::from(5_000_000_000_000_000_000u64); // 5.00
-
-        if bal < t_dust {
-            BalanceTier::Dust
-        } else if bal < t_tiny {
-            BalanceTier::Tiny
-        } else if bal < t_vlow {
-            BalanceTier::VeryLow
-        } else if bal < t_low {
-            BalanceTier::Low
-        } else if bal < t_sub_tenth {
-            BalanceTier::SubTenth
-        } else if bal < t_sub_two_tenths {
-            BalanceTier::SubTwoTenths
-        } else if bal < t_sub_half {
-            BalanceTier::SubHalf
-        } else if bal < t_sub_one {
-            BalanceTier::SubOne
-        } else if bal < t_whale {
-            BalanceTier::Healthy
-        } else {
-            BalanceTier::Whale
-        }
+            .unwrap_or(U256::ZERO)
     }
 
     pub fn ensure_funding(&self, chain_id: u64, amount_needed: U256) -> Result<(), AppError> {
