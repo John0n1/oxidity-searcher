@@ -1,7 +1,6 @@
 # Local configs and secrets
 config.toml
 .env
-*.db
 .cargo
 .venv
 merge.py
