@@ -18,8 +18,7 @@ use crate::services::strategy::decode::{
     ObservedSwap, RouterKind, encode_v3_path, reverse_v3_path, target_token,
 };
 use crate::services::strategy::routers::{
-    AavePool, AaveV2LendingPool, BalancerProtocolFees, BalancerVault, BalancerVaultFees,
-    CurvePoolSwap,
+    AavePool, BalancerProtocolFees, BalancerVault, BalancerVaultFees, CurvePoolSwap,
 };
 use crate::services::strategy::routers::{ERC20, UniV2Router, UniV3Router};
 use crate::services::strategy::strategy::{FlashloanProvider, StrategyExecutor};
@@ -67,16 +66,13 @@ pub struct ApproveTx {
 
 const BALANCER_FLASHLOAN_OVERHEAD_GAS: u64 = 180_000;
 const AAVE_FLASHLOAN_OVERHEAD_GAS: u64 = 200_000;
-const AAVE_V2_FLASHLOAN_OVERHEAD_GAS: u64 = 220_000;
 const V2_SWAP_OVERHEAD_GAS: u64 = 160_000;
 const CURVE_SWAP_OVERHEAD_GAS: u64 = 220_000;
 const BALANCER_SWAP_OVERHEAD_GAS: u64 = 200_000;
 const FEE_TTL: Duration = Duration::from_secs(300);
 
-static BALANCER_FEE_CACHE: Lazy<DashMap<u64, (U256, std::time::Instant)>> =
-    Lazy::new(DashMap::new);
-static AAVE_FEE_CACHE: Lazy<DashMap<Address, (U256, std::time::Instant)>> =
-    Lazy::new(DashMap::new);
+static BALANCER_FEE_CACHE: Lazy<DashMap<u64, (U256, std::time::Instant)>> = Lazy::new(DashMap::new);
+static AAVE_FEE_CACHE: Lazy<DashMap<Address, (U256, std::time::Instant)>> = Lazy::new(DashMap::new);
 
 impl StrategyExecutor {
     fn single_leg_route(
@@ -98,10 +94,7 @@ impl StrategyExecutor {
             min_out,
             fee,
             params,
-            is_flash_leg: matches!(
-                venue,
-                RouteVenue::AaveV2 | RouteVenue::AaveV3Flash | RouteVenue::BalancerFlash
-            ),
+            is_flash_leg: matches!(venue, RouteVenue::AaveV3Flash | RouteVenue::BalancerFlash),
         }])
     }
     pub(crate) async fn needs_approval(
@@ -151,7 +144,11 @@ impl StrategyExecutor {
             )
             .await?;
 
-        Ok(ApproveTx { raw, request, token })
+        Ok(ApproveTx {
+            raw,
+            request,
+            token,
+        })
     }
 
     // Reserved for future Curve integrations.
@@ -301,7 +298,8 @@ impl StrategyExecutor {
 
         // Zero approvals after execution to limit allowance exposure.
         if !reset_tokens.is_empty() {
-            gas_limit = gas_limit.saturating_add(30_000u64.saturating_mul(reset_tokens.len() as u64));
+            gas_limit =
+                gas_limit.saturating_add(30_000u64.saturating_mul(reset_tokens.len() as u64));
         }
         for (token, spender) in reset_tokens.iter().copied() {
             let reset = UnifiedHardenedExecutor::safeApproveCall {
@@ -372,8 +370,8 @@ impl StrategyExecutor {
         if !self.has_usable_flashloan_provider() {
             return false;
         }
-        let safety_buffer = U256::from(gas_fees.max_fee_per_gas)
-            .saturating_mul(U256::from(120_000u64));
+        let safety_buffer =
+            U256::from(gas_fees.max_fee_per_gas).saturating_mul(U256::from(120_000u64));
         if wallet_balance < required_value.saturating_add(safety_buffer) {
             return true;
         }
@@ -440,7 +438,8 @@ impl StrategyExecutor {
                 .quote_curve_pool(pool, token_in, token_out, amount_in)
                 .await
             {
-                let min_out = out.saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
+                let min_out = out
+                    .saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
                     / U256::from(10_000u64);
                 let mut param_bytes = Vec::with_capacity(3);
                 param_bytes.push(if underlying { 1 } else { 0 });
@@ -469,7 +468,8 @@ impl StrategyExecutor {
                 .quote_balancer_single(pool, token_in, token_out, amount_in)
                 .await
             {
-                let min_out = out.saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
+                let min_out = out
+                    .saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
                     / U256::from(10_000u64);
                 graph.add_edge(QuoteEdge {
                     venue: RouteVenue::BalancerPool,
@@ -512,9 +512,6 @@ impl StrategyExecutor {
             if self
                 .flashloan_providers
                 .contains(&FlashloanProvider::AaveV3)
-                || self
-                    .flashloan_providers
-                    .contains(&FlashloanProvider::AaveV2)
             {
                 if let Some(pool) = self.aave_pool {
                     graph.add_edge(QuoteEdge {
@@ -602,26 +599,6 @@ impl StrategyExecutor {
                 };
                 exec_call.abi_encode()
             }
-            FlashloanProvider::AaveV2 => {
-                // Aave v2 flashLoan(address receiver, address[] assets, uint256[] amounts, uint256[] modes, address onBehalfOf, bytes params, uint16 referralCode)
-                let _pool = self
-                    .aave_pool
-                    .ok_or_else(|| AppError::Strategy("Aave v2 pool address missing".into()))?;
-                // modes all zero for no debt (full repayment)
-                let modes = vec![U256::ZERO];
-                let params_bytes = Bytes::from(params.clone());
-                let referral: u16 = 0;
-                let call = AaveV2LendingPool::flashLoanCall {
-                    receiverAddress: executor,
-                    assets: vec![asset],
-                    amounts: vec![amount],
-                    modes,
-                    onBehalfOf: executor,
-                    params: params_bytes,
-                    referralCode: referral,
-                };
-                call.abi_encode()
-            }
             FlashloanProvider::AaveV3 => {
                 let pool = self
                     .aave_pool
@@ -638,7 +615,6 @@ impl StrategyExecutor {
 
         let overhead = match provider {
             FlashloanProvider::Balancer => BALANCER_FLASHLOAN_OVERHEAD_GAS,
-            FlashloanProvider::AaveV2 => AAVE_V2_FLASHLOAN_OVERHEAD_GAS,
             FlashloanProvider::AaveV3 => AAVE_FLASHLOAN_OVERHEAD_GAS,
         };
 
@@ -685,7 +661,6 @@ impl StrategyExecutor {
                 };
                 amount.saturating_mul(premium_bps) / U256::from(10_000u64)
             }
-            _ => U256::ZERO,
         };
         let _overhead_cost =
             U256::from(overhead).saturating_mul(U256::from(gas_fees.max_fee_per_gas));
@@ -1487,10 +1462,6 @@ impl StrategyExecutor {
                     self.quote_balancer_flashloan(asset, amount, gas_fees.max_fee_per_gas)
                         .await?
                 }
-                FlashloanProvider::AaveV2 => {
-                    self.quote_aave_v2_flashloan(asset, amount, gas_fees.max_fee_per_gas)
-                        .await?
-                }
                 FlashloanProvider::AaveV3 => {
                     self.quote_aave_flashloan(asset, amount, gas_fees.max_fee_per_gas)
                         .await?
@@ -1505,11 +1476,7 @@ impl StrategyExecutor {
                 _ => {}
             }
         }
-        if let Some((p, _)) = best {
-            Ok(Some(p))
-        } else {
-            Ok(self.flashloan_providers.first().copied())
-        }
+        Ok(best.map(|(p, _)| p))
     }
 
     async fn quote_balancer_flashloan(
@@ -1567,7 +1534,7 @@ impl StrategyExecutor {
 
     async fn quote_aave_flashloan(
         &self,
-        asset: Address,
+        _asset: Address,
         amount: U256,
         max_fee_per_gas: u128,
     ) -> Result<Option<(U256, u64)>, AppError> {
@@ -1575,14 +1542,6 @@ impl StrategyExecutor {
             Some(p) => p,
             None => return Ok(None),
         };
-        let balance: U256 = ERC20::new(asset, self.http_provider.clone())
-            .balanceOf(pool)
-            .call()
-            .await
-            .unwrap_or(U256::MAX);
-        if balance < amount {
-            return Ok(None);
-        }
         let premium_bps: U256 = if let Some((v, ts)) = AAVE_FEE_CACHE.get(&pool).map(|v| v.clone())
         {
             if ts.elapsed() <= FEE_TTL {
@@ -1614,61 +1573,6 @@ impl StrategyExecutor {
             .await
             .map(U256::from)
             .map_err(|e| AppError::Strategy(format!("Aave premium fetch failed: {}", e)))?;
-        AAVE_FEE_CACHE.insert(pool, (v, std::time::Instant::now()));
-        Ok(v)
-    }
-
-    async fn quote_aave_v2_flashloan(
-        &self,
-        asset: Address,
-        amount: U256,
-        max_fee_per_gas: u128,
-    ) -> Result<Option<(U256, u64)>, AppError> {
-        let pool = match self.aave_pool {
-            Some(p) => p,
-            None => return Ok(None),
-        };
-        let balance: U256 = ERC20::new(asset, self.http_provider.clone())
-            .balanceOf(pool)
-            .call()
-            .await
-            .unwrap_or(U256::MAX);
-        if balance < amount {
-            return Ok(None);
-        }
-
-        // Aave v2 premium is FLASHLOAN_PREMIUM_TOTAL / 10_000
-        let premium_bps: U256 = if let Some((v, ts)) = AAVE_FEE_CACHE.get(&pool).map(|v| v.clone())
-        {
-            if ts.elapsed() <= FEE_TTL {
-                v
-            } else {
-                AAVE_FEE_CACHE.remove(&pool);
-                self.fetch_aave_v2_premium(pool).await?
-            }
-        } else {
-            self.fetch_aave_v2_premium(pool).await?
-        };
-
-        let premium = amount
-            .saturating_mul(premium_bps)
-            .checked_div(U256::from(10_000u64))
-            .unwrap_or(U256::MAX);
-        let gas_cost =
-            U256::from(AAVE_V2_FLASHLOAN_OVERHEAD_GAS).saturating_mul(U256::from(max_fee_per_gas));
-        Ok(Some((
-            premium.saturating_add(gas_cost),
-            AAVE_V2_FLASHLOAN_OVERHEAD_GAS,
-        )))
-    }
-
-    async fn fetch_aave_v2_premium(&self, pool: Address) -> Result<U256, AppError> {
-        let v: U256 = AaveV2LendingPool::new(pool, self.http_provider.clone())
-            .FLASHLOAN_PREMIUM_TOTAL()
-            .call()
-            .await
-            .map(U256::from)
-            .map_err(|e| AppError::Strategy(format!("Aave v2 premium fetch failed: {}", e)))?;
         AAVE_FEE_CACHE.insert(pool, (v, std::time::Instant::now()));
         Ok(v)
     }

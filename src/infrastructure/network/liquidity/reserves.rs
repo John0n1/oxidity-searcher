@@ -43,8 +43,8 @@ pub struct V2Reserves {
 #[derive(Clone)]
 pub struct ReserveCache {
     http_provider: HttpProvider,
-    v2_reserves: DashSet<(Address, V2Reserves)>,
-    v2_pairs_by_tokens: DashSet<((Address, Address), Address)>,
+    v2_reserves: DashMap<Address, V2Reserves>,
+    v2_pairs_by_tokens: DashMap<(Address, Address), Address>,
     inflight_pairs: DashSet<Address>,
     lookup_permits: std::sync::Arc<tokio::sync::Semaphore>,
     curve_registry: DashSet<Address>,
@@ -71,8 +71,8 @@ impl ReserveCache {
     pub fn new(http_provider: HttpProvider) -> Self {
         Self {
             http_provider,
-            v2_reserves: DashSet::new(),
-            v2_pairs_by_tokens: DashSet::new(),
+            v2_reserves: DashMap::new(),
+            v2_pairs_by_tokens: DashMap::new(),
             inflight_pairs: DashSet::new(),
             lookup_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
             curve_registry: DashSet::new(),
@@ -339,8 +339,8 @@ impl ReserveCache {
             let token1 = Address::from_str(&entry.token1)
                 .map_err(|_| AppError::Config("Invalid token1 in pairs.json".into()))?;
             let key = Self::token_pair_key(token0, token1);
-            self.v2_pairs_by_tokens.insert((key, pair));
-            self.v2_reserves.insert((
+            self.v2_pairs_by_tokens.insert(key, pair);
+            self.v2_reserves.insert(
                 pair,
                 V2Reserves {
                     token0,
@@ -348,7 +348,7 @@ impl ReserveCache {
                     reserve0: U256::ZERO,
                     reserve1: U256::ZERO,
                 },
-            ));
+            );
         }
         Ok(())
     }
@@ -412,8 +412,8 @@ impl ReserveCache {
             }
 
             let key = Self::token_pair_key(token0, token1);
-            self.v2_pairs_by_tokens.insert((key, pair));
-            self.v2_reserves.insert((
+            self.v2_pairs_by_tokens.insert(key, pair);
+            self.v2_reserves.insert(
                 pair,
                 V2Reserves {
                     token0,
@@ -421,7 +421,7 @@ impl ReserveCache {
                     reserve0: U256::ZERO,
                     reserve1: U256::ZERO,
                 },
-            ));
+            );
             kept += 1;
         }
         tracing::info!(target: "reserves", kept, "Validated pairs.json entries loaded");
@@ -436,7 +436,7 @@ impl ReserveCache {
 
         // Restrict to known pair addresses to avoid a firehose of all V2 pairs on chain.
         let mut filter = Filter::new().event("Sync(uint112,uint112)");
-        let addresses: Vec<Address> = self.v2_reserves.iter().map(|entry| entry.key().0).collect();
+        let addresses: Vec<Address> = self.v2_reserves.iter().map(|entry| *entry.key()).collect();
         if !addresses.is_empty() {
             filter = filter.address(addresses);
         }
@@ -494,14 +494,8 @@ impl ReserveCache {
             let from = window[0];
             let to = window[1];
             let key = Self::token_pair_key(from, to);
-            let pair = self.v2_pairs_by_tokens.iter().find_map(|entry| {
-                let k = entry.key();
-                if k.0 == key { Some(k.1) } else { None }
-            })?;
-            let reserves = self.v2_reserves.iter().find_map(|entry| {
-                let k = entry.key();
-                if k.0 == pair { Some(k.1.clone()) } else { None }
-            })?;
+            let pair = *self.v2_pairs_by_tokens.get(&key)?;
+            let reserves = self.v2_reserves.get(&pair)?.clone();
             let (reserve_in, reserve_out) = if from == reserves.token0 {
                 (reserves.reserve0, reserves.reserve1)
             } else if from == reserves.token1 {
@@ -535,11 +529,8 @@ impl ReserveCache {
             let from = window[0];
             let to = window[1];
             let key = Self::token_pair_key(from, to);
-            if let Some(pair) = self.v2_pairs_by_tokens.iter().find_map(|entry| {
-                let k = entry.key();
-                if k.0 == key { Some(k.1) } else { None }
-            }) {
-                pairs.push(pair);
+            if let Some(pair) = self.v2_pairs_by_tokens.get(&key) {
+                pairs.push(*pair);
             }
         }
         pairs
@@ -547,19 +538,8 @@ impl ReserveCache {
 
     pub fn reserves_for_pair(&self, from: Address, to: Address) -> Option<V2Reserves> {
         let key = Self::token_pair_key(from, to);
-        let pair_addr = self.v2_pairs_by_tokens.iter().find_map(|entry| {
-            let k = entry.key();
-            if k.0 == key { Some(k.1) } else { None }
-        })?;
-        let reserves = self.v2_reserves.iter().find_map(|entry| {
-            let k = entry.key();
-            if k.0 == pair_addr {
-                Some(k.1.clone())
-            } else {
-                None
-            }
-        })?;
-        Some(reserves)
+        let pair_addr = *self.v2_pairs_by_tokens.get(&key)?;
+        self.v2_reserves.get(&pair_addr).map(|entry| entry.clone())
     }
 
     async fn handle_v2_log(&self, log: Log) -> Result<(), AppError> {
@@ -579,14 +559,10 @@ impl ReserveCache {
         let reserve1 = U256::from_be_slice(&data[32..64]);
         let pair = log.address();
 
-        let cached_tokens = self.v2_reserves.iter().find_map(|entry| {
-            let key = entry.key();
-            if key.0 == pair {
-                Some((key.1.token0, key.1.token1))
-            } else {
-                None
-            }
-        });
+        let cached_tokens = self
+            .v2_reserves
+            .get(&pair)
+            .map(|entry| (entry.token0, entry.token1));
 
         let (token0, token1) = if let Some(tokens) = cached_tokens {
             tokens
@@ -595,7 +571,7 @@ impl ReserveCache {
             return Ok(());
         };
 
-        self.v2_reserves.insert((
+        self.v2_reserves.insert(
             pair,
             V2Reserves {
                 token0,
@@ -603,9 +579,9 @@ impl ReserveCache {
                 reserve0,
                 reserve1,
             },
-        ));
+        );
         let key = Self::token_pair_key(token0, token1);
-        self.v2_pairs_by_tokens.insert((key, pair));
+        self.v2_pairs_by_tokens.insert(key, pair);
         Ok(())
     }
 
@@ -632,8 +608,8 @@ impl ReserveCache {
             let token1: Result<Address, _> = contract.token1().call().await;
             if let (Ok(t0), Ok(t1)) = (token0, token1) {
                 let key = if t0 < t1 { (t0, t1) } else { (t1, t0) };
-                pairs_map.insert((key, pair));
-                reserves_map.insert((
+                pairs_map.insert(key, pair);
+                reserves_map.insert(
                     pair,
                     V2Reserves {
                         token0: t0,
@@ -641,7 +617,7 @@ impl ReserveCache {
                         reserve0: U256::ZERO,
                         reserve1: U256::ZERO,
                     },
-                ));
+                );
             }
             inflight.remove(&pair);
             drop(permit);
@@ -711,5 +687,59 @@ impl ReserveCache {
             }
             .abi_encode()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use url::Url;
+
+    fn cache() -> ReserveCache {
+        let provider = HttpProvider::new_http(
+            Url::parse("http://127.0.0.1:8545").expect("valid local rpc url"),
+        );
+        ReserveCache::new(provider)
+    }
+
+    #[test]
+    fn v2_reserve_updates_replace_previous_value() {
+        let cache = cache();
+        let pair = Address::from([1u8; 20]);
+        let token0 = Address::from([2u8; 20]);
+        let token1 = Address::from([3u8; 20]);
+        let key = ReserveCache::token_pair_key(token0, token1);
+
+        cache.v2_pairs_by_tokens.insert(key, pair);
+        cache.v2_reserves.insert(
+            pair,
+            V2Reserves {
+                token0,
+                token1,
+                reserve0: U256::from(10u64),
+                reserve1: U256::from(20u64),
+            },
+        );
+        cache.v2_reserves.insert(
+            pair,
+            V2Reserves {
+                token0,
+                token1,
+                reserve0: U256::from(100u64),
+                reserve1: U256::from(200u64),
+            },
+        );
+
+        let quoted = cache.quote_v2_path(&[token0, token1], U256::from(10u64));
+        assert!(
+            quoted.is_some(),
+            "latest reserve update must remain reachable"
+        );
+        let stored = cache
+            .reserves_for_pair(token0, token1)
+            .expect("pair reserves must exist");
+        assert_eq!(stored.reserve0, U256::from(100u64));
+        assert_eq!(stored.reserve1, U256::from(200u64));
+        assert_eq!(cache.v2_reserves.len(), 1);
     }
 }

@@ -55,7 +55,6 @@ pub(crate) const V3_QUOTE_CACHE_TTL_MS: u64 = 250;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlashloanProvider {
     Balancer,
-    AaveV2,
     AaveV3,
 }
 
@@ -190,11 +189,6 @@ impl StrategyExecutor {
         for p in &self.flashloan_providers {
             match p {
                 FlashloanProvider::Balancer => return true,
-                FlashloanProvider::AaveV2 => {
-                    if self.aave_pool.is_some() {
-                        return true;
-                    }
-                }
                 FlashloanProvider::AaveV3 => {
                     if self.aave_pool.is_some() {
                         return true;
@@ -242,10 +236,7 @@ impl StrategyExecutor {
         let wallet_balance = self.portfolio.get_eth_balance_cached(self.chain_id);
         let eth_balance = wei_to_eth_f64(wallet_balance).max(0.0001);
         let base = 120.0 - 30.0 * (eth_balance * 100.0 + 1.0).log10();
-        let volatility = self
-            .price_feed
-            .volatility_bps_cached("ETH")
-            .unwrap_or(0) as f64;
+        let volatility = self.price_feed.volatility_bps_cached("ETH").unwrap_or(0) as f64;
         let vol_adjust = volatility * 0.35;
         let slippage = base + vol_adjust;
         slippage.round().clamp(15.0, 500.0) as u64
@@ -255,10 +246,7 @@ impl StrategyExecutor {
         let wallet_balance = self.portfolio.get_eth_balance_cached(self.chain_id);
         let eth_balance = wei_to_eth_f64(wallet_balance).max(0.0001);
         let base = 170.0 - 40.0 * (eth_balance * 100.0 + 1.0).log10();
-        let volatility = self
-            .price_feed
-            .volatility_bps_cached("ETH")
-            .unwrap_or(0) as f64;
+        let volatility = self.price_feed.volatility_bps_cached("ETH").unwrap_or(0) as f64;
         let vol_adjust = volatility * 0.15;
         let impact = base - vol_adjust;
         impact.round().clamp(30.0, 200.0) as u64
@@ -844,11 +832,17 @@ impl StrategyExecutor {
             if let Ok(Some(rcpt)) = self.http_provider.get_transaction_receipt(*hash).await {
                 let block_num = rcpt.block_number;
                 let status = rcpt.status();
-                let _ = self.db.update_status(
-                    &format!("{:#x}", hash),
-                    block_num.map(|b| b as i64),
-                    Some(status),
-                );
+                if let Err(e) = self
+                    .db
+                    .update_status(
+                        &format!("{:#x}", hash),
+                        block_num.map(|b| b as i64),
+                        Some(status),
+                    )
+                    .await
+                {
+                    tracing::warn!(target: "strategy", error = %e, "Failed to persist tx status");
+                }
                 return Ok(status);
             }
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -1025,12 +1019,10 @@ mod tests {
 
     #[test]
     fn backrun_divisors_change_with_balance() {
-        let small = StrategyExecutor::test_backrun_divisors_public(U256::from(
-            50_000_000_000_000_000u128,
-        ));
-        let mid = StrategyExecutor::test_backrun_divisors_public(U256::from(
-            300_000_000_000_000_000u128,
-        ));
+        let small =
+            StrategyExecutor::test_backrun_divisors_public(U256::from(50_000_000_000_000_000u128));
+        let mid =
+            StrategyExecutor::test_backrun_divisors_public(U256::from(300_000_000_000_000_000u128));
         let large = StrategyExecutor::test_backrun_divisors_public(U256::from(
             3_000_000_000_000_000_000u128,
         ));

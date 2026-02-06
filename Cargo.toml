@@ -4,7 +4,7 @@ version = "0.1.1-delta"
 edition = "2024"
 authors = ["oxidity.io | John Hauger Mitander"]
 description = "Oxidity - MEV Searcher"
-homepage = "https://build.oxidity.io/"
+homepage = "https://build.oxidity.com/"
 repository = "https://github.com/John0n1/oxidity-builder"
 license = "MIT"
 
@@ -45,7 +45,7 @@ dashmap = "6.1.0" # Concurrent HashMap
 futures = "0.3" 
 
 # Network
-reqwest = { version = "0.13.1", features = ["json", "stream"] }
+reqwest = { version = "0.13.2", features = ["json", "stream"] }
 async-trait = "0.1"
 
 # Utils
@@ -56,7 +56,7 @@ once_cell = "1.19"
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
-crypto-common = "0.1.7"
+crypto-common = "0.2.0"
 
 [dev-dependencies]
 regex = "1.11"

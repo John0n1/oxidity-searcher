@@ -36,7 +36,7 @@ pub struct BundleSender {
 }
 
 const FLASHBOTS_MAX_TXS: usize = 100;
-const FLASHBOTS_MAX_BYTES: usize = 500_000;
+const FLASHBOTS_MAX_BYTES: usize = 300_000;
 
 impl BundleSender {
     pub fn new(
@@ -57,6 +57,20 @@ impl BundleSender {
 
     /// Send a MEV-Share bundle that references tx hashes (instead of raw bytes).
     pub async fn send_mev_share_bundle(&self, body: &[BundleItem]) -> Result<(), AppError> {
+        let hash_count = body
+            .iter()
+            .filter(|item| matches!(item, BundleItem::Hash { .. }))
+            .count();
+        let tx_count = body
+            .iter()
+            .filter(|item| matches!(item, BundleItem::Tx { .. }))
+            .count();
+        if body.len() != 2 || hash_count != 1 || tx_count != 1 {
+            return Err(AppError::Strategy(
+                "MEV-Share requires exactly one victim hash and one backrun tx".into(),
+            ));
+        }
+
         if self.dry_run {
             tracing::info!(target: "executor", "Dry-run: would send mev_sendBundle with {} legs", body.len());
             return Ok(());
@@ -341,3 +355,86 @@ impl BundleSender {
 }
 
 pub type SharedBundleSender = Arc<BundleSender>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::provider::HttpProvider;
+    use url::Url;
+
+    fn dry_run_sender() -> BundleSender {
+        let provider =
+            HttpProvider::new_http(Url::parse("http://127.0.0.1:8545").expect("valid url"));
+        let signer = PrivateKeySigner::random();
+        BundleSender::new(
+            provider,
+            true,
+            "https://relay.flashbots.net".to_string(),
+            "https://mev-share.flashbots.net".to_string(),
+            signer,
+        )
+    }
+
+    #[tokio::test]
+    async fn mev_share_bundle_rejects_non_compliant_body_shape() {
+        let sender = dry_run_sender();
+        let invalid = vec![
+            BundleItem::Tx {
+                tx: "0x02".into(),
+                can_revert: false,
+            },
+            BundleItem::Tx {
+                tx: "0x03".into(),
+                can_revert: false,
+            },
+        ];
+        let err = sender
+            .send_mev_share_bundle(&invalid)
+            .await
+            .expect_err("should reject invalid mev-share body");
+        assert!(
+            matches!(err, AppError::Strategy(msg) if msg.contains("exactly one victim hash and one backrun tx"))
+        );
+    }
+
+    #[tokio::test]
+    async fn mev_share_bundle_accepts_single_hash_and_backrun_tx() {
+        let sender = dry_run_sender();
+        let body = vec![
+            BundleItem::Hash {
+                hash: "0x1111111111111111111111111111111111111111111111111111111111111111".into(),
+            },
+            BundleItem::Tx {
+                tx: "0x02".into(),
+                can_revert: false,
+            },
+        ];
+        sender
+            .send_mev_share_bundle(&body)
+            .await
+            .expect("valid mev-share body should be accepted in dry-run");
+    }
+
+    #[tokio::test]
+    async fn send_bundle_rejects_payload_above_flashbots_limit() {
+        let sender = dry_run_sender();
+        let oversized = vec![vec![0u8; FLASHBOTS_MAX_BYTES + 1]];
+        let err = sender
+            .send_bundle(&oversized, 1)
+            .await
+            .expect_err("bundle should exceed max bytes");
+        assert!(
+            matches!(err, AppError::Strategy(msg) if msg.contains("Bundle exceeds Flashbots limits"))
+        );
+    }
+
+    #[tokio::test]
+    async fn send_bundle_accepts_payload_at_flashbots_limit() {
+        let sender = dry_run_sender();
+        let boundary = vec![vec![0u8; FLASHBOTS_MAX_BYTES]];
+        sender
+            .send_bundle(&boundary, 1)
+            .await
+            .expect("bundle at byte limit should be accepted");
+    }
+}

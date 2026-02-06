@@ -3,8 +3,13 @@
   "provider": "publicnode",
   "stack": "evm",
   "verified": true,
-  "count": 17,
+  "count": 18,
   "chains": {
+    "ethereum": {
+      "rpc": "https://ethereum-rpc.publicnode.com",
+      "ws": "wss://ethereum-rpc.publicnode.com",
+      "chain_id": 1
+    },
     "arbitrum": {
       "rpc": "https://arbitrum-rpc.publicnode.com",
       "ws": "wss://arbitrum-rpc.publicnode.com",

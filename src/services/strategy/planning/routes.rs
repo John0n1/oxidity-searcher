@@ -11,7 +11,6 @@ pub enum RouteVenue {
     Sushi,
     CurvePool,
     BalancerPool,
-    AaveV2,
     AaveV3Flash,
     BalancerFlash,
 }

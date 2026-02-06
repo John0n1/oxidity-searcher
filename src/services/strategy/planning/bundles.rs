@@ -18,9 +18,9 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 pub const BUNDLE_DEBOUNCE_MS: u64 = 5;
-// Flashbots documented limits: <=100 txs and < ~500 kB per bundle.
+// Flashbots documented limits: <=100 txs and <=300 kB per bundle.
 const MAX_FLASHBOTS_TXS: usize = 100;
-const MAX_FLASHBOTS_BYTES: usize = 500_000;
+const MAX_FLASHBOTS_BYTES: usize = 300_000;
 
 fn bundle_bytes(bundle: &[Vec<u8>]) -> usize {
     bundle.iter().map(|b| b.len()).sum()
@@ -78,7 +78,9 @@ mod tests {
             count: 4,
         };
         let approval_req = TransactionRequest {
-            to: Some(TxKind::Call(address!("1111111111111111111111111111111111111111"))),
+            to: Some(TxKind::Call(address!(
+                "1111111111111111111111111111111111111111"
+            ))),
             nonce: Some(10),
             gas: Some(21_000),
             max_fee_per_gas: Some(1),
@@ -86,7 +88,9 @@ mod tests {
             ..Default::default()
         };
         let front_req = TransactionRequest {
-            to: Some(TxKind::Call(address!("2222222222222222222222222222222222222222"))),
+            to: Some(TxKind::Call(address!(
+                "2222222222222222222222222222222222222222"
+            ))),
             nonce: Some(11),
             gas: Some(21_000),
             max_fee_per_gas: Some(1),
@@ -95,7 +99,9 @@ mod tests {
         };
         let victim = vec![0u8; 1];
         let main_req = TransactionRequest {
-            to: Some(TxKind::Call(address!("3333333333333333333333333333333333333333"))),
+            to: Some(TxKind::Call(address!(
+                "3333333333333333333333333333333333333333"
+            ))),
             nonce: Some(12),
             gas: Some(21_000),
             max_fee_per_gas: Some(1),
@@ -113,7 +119,7 @@ mod tests {
         let merge = exec.merge_and_send_bundle(plan, Vec::new(), lease).await;
         let hashes = match merge {
             Ok(Some(h)) => h,
-            Ok(None) => return, // nothing merged
+            Ok(None) => return,                     // nothing merged
             Err(AppError::Connection(_)) => return, // skip when no local RPC
             Err(e) => panic!("merge failed: {e}"),
         };

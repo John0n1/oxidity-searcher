@@ -1,0 +1,12 @@
+{
+  "terminal.integrated.profiles.windows": {
+    "VS2022 x64 Dev Cmd": {
+      "path": "C:\\Windows\\System32\\cmd.exe",
+      "args": [
+        "/k",
+        ".vscode\\vsdevcmd.cmd"
+      ]
+    }
+  },
+  "terminal.integrated.defaultProfile.windows": "VS2022 x64 Dev Cmd"
+}

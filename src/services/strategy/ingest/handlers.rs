@@ -451,21 +451,30 @@ impl StrategyExecutor {
             None => return Ok(None),
         };
 
-        let needed_nonces = 1u64 + parts.front_run.is_some() as u64 + parts.approvals.len() as u64;
-        let lease = self.lease_nonces(needed_nonces).await?;
+        if parts.front_run.is_some() {
+            self.log_skip(
+                "unsupported_router",
+                "MEV-Share path requires single backrun tx (no frontrun)",
+            );
+            return Ok(None);
+        }
+        if parts.executor_request.is_none() && !parts.approvals.is_empty() {
+            self.log_skip(
+                "unsupported_router",
+                "MEV-Share path requires executor-wrapped approvals",
+            );
+            return Ok(None);
+        }
 
-        let mut front_run = parts.front_run;
-        let mut approvals = parts.approvals;
+        let lease = self.lease_nonces(1).await?;
+
+        let mut front_run = None;
+        let mut approvals: Vec<ApproveTx> = Vec::new();
         let mut backrun = parts.backrun;
         let mut executor_request = parts.executor_request;
         let mut main_request = executor_request
             .clone()
             .unwrap_or_else(|| backrun.request.clone());
-
-        // Approvals are already embedded in the executor bundle; skip sending them as separate txes.
-        if executor_request.is_some() {
-            approvals.clear();
-        }
 
         Self::apply_nonce_plan(&lease, &mut front_run, &mut approvals, &mut main_request)?;
         if let Some(exec) = executor_request.as_mut() {
@@ -492,15 +501,8 @@ impl StrategyExecutor {
             ..Default::default()
         };
 
-        let mut bundle_requests: Vec<TransactionRequest> = Vec::new();
-        for a in &approvals {
-            bundle_requests.push(a.request.clone());
-        }
-        if let Some(f) = &front_run {
-            bundle_requests.push(f.request.clone());
-        }
-        bundle_requests.push(victim_request.clone());
-        bundle_requests.push(main_request.clone());
+        let bundle_requests: Vec<TransactionRequest> =
+            vec![victim_request.clone(), main_request.clone()];
 
         let overrides = StateOverridesBuilder::default()
             .with_balance(self.signer.address(), parts.sim_balance)
@@ -544,7 +546,7 @@ impl StrategyExecutor {
             router = ?observed_swap.router,
             used_mock_balance = self.dry_run,
             profit_floor_wei = %StrategyExecutor::dynamic_profit_floor(parts.wallet_balance),
-            sandwich = front_run.is_some(),
+            sandwich = false,
             "MEV-Share strategy evaluation"
         );
 
@@ -563,7 +565,7 @@ impl StrategyExecutor {
                 router = ?observed_swap.router,
                 used_mock_balance = self.dry_run,
                 profit_floor_wei = %StrategyExecutor::dynamic_profit_floor(parts.wallet_balance),
-                sandwich = front_run.is_some(),
+                sandwich = false,
                 "Dry-run only: simulated profitable MEV-Share bundle (not sent)"
             );
             return Ok(Some(tx_hash));
@@ -575,31 +577,6 @@ impl StrategyExecutor {
         });
 
         let mut executor_hash: Option<B256> = None;
-
-        if let Some(f) = front_run.as_mut() {
-            let fallback = f.request.access_list.clone().unwrap_or_default();
-            let req = f.request.clone();
-            let (raw, signed_req, hash) = self.sign_with_access_list(req, fallback).await?;
-            f.raw = raw.clone();
-            f.request = signed_req;
-            f.hash = hash;
-            bundle_body.push(BundleItem::Tx {
-                tx: format!("0x{}", hex::encode(&raw)),
-                can_revert: false,
-            });
-        }
-
-        for app in approvals.iter_mut() {
-            let fallback = app.request.access_list.clone().unwrap_or_default();
-            let req = app.request.clone();
-            let (raw, signed_req, _) = self.sign_with_access_list(req, fallback).await?;
-            app.raw = raw.clone();
-            app.request = signed_req;
-            bundle_body.push(BundleItem::Tx {
-                tx: format!("0x{}", hex::encode(&raw)),
-                can_revert: false,
-            });
-        }
 
         if let Some(req) = executor_request.take() {
             let fallback = req.access_list.clone().unwrap_or_default();
@@ -644,26 +621,25 @@ impl StrategyExecutor {
 
         self.db
             .save_transaction(
-                &format!("{:#x}", backrun.hash),
+                &format!("{:#x}", executor_hash.unwrap_or(backrun.hash)),
                 self.chain_id,
                 &format!("{:#x}", self.signer.address()),
-                Some(format!("{:#x}", backrun.to)).as_deref(),
-                backrun.value.to_string().as_str(),
+                main_request
+                    .to
+                    .as_ref()
+                    .and_then(|k| match k {
+                        TxKind::Call(addr) => Some(format!("{:#x}", addr)),
+                        _ => None,
+                    })
+                    .as_deref(),
+                main_request
+                    .value
+                    .unwrap_or(backrun.value)
+                    .to_string()
+                    .as_str(),
                 Some("strategy_backrun"),
             )
             .await?;
-        if let Some(f) = &front_run {
-            self.db
-                .save_transaction(
-                    &format!("{:#x}", f.hash),
-                    self.chain_id,
-                    &format!("{:#x}", self.signer.address()),
-                    Some(format!("{:#x}", f.to)).as_deref(),
-                    f.value.to_string().as_str(),
-                    Some("strategy_front_run"),
-                )
-                .await?;
-        }
 
         self.db
             .save_profit_record(
@@ -752,21 +728,21 @@ impl StrategyExecutor {
             return Ok(None);
         }
         if observed_swap.router_kind == RouterKind::V2Like {
-            if let Some(expected_out) =
-                self.reserve_cache
-                    .quote_v2_path(&observed_swap.path, observed_swap.amount_in)
+            if let Some(expected_out) = self
+                .reserve_cache
+                .quote_v2_path(&observed_swap.path, observed_swap.amount_in)
             {
                 if !expected_out.is_zero() && !observed_swap.min_out.is_zero() {
-                    let min_ratio = observed_swap
-                        .min_out
-                        .saturating_mul(U256::from(10_000u64))
-                        / expected_out;
-                    let slippage_room_bps =
-                        10_000u64.saturating_sub(min_ratio.to::<u64>());
-                    if slippage_room_bps > 1_500 && wallet_chain_balance
-                        < U256::from(100_000_000_000_000_000u128)
+                    let min_ratio =
+                        observed_swap.min_out.saturating_mul(U256::from(10_000u64)) / expected_out;
+                    let slippage_room_bps = 10_000u64.saturating_sub(min_ratio.to::<u64>());
+                    if slippage_room_bps > 1_500
+                        && wallet_chain_balance < U256::from(100_000_000_000_000_000u128)
                     {
-                        self.log_skip("sandwich_risk", "victim slippage too loose for small wallet");
+                        self.log_skip(
+                            "sandwich_risk",
+                            "victim slippage too loose for small wallet",
+                        );
                         return Ok(None);
                     }
                 }

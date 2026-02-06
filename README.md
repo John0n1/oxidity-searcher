@@ -75,7 +75,7 @@
 - **Sandwich (optional):** front-run for buy-with-ETH paths; amount sizing uses dynamic backrun value; optional approval.
 - **Backrun:** V2/V3 aware; can wrap in executor or flash-loan; supports unwrap-to-native when profitable.
 - **Executor wrapper:** bundles approvals + swap + optional unwrap + bribe; bribe bps configurable/recipient override.
-- **Bundle merge:** nonces within lease, touched pools disjoint, debounce send; multi-victim (mempool + MEV-Share hash legs) supported.
+- **Bundle merge:** nonces within lease, touched pools disjoint, debounce send; mempool path can merge multi-leg bundles, while MEV-Share path is constrained to one victim hash + one backrun tx.
 
 ---
 
@@ -126,8 +126,9 @@
 
 ## 13. Builder/Relay Submission
 
-- **Mainnet:** `eth_sendBundle` to Flashbots primary, Beaver (unsigned), Titan (signed optional); MEV-Share path uses `mev_sendBundle` with hash legs.
+- **Mainnet:** `eth_sendBundle` to Flashbots primary, Beaver (unsigned), Titan (signed optional); MEV-Share path uses `mev_sendBundle` with exactly one victim hash + one backrun tx.
 - **Non-mainnet:** direct `eth_sendRawTransaction` per tx.
+- **Limits:** Flashbots bundle limits enforced at `<=100` txs and `<=300000` bytes.
 
 ---
 
@@ -188,6 +189,7 @@
 Updated: **05/02/2026**
 
 ### Mainnet operator notes (Nethermind + relays)
-- Enable Nethermind modules: `JsonRpc.EnabledModules = ["Eth","Trace","WebSockets"]`, `TraceStore.Enabled = true`, and expose IPC/WS locally for low-latency simulate/trace.
+- Enable Nethermind modules: `JsonRpc.EnabledModules = ["Eth","Subscribe","TxPool","Trace","Debug","Net","Web3","Rpc","Admin"]`, `TraceStore.Enabled = true`, and expose IPC/WS locally for low-latency simulate/trace.
+- Ensure `Trace`/`Debug` are enabled on the exact RPC endpoint used for simulation and diagnostics.
 - For mainnet bundle submission configure builders: Flashbots (`https://relay.flashbots.net`), Beaver, Titan, Ultrasound, Agnostic (builder0x69), bloXroute ethical. All use Flashbots-style signed headers.
 - Always provide `WALLET_KEY`, `BUNDLE_SIGNER_KEY`, `METRICS_TOKEN`, and RPC URLs via environment; repo configs are placeholders only.

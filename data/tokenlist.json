@@ -273,18 +273,6 @@
     ]
   },
   {
-    "symbol": "AXL",
-    "name": "Axelar",
-    "addresses": {
-      "1": "0x4674ace35bbe2c2bb2a8f37cf4e8c5c1abc11536"
-    },
-    "decimals": 6,
-    "coingecko_id": "axelar",
-    "tags": [
-      "tier1"
-    ]
-  },
-  {
     "symbol": "ENA",
     "name": "Ethena",
     "addresses": {
@@ -1296,30 +1284,6 @@
     },
     "decimals": 18,
     "coingecko_id": "liquity",
-    "tags": [
-      "tier1"
-    ]
-  },
-  {
-    "symbol": "AXL",
-    "name": "Axelar",
-    "addresses": {
-      "1": "0xe67ab210dc9d79b2e90db25b5064bf445b79ec9a"
-    },
-    "decimals": 6,
-    "coingecko_id": "axelar",
-    "tags": [
-      "tier1"
-    ]
-  },
-  {
-    "symbol": "GMX",
-    "name": "GMX",
-    "addresses": {
-      "1": "0xfc5a1a6eb076a2c7ad06ed22c90d7e710e35ad0a"
-    },
-    "decimals": 18,
-    "coingecko_id": "gmx",
     "tags": [
       "tier1"
     ]

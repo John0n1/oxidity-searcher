@@ -264,11 +264,10 @@ impl GlobalSettings {
             }
         }
         // Environment fallbacks
-        std::env::var("RPC_URL").ok().filter(|s| !s.is_empty()).or_else(|| {
-            std::env::var("RPC_URL_1")
-                .ok()
-                .filter(|s| !s.is_empty())
-        })
+        std::env::var("RPC_URL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("RPC_URL_1").ok().filter(|s| !s.is_empty()))
     }
 
     /// Helper to get RPC URL for a specific chain
@@ -456,7 +455,6 @@ impl GlobalSettings {
         for p in parts {
             match p {
                 "aave" | "aavev3" | "aave_v3" => out.push(AaveV3),
-                "aavev2" | "aave_v2" => out.push(AaveV2),
                 "balancer" => out.push(Balancer),
                 _ => {}
             }
@@ -854,5 +852,23 @@ mod tests {
             settings.mev_share_relay_url(),
             "https://relay.example".to_string()
         );
+    }
+
+    #[test]
+    fn flashloan_providers_ignore_removed_aave_v2_aliases() {
+        use crate::services::strategy::strategy::FlashloanProvider::Balancer;
+
+        let mut settings = base_settings();
+        settings.flashloan_provider = "aavev2,aave_v2".to_string();
+        assert_eq!(settings.flashloan_providers(), vec![Balancer]);
+    }
+
+    #[test]
+    fn flashloan_providers_auto_uses_supported_provider_set_only() {
+        use crate::services::strategy::strategy::FlashloanProvider::{AaveV3, Balancer};
+
+        let mut settings = base_settings();
+        settings.flashloan_provider = "auto,aavev2".to_string();
+        assert_eq!(settings.flashloan_providers(), vec![AaveV3, Balancer]);
     }
 }
