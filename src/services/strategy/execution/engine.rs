@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
 
+use crate::common::constants::default_balancer_vault_for_chain;
 use crate::common::error::AppError;
 use crate::core::executor::{BundleSender, SharedBundleSender};
 use crate::core::portfolio::PortfolioManager;
 use crate::core::safety::SafetyGuard;
 use crate::core::simulation::Simulator;
 use crate::core::strategy::{StrategyExecutor, StrategyStats, StrategyWork};
-use crate::common::constants::default_balancer_vault_for_chain;
 use crate::data::db::Database;
 use crate::infrastructure::data::address_registry::AddressRegistry;
 use crate::infrastructure::data::token_manager::TokenManager;
@@ -161,8 +161,9 @@ impl Engine {
     }
 
     async fn log_rpc_modules(&self, label: &str, provider: &HttpProvider, require_subscribe: bool) {
-        let modules: Result<HashMap<String, String>, _> =
-            provider.raw_request("rpc_modules".into(), NoParams::default()).await;
+        let modules: Result<HashMap<String, String>, _> = provider
+            .raw_request("rpc_modules".into(), NoParams::default())
+            .await;
         match modules {
             Ok(module_map) => {
                 let mut names: Vec<String> = module_map.keys().cloned().collect();
@@ -220,7 +221,8 @@ impl Engine {
                 );
             }
         }
-        self.log_rpc_modules("http", &self.http_provider, false).await;
+        self.log_rpc_modules("http", &self.http_provider, false)
+            .await;
         self.log_rpc_modules("ws", &self.ws_provider, true).await;
     }
 
@@ -384,6 +386,7 @@ impl Engine {
         }
         let _metrics_addr = crate::common::metrics::spawn_metrics_server(
             self.metrics_port,
+            self.chain_id,
             stats.clone(),
             self.portfolio.clone(),
         )

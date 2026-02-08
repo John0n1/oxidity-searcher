@@ -4,11 +4,13 @@
 use chrono::Utc;
 use serde::Serialize;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tracing_subscriber::{EnvFilter, Registry, fmt, prelude::*, reload};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LogRecord {
+    pub id: u64,
     pub timestamp: String,
     pub level: String,
     pub target: String,
@@ -19,6 +21,7 @@ const LOG_BUFFER_MAX: usize = 500;
 
 static LOG_BUFFER: OnceLock<Arc<Mutex<Vec<LogRecord>>>> = OnceLock::new();
 static LOG_RELOAD: OnceLock<reload::Handle<EnvFilter, Registry>> = OnceLock::new();
+static LOG_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 struct LogCaptureLayer {
     buffer: Arc<Mutex<Vec<LogRecord>>>,
@@ -39,6 +42,7 @@ where
         event.record(&mut visitor);
 
         let record = LogRecord {
+            id: LOG_SEQUENCE.fetch_add(1, Ordering::Relaxed),
             timestamp: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             level: meta.level().to_string(),
             target: meta.target().to_string(),
@@ -116,11 +120,25 @@ pub fn set_log_level(level: &str) -> Result<(), String> {
 }
 
 pub fn recent_logs(limit: usize) -> Vec<LogRecord> {
+    recent_logs_since(None, limit)
+}
+
+pub fn recent_logs_since(after_id: Option<u64>, limit: usize) -> Vec<LogRecord> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
     let buf = LOG_BUFFER
         .get()
         .map(|b| b.lock().unwrap().clone())
         .unwrap_or_default();
-    let len = buf.len();
-    let take = limit.min(len);
-    buf.into_iter().skip(len.saturating_sub(take)).collect()
+    let mut logs: Vec<LogRecord> = match after_id {
+        Some(after) => buf.into_iter().filter(|r| r.id > after).collect(),
+        None => buf,
+    };
+    let len = logs.len();
+    if len > limit {
+        logs.drain(0..(len - limit));
+    }
+    logs
 }

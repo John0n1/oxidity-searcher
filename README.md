@@ -2,6 +2,10 @@
 
 ***Low-latency MEV searcher that scans mempools plus Flashbots MEV-Share hints, simulates sandwich/backrun bundles, and submits to builders/relays with safety, observability, and restart resilience.***
 
+
+![Codecov](https://img.shields.io/codecov/c/github/John0n1/oxidity.searcher)
+[![Rust](https://img.shields.io/badge/rust-1.94.0-orange?logo=rust&color=orange\&style=flat-square)](https://www.rust-lang.org/)
+
 ## Constraints
 
 - Single-operator
@@ -119,6 +123,8 @@
 
 - **Start:** `oxidity_builder.db METRICS_TOKEN=… cargo run --release`.
 - **Monitor:** metrics endpoint `/` (bearer), `/dashboard`, `/bundles`, `/logs`; watch `nonce_state` counters and ingest queue depth.
+- **Health:** metrics endpoint `/health` returns liveness + chain id for control-plane integrations.
+- **Logs API:** `/logs?after=<id>&limit=<n>` supports incremental polling (bounded to 500 per call).
 - **Restart safety:** `nonce_state` persists `next_nonce`/`touched_pools` per block; engine reloads on boot.
 - **Backpressure:** ingest queue bounded; drops counted; adjust `STRATEGY_WORKERS` and RPC rate limits accordingly.
 
@@ -129,6 +135,17 @@
 - **Mainnet:** `eth_sendBundle` to Flashbots primary, Beaver (unsigned), Titan (signed optional); MEV-Share path uses `mev_sendBundle` with exactly one victim hash + one backrun tx.
 - **Non-mainnet:** direct `eth_sendRawTransaction` per tx.
 - **Limits:** Flashbots bundle limits enforced at `<=100` txs and `<=300000` bytes.
+
+---
+
+## Desktop Control Panel (Preview)
+
+- Start with: `cargo run --bin oxidity_control_panel`
+- Features:
+  - Start/stop/restart `oxidity-builder` with config + runtime flags
+  - Real-time dashboard via authenticated metrics endpoints
+  - Real-time in-app log stream from `/logs` and live log-level updates via `/log_level`
+  - Bundle history view and basic throughput trend chart
 
 ---
 

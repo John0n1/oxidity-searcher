@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
 
-use crate::app::logging::{recent_logs, set_log_level};
+use crate::app::logging::{recent_logs_since, set_log_level};
 use crate::core::portfolio::PortfolioManager;
 use crate::core::strategy::StrategyStats;
 use serde_json::json;
@@ -14,6 +14,7 @@ use tokio::sync::Mutex as TokioMutex;
 
 pub async fn spawn_metrics_server(
     port: u16,
+    chain_id: u64,
     stats: Arc<StrategyStats>,
     portfolio: Arc<PortfolioManager>,
 ) -> Option<SocketAddr> {
@@ -129,8 +130,16 @@ pub async fn spawn_metrics_server(
 
                     let (route, query) = path.split_once('?').unwrap_or((path, ""));
 
-                    if route.starts_with("/dashboard") {
-                        let body = render_dashboard_json(&stats, &portfolio);
+                    if route == "/health" {
+                        let body = json!({"status":"ok","chainId":chain_id}).to_string();
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(response.as_bytes()).await;
+                    } else if route.starts_with("/dashboard") {
+                        let body = render_dashboard_json(&stats, &portfolio, chain_id);
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                             body.len(),
@@ -146,7 +155,29 @@ pub async fn spawn_metrics_server(
                         );
                         let _ = socket.write_all(response.as_bytes()).await;
                     } else if route.starts_with("/logs") {
-                        let logs = recent_logs(200);
+                        let after = query
+                            .split('&')
+                            .find_map(|kv| {
+                                let mut parts = kv.split('=');
+                                match (parts.next(), parts.next()) {
+                                    (Some("after"), Some(v)) => Some(v),
+                                    _ => None,
+                                }
+                            })
+                            .and_then(|v| v.parse::<u64>().ok());
+                        let limit = query
+                            .split('&')
+                            .find_map(|kv| {
+                                let mut parts = kv.split('=');
+                                match (parts.next(), parts.next()) {
+                                    (Some("limit"), Some(v)) => Some(v),
+                                    _ => None,
+                                }
+                            })
+                            .and_then(|v| v.parse::<usize>().ok())
+                            .map(|v| v.clamp(1, 500))
+                            .unwrap_or(200);
+                        let logs = recent_logs_since(after, limit);
                         let body =
                             serde_json::to_string(&logs).unwrap_or_else(|_| "[]".to_string());
                         let response = format!(
@@ -346,7 +377,11 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
     body
 }
 
-fn render_dashboard_json(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>) -> String {
+fn render_dashboard_json(
+    stats: &Arc<StrategyStats>,
+    portfolio: &Arc<PortfolioManager>,
+    chain_id: u64,
+) -> String {
     let processed = stats.processed.load(std::sync::atomic::Ordering::Relaxed);
     let submitted = stats.submitted.load(std::sync::atomic::Ordering::Relaxed);
     let skipped = stats.skipped.load(std::sync::atomic::Ordering::Relaxed);
@@ -431,6 +466,7 @@ fn render_dashboard_json(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioMa
     }
 
     let payload = serde_json::json!({
+        "chainId": chain_id,
         "processed": processed,
         "submitted": submitted,
         "skipped": skipped,
@@ -542,7 +578,7 @@ mod tests {
         let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
         let stats = Arc::new(StrategyStats::default());
 
-        let addr = spawn_metrics_server(0, stats.clone(), portfolio.clone())
+        let addr = spawn_metrics_server(0, 1, stats.clone(), portfolio.clone())
             .await
             .expect("bind metrics");
 
@@ -559,5 +595,31 @@ mod tests {
         let body = resp.text().await.unwrap();
 
         assert!(body.contains("strategy_processed"));
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_includes_chain_id() {
+        unsafe { std::env::set_var("METRICS_TOKEN", "testtoken") };
+        let provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
+        let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
+        let stats = Arc::new(StrategyStats::default());
+
+        let addr = spawn_metrics_server(0, 137, stats.clone(), portfolio.clone())
+            .await
+            .expect("bind metrics");
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{}/health", addr))
+            .bearer_auth("testtoken")
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success());
+        let body = resp.text().await.unwrap();
+
+        assert!(body.contains("\"chainId\":137"));
     }
 }
