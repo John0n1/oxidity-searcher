@@ -34,6 +34,7 @@ use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::sync::{Mutex, Semaphore, broadcast::Receiver as BroadcastReceiver, mpsc::Receiver};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
 pub enum StrategyWork {
@@ -179,6 +180,7 @@ pub struct StrategyExecutor {
     pub(in crate::services::strategy) sandwich_attacks_enabled: bool,
     pub(in crate::services::strategy) simulation_backend: String,
     pub(in crate::services::strategy) worker_semaphore: Arc<Semaphore>,
+    pub(in crate::services::strategy) shutdown: CancellationToken,
 }
 
 impl StrategyExecutor {
@@ -578,6 +580,7 @@ impl StrategyExecutor {
         sandwich_attacks_enabled: bool,
         simulation_backend: String,
         worker_limit: usize,
+        shutdown: CancellationToken,
     ) -> Self {
         let semaphore_size = worker_limit.max(1);
         let universal_router = constants::default_uniswap_universal_router(chain_id);
@@ -629,6 +632,7 @@ impl StrategyExecutor {
             sandwich_attacks_enabled,
             simulation_backend,
             worker_semaphore: Arc::new(Semaphore::new(semaphore_size)),
+            shutdown,
         }
     }
 
@@ -654,9 +658,15 @@ impl StrategyExecutor {
         });
 
         loop {
-            let work_opt = {
-                let mut rx = executor.tx_rx.lock().await;
-                rx.recv().await
+            let work_opt = tokio::select! {
+                _ = executor.shutdown.cancelled() => {
+                    tracing::info!(target: "strategy", "Shutdown requested; stopping strategy work loop");
+                    None
+                }
+                work = async {
+                    let mut rx = executor.tx_rx.lock().await;
+                    rx.recv().await
+                } => work
             };
 
             match work_opt {
@@ -689,9 +699,15 @@ impl StrategyExecutor {
 
     async fn block_watcher(self: Arc<Self>) {
         loop {
-            let msg = {
-                let mut rx = self.mut_block_rx.lock().await;
-                rx.recv().await
+            let msg = tokio::select! {
+                _ = self.shutdown.cancelled() => {
+                    tracing::info!(target: "strategy", "Shutdown requested; stopping block watcher");
+                    break;
+                }
+                msg = async {
+                    let mut rx = self.mut_block_rx.lock().await;
+                    rx.recv().await
+                } => msg
             };
 
             match msg {
@@ -1265,6 +1281,7 @@ mod tests {
             true,
             "revm".to_string(),
             8,
+            CancellationToken::new(),
         )
     }
 

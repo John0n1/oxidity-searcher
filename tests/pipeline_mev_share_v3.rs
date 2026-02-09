@@ -119,6 +119,7 @@ async fn mev_share_v3_pipeline_manual() {
         true,
         "revm".to_string(),
         4,
+        tokio_util::sync::CancellationToken::new(),
     );
 
     // Build a simple V3 exactInputSingle payload swapping WETH -> WETH (no-op) for smoke test.

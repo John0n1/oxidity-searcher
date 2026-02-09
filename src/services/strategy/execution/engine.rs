@@ -29,6 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
+use tokio_util::sync::CancellationToken;
 
 const INGEST_QUEUE_BOUND: usize = 2048;
 
@@ -247,6 +248,16 @@ impl Engine {
         self.log_rpc_capabilities().await;
         self.simulator.probe_eth_simulate_v1().await;
 
+        let shutdown = CancellationToken::new();
+        {
+            let shutdown_on_ctrlc = shutdown.clone();
+            tokio::spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    tracing::info!(target: "shutdown", "Ctrl+C received; requesting graceful shutdown");
+                    shutdown_on_ctrlc.cancel();
+                }
+            });
+        }
         let stats = Arc::new(StrategyStats::default());
         let (tx_sender, tx_receiver) = mpsc::channel::<StrategyWork>(INGEST_QUEUE_BOUND);
         let (block_sender, block_receiver) = broadcast::channel(32);
@@ -256,11 +267,13 @@ impl Engine {
             tx_sender.clone(),
             stats.clone(),
             INGEST_QUEUE_BOUND,
+            shutdown.clone(),
         );
         let block_listener = BlockListener::new(
             self.ws_provider.clone(),
             block_sender.clone(),
             self.nonce_manager.clone(),
+            shutdown.clone(),
         );
         let bundle_sender: SharedBundleSender = Arc::new(BundleSender::new(
             self.http_provider.clone(),
@@ -387,6 +400,7 @@ impl Engine {
         let _metrics_addr = crate::common::metrics::spawn_metrics_server(
             self.metrics_port,
             self.chain_id,
+            shutdown.clone(),
             stats.clone(),
             self.portfolio.clone(),
         )
@@ -441,6 +455,7 @@ impl Engine {
                 self.sandwich_attacks_enabled,
                 self.simulation_backend.clone(),
                 self.worker_limit,
+                shutdown.clone(),
             );
 
             if self.mev_share_enabled {
@@ -451,7 +466,10 @@ impl Engine {
                     stats.clone(),
                     INGEST_QUEUE_BOUND,
                     self.mev_share_history_limit,
+                    shutdown.clone(),
                 );
+                drop(tx_sender);
+                drop(block_sender);
                 tokio::try_join!(
                     mempool.run(),
                     block_listener.run(),
@@ -461,11 +479,15 @@ impl Engine {
                 .map(|_| ())
                 .map_err(|e| AppError::Unknown(e.into()))
             } else {
+                drop(tx_sender);
+                drop(block_sender);
                 tokio::try_join!(mempool.run(), block_listener.run(), strategy.run())
                     .map(|_| ())
                     .map_err(|e| AppError::Unknown(e.into()))
             }
         } else {
+            drop(tx_sender);
+            drop(block_sender);
             tokio::try_join!(mempool.run(), block_listener.run())
                 .map(|_| ())
                 .map_err(|e| AppError::Unknown(e.into()))

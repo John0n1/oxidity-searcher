@@ -16,12 +16,14 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
 use tokio::time::{Duration, sleep};
+use tokio_util::sync::CancellationToken;
 
 pub struct MempoolScanner {
     provider: WsProvider,
     tx_sender: Sender<StrategyWork>,
     stats: Arc<StrategyStats>,
     capacity: usize,
+    shutdown: CancellationToken,
     seen: DashSet<B256>,
     seen_order: tokio::sync::Mutex<VecDeque<B256>>,
 }
@@ -37,12 +39,14 @@ impl MempoolScanner {
         tx_sender: Sender<StrategyWork>,
         stats: Arc<StrategyStats>,
         capacity: usize,
+        shutdown: CancellationToken,
     ) -> Self {
         Self {
             provider,
             tx_sender,
             stats,
             capacity,
+            shutdown,
             seen: DashSet::new(),
             seen_order: tokio::sync::Mutex::new(VecDeque::new()),
         }
@@ -52,16 +56,34 @@ impl MempoolScanner {
         tracing::info!("Mempool Scanner started...");
 
         loop {
+            if self.shutdown.is_cancelled() {
+                tracing::info!(target: "mempool", "Shutdown requested; stopping scanner");
+                return Ok(());
+            }
+
             match self.provider.subscribe_full_pending_transactions().await {
                 Ok(sub) => {
                     tracing::info!(target: "mempool", "Subscribed to full pendingTransactions");
                     let mut stream = sub.into_stream();
-                    while let Some(tx) = stream.next().await {
-                        if tx.input().len() > 4 && self.mark_seen(tx.tx_hash()).await {
-                            self.enqueue(StrategyWork::Mempool {
-                                tx,
-                                received_at: std::time::Instant::now(),
-                            });
+                    loop {
+                        tokio::select! {
+                            _ = self.shutdown.cancelled() => {
+                                tracing::info!(target: "mempool", "Shutdown requested; exiting pending tx stream");
+                                return Ok(());
+                            }
+                            maybe_tx = stream.next() => {
+                                match maybe_tx {
+                                    Some(tx) => {
+                                        if tx.input().len() > 4 && self.mark_seen(tx.tx_hash()).await {
+                                            self.enqueue(StrategyWork::Mempool {
+                                                tx,
+                                                received_at: std::time::Instant::now(),
+                                            });
+                                        }
+                                    }
+                                    None => break,
+                                }
+                            }
                         }
                     }
                     tracing::warn!(target: "mempool", "Pending tx subscription ended, retrying after backoff");
@@ -76,28 +98,41 @@ impl MempoolScanner {
                         Ok(sub) => {
                             tracing::info!(target: "mempool", "Subscribed to pending tx hashes");
                             let mut stream = sub.into_stream();
-                            while let Some(hash) = stream.next().await {
-                                if !self.mark_seen(hash).await {
-                                    continue;
-                                }
-                                match self.provider.get_transaction_by_hash(hash).await {
-                                    Ok(Some(tx)) => {
-                                        if tx.input().len() > 4 {
-                                            self.enqueue(StrategyWork::Mempool {
-                                                tx,
-                                                received_at: std::time::Instant::now(),
-                                            });
+                            loop {
+                                tokio::select! {
+                                    _ = self.shutdown.cancelled() => {
+                                        tracing::info!(target: "mempool", "Shutdown requested; exiting pending hash stream");
+                                        return Ok(());
+                                    }
+                                    maybe_hash = stream.next() => {
+                                        match maybe_hash {
+                                            Some(hash) => {
+                                                if !self.mark_seen(hash).await {
+                                                    continue;
+                                                }
+                                                match self.provider.get_transaction_by_hash(hash).await {
+                                                    Ok(Some(tx)) => {
+                                                        if tx.input().len() > 4 {
+                                                            self.enqueue(StrategyWork::Mempool {
+                                                                tx,
+                                                                received_at: std::time::Instant::now(),
+                                                            });
+                                                        }
+                                                    }
+                                                    Ok(None) => {
+                                                        // Hash not yet available; skip
+                                                    }
+                                                    Err(err) => {
+                                                        tracing::debug!(
+                                                            target: "mempool",
+                                                            error = %err,
+                                                            "Failed to fetch pending tx by hash"
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            None => break,
                                         }
-                                    }
-                                    Ok(None) => {
-                                        // Hash not yet available; skip
-                                    }
-                                    Err(err) => {
-                                        tracing::debug!(
-                                            target: "mempool",
-                                            error = %err,
-                                            "Failed to fetch pending tx by hash"
-                                        );
                                     }
                                 }
                             }
@@ -115,7 +150,13 @@ impl MempoolScanner {
                 }
             }
 
-            sleep(Duration::from_secs(2)).await;
+            tokio::select! {
+                _ = self.shutdown.cancelled() => {
+                    tracing::info!(target: "mempool", "Shutdown requested during reconnect backoff");
+                    return Ok(());
+                }
+                _ = sleep(Duration::from_secs(2)) => {}
+            }
         }
     }
 }
@@ -140,6 +181,11 @@ impl MempoolScanner {
         };
 
         loop {
+            if self.shutdown.is_cancelled() {
+                tracing::info!(target: "mempool", "Shutdown requested; leaving filter poll loop");
+                break;
+            }
+
             if full {
                 match self
                     .provider
@@ -206,7 +252,13 @@ impl MempoolScanner {
                     }
                 }
             }
-            sleep(Duration::from_millis(1200)).await;
+            tokio::select! {
+                _ = self.shutdown.cancelled() => {
+                    tracing::info!(target: "mempool", "Shutdown requested during poll sleep");
+                    break;
+                }
+                _ = sleep(Duration::from_millis(1200)) => {}
+            }
         }
 
         Ok(())
@@ -284,7 +336,7 @@ mod tests {
         let provider = WsProvider::new_http(Url::parse("http://localhost:8545").unwrap());
         let (tx, _rx) = channel(4);
         let stats = Arc::new(StrategyStats::default());
-        let scanner = MempoolScanner::new(provider, tx, stats, 4);
+        let scanner = MempoolScanner::new(provider, tx, stats, 4, CancellationToken::new());
 
         let h1 = B256::from_slice(&[1u8; 32]);
         let h2 = B256::from_slice(&[2u8; 32]);

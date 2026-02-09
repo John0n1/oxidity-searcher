@@ -149,6 +149,15 @@
 
 ---
 
+## Windows Installer (Preview)
+
+- Build installer: `.\scripts\build-installer.ps1`
+- Installer script: `installer/oxidity_installer.iss`
+- Supports optional component install for **Desktop Control Panel**.
+- Setup wizard writes `{app}\config.prod.toml` with required runtime fields.
+
+---
+
 ## 14. Extensibility
 
 - Add new routers/feeds via constants or config maps.

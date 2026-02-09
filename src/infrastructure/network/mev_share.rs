@@ -13,6 +13,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
 use tokio::time::{Duration, sleep};
+use tokio_util::sync::CancellationToken;
 
 use crate::core::strategy::{StrategyStats, StrategyWork};
 
@@ -70,6 +71,7 @@ pub struct MevShareClient {
     stats: Arc<StrategyStats>,
     capacity: usize,
     history_limit: u32,
+    shutdown: CancellationToken,
 }
 
 const SEEN_MAX: usize = 50_000;
@@ -82,6 +84,7 @@ impl MevShareClient {
         stats: Arc<StrategyStats>,
         capacity: usize,
         history_limit: u32,
+        shutdown: CancellationToken,
     ) -> Self {
         let history_url = format!("{}/api/v1/history", base_url.trim_end_matches('/'));
         Self {
@@ -99,17 +102,28 @@ impl MevShareClient {
             stats,
             capacity,
             history_limit,
+            shutdown,
         }
     }
 
     pub async fn run(mut self) -> Result<(), AppError> {
         self.backfill_history().await?;
         loop {
+            if self.shutdown.is_cancelled() {
+                tracing::info!(target: "mev_share", "Shutdown requested; stopping MEV-Share client");
+                return Ok(());
+            }
             match self.stream_once().await {
                 Ok(_) => {}
                 Err(e) => {
                     tracing::warn!(target: "mev_share", error=%e, "Stream error, reconnecting");
-                    sleep(Duration::from_secs(2)).await;
+                    tokio::select! {
+                        _ = self.shutdown.cancelled() => {
+                            tracing::info!(target: "mev_share", "Shutdown requested during reconnect backoff");
+                            return Ok(());
+                        }
+                        _ = sleep(Duration::from_secs(2)) => {}
+                    }
                 }
             }
         }
@@ -117,6 +131,9 @@ impl MevShareClient {
 
     async fn backfill_history(&mut self) -> Result<(), AppError> {
         if self.history_limit == 0 {
+            return Ok(());
+        }
+        if self.shutdown.is_cancelled() {
             return Ok(());
         }
         let url = format!("{}?limit={}", self.history_url, self.history_limit);
@@ -152,6 +169,9 @@ impl MevShareClient {
     }
 
     async fn stream_once(&mut self) -> Result<(), AppError> {
+        if self.shutdown.is_cancelled() {
+            return Ok(());
+        }
         tracing::info!(target: "mev_share", url=%self.base_url, "Connecting to MEV-Share SSE");
         let resp = self
             .client
@@ -168,7 +188,12 @@ impl MevShareClient {
                     status = %resp.status(),
                     "SSE returned non-success; honoring Retry-After"
                 );
-                sleep(delay).await;
+                tokio::select! {
+                    _ = self.shutdown.cancelled() => {
+                        return Ok(());
+                    }
+                    _ = sleep(delay) => {}
+                }
             }
             return Err(AppError::Connection(format!(
                 "SSE returned status {}",
@@ -179,7 +204,18 @@ impl MevShareClient {
         let mut stream = resp.bytes_stream();
         let mut buffer = String::new();
 
-        while let Some(chunk) = stream.next().await {
+        loop {
+            let maybe_chunk = tokio::select! {
+                _ = self.shutdown.cancelled() => {
+                    tracing::info!(target: "mev_share", "Shutdown requested; exiting SSE stream");
+                    return Ok(());
+                }
+                chunk = stream.next() => chunk,
+            };
+
+            let Some(chunk) = maybe_chunk else {
+                break;
+            };
             let chunk =
                 chunk.map_err(|e| AppError::Connection(format!("SSE chunk error: {}", e)))?;
             let normalized = String::from_utf8_lossy(&chunk);

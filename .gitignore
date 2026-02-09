@@ -3,9 +3,15 @@ config.toml
 .env
 .cargo
 .venv
-merge.py
 target/
 dist/
 .DS_Store
 *.log
+.vscode/
+*.db
+scripts/
+installer/
+assets/
+*.svg
+
 

@@ -11,10 +11,12 @@ use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex as TokioMutex;
+use tokio_util::sync::CancellationToken;
 
 pub async fn spawn_metrics_server(
     port: u16,
     chain_id: u64,
+    shutdown: CancellationToken,
     stats: Arc<StrategyStats>,
     portfolio: Arc<PortfolioManager>,
 ) -> Option<SocketAddr> {
@@ -57,7 +59,15 @@ pub async fn spawn_metrics_server(
     let limiter = Arc::new(TokioMutex::new(RateLimiter::default()));
     tokio::spawn(async move {
         loop {
-            match listener.accept().await {
+            let accept_result = tokio::select! {
+                _ = shutdown.cancelled() => {
+                    tracing::info!(target: "metrics", "Shutdown requested; stopping metrics server");
+                    break;
+                }
+                accept = listener.accept() => accept,
+            };
+
+            match accept_result {
                 Ok((mut socket, _)) => {
                     const MAX_READ: usize = 2048;
                     let mut buf = vec![0u8; MAX_READ];
@@ -132,6 +142,15 @@ pub async fn spawn_metrics_server(
 
                     if route == "/health" {
                         let body = json!({"status":"ok","chainId":chain_id}).to_string();
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(response.as_bytes()).await;
+                    } else if route == "/shutdown" {
+                        shutdown.cancel();
+                        let body = json!({"status":"ok","message":"shutdown_requested"}).to_string();
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                             body.len(),
@@ -577,8 +596,9 @@ mod tests {
         let provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
         let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
         let stats = Arc::new(StrategyStats::default());
+        let shutdown = CancellationToken::new();
 
-        let addr = spawn_metrics_server(0, 1, stats.clone(), portfolio.clone())
+        let addr = spawn_metrics_server(0, 1, shutdown, stats.clone(), portfolio.clone())
             .await
             .expect("bind metrics");
 
@@ -603,8 +623,9 @@ mod tests {
         let provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
         let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
         let stats = Arc::new(StrategyStats::default());
+        let shutdown = CancellationToken::new();
 
-        let addr = spawn_metrics_server(0, 137, stats.clone(), portfolio.clone())
+        let addr = spawn_metrics_server(0, 137, shutdown, stats.clone(), portfolio.clone())
             .await
             .expect("bind metrics");
 
@@ -621,5 +642,44 @@ mod tests {
         let body = resp.text().await.unwrap();
 
         assert!(body.contains("\"chainId\":137"));
+    }
+
+    #[tokio::test]
+    async fn shutdown_endpoint_stops_server() {
+        unsafe { std::env::set_var("METRICS_TOKEN", "testtoken") };
+        let provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
+        let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
+        let stats = Arc::new(StrategyStats::default());
+        let shutdown = CancellationToken::new();
+
+        let addr = spawn_metrics_server(0, 1, shutdown, stats.clone(), portfolio.clone())
+            .await
+            .expect("bind metrics");
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{}/shutdown", addr))
+            .bearer_auth("testtoken")
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success());
+
+        // Server should stop shortly after shutdown request.
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            let probe = client
+                .get(format!("http://{}/health", addr))
+                .bearer_auth("testtoken")
+                .send()
+                .await;
+            if probe.is_err() {
+                return;
+            }
+        }
+
+        panic!("metrics server still accepted requests after shutdown");
     }
 }

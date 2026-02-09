@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use eframe::egui;
-use egui::{Color32, RichText};
+use egui::{Color32, RichText, TextureHandle};
 use egui_plot::{Line, Plot, PlotPoints};
 use reqwest::blocking::Client;
 use serde::Deserialize;
@@ -16,6 +16,14 @@ const POLL_INTERVAL: Duration = Duration::from_millis(1000);
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(1200);
 const LOG_LIMIT: usize = 2000;
 const METRIC_POINTS_LIMIT: usize = 240;
+const BUTTON_ICON_SIZE: f32 = 16.0;
+const HEADER_LOGO_SIZE: f32 = 28.0;
+
+const APP_ICON_PNG: &[u8] = include_bytes!("../../assets/branding/rendered/oxidity_icon_256.png");
+const PLAY_ICON_PNG: &[u8] = include_bytes!("../../assets/branding/rendered/play_icon.png");
+const STOP_ICON_PNG: &[u8] = include_bytes!("../../assets/branding/rendered/stop_icon.png");
+const RESTART_ICON_PNG: &[u8] =
+    include_bytes!("../../assets/branding/rendered/restart_icon.png");
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ProcessState {
@@ -134,6 +142,10 @@ struct ControlPanelApp {
     slippage_bps_input: String,
     log_level: String,
     auto_scroll_logs: bool,
+    logo_icon: Option<TextureHandle>,
+    start_icon: Option<TextureHandle>,
+    stop_icon: Option<TextureHandle>,
+    restart_icon: Option<TextureHandle>,
 }
 
 impl ControlPanelApp {
@@ -144,6 +156,11 @@ impl ControlPanelApp {
         let default_exe = detect_default_executable();
         let default_workdir = cwd.to_string_lossy().to_string();
         let default_config = detect_default_config(&cwd);
+        let logo_icon = load_embedded_texture(&cc.egui_ctx, "branding.logo", APP_ICON_PNG);
+        let start_icon = load_embedded_texture(&cc.egui_ctx, "branding.start", PLAY_ICON_PNG);
+        let stop_icon = load_embedded_texture(&cc.egui_ctx, "branding.stop", STOP_ICON_PNG);
+        let restart_icon =
+            load_embedded_texture(&cc.egui_ctx, "branding.restart", RESTART_ICON_PNG);
 
         let (event_tx, event_rx) = mpsc::channel();
         let cmd_tx = spawn_supervisor(event_tx);
@@ -170,6 +187,10 @@ impl ControlPanelApp {
             slippage_bps_input: String::new(),
             log_level: "info".to_string(),
             auto_scroll_logs: true,
+            logo_icon,
+            start_icon,
+            stop_icon,
+            restart_icon,
         }
     }
 
@@ -313,6 +334,12 @@ impl ControlPanelApp {
 
     fn show_top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            if let Some(logo) = &self.logo_icon {
+                ui.add(egui::Image::new(logo).fit_to_exact_size(egui::vec2(
+                    HEADER_LOGO_SIZE,
+                    HEADER_LOGO_SIZE,
+                )));
+            }
             ui.heading(RichText::new("Oxidity Control Panel").size(28.0));
 
             let (color, state_text) = self.process_state_badge();
@@ -337,12 +364,38 @@ impl ControlPanelApp {
                 self.process_state,
                 ProcessState::Running | ProcessState::Starting
             );
+            let start_button = if let Some(icon) = &self.start_icon {
+                egui::Button::image_and_text(
+                    egui::Image::new(icon)
+                        .fit_to_exact_size(egui::vec2(BUTTON_ICON_SIZE, BUTTON_ICON_SIZE)),
+                    RichText::new("Start").strong(),
+                )
+            } else {
+                egui::Button::new(RichText::new("Start").strong())
+            };
+            let stop_button = if let Some(icon) = &self.stop_icon {
+                egui::Button::image_and_text(
+                    egui::Image::new(icon)
+                        .fit_to_exact_size(egui::vec2(BUTTON_ICON_SIZE, BUTTON_ICON_SIZE)),
+                    RichText::new("Stop").strong(),
+                )
+            } else {
+                egui::Button::new(RichText::new("Stop").strong())
+            };
+            let restart_button = if let Some(icon) = &self.restart_icon {
+                egui::Button::image_and_text(
+                    egui::Image::new(icon)
+                        .fit_to_exact_size(egui::vec2(BUTTON_ICON_SIZE, BUTTON_ICON_SIZE)),
+                    RichText::new("Restart"),
+                )
+            } else {
+                egui::Button::new("Restart")
+            };
 
             if ui
                 .add_enabled(
                     can_start,
-                    egui::Button::new(RichText::new("Start").strong())
-                        .fill(Color32::from_rgb(35, 104, 78)),
+                    start_button.fill(Color32::from_rgb(35, 104, 78)),
                 )
                 .clicked()
             {
@@ -352,8 +405,7 @@ impl ControlPanelApp {
             if ui
                 .add_enabled(
                     can_stop,
-                    egui::Button::new(RichText::new("Stop").strong())
-                        .fill(Color32::from_rgb(120, 56, 56)),
+                    stop_button.fill(Color32::from_rgb(120, 56, 56)),
                 )
                 .clicked()
             {
@@ -363,7 +415,7 @@ impl ControlPanelApp {
             if ui
                 .add_enabled(
                     can_stop,
-                    egui::Button::new("Restart").fill(Color32::from_rgb(66, 85, 120)),
+                    restart_button.fill(Color32::from_rgb(66, 85, 120)),
                 )
                 .clicked()
             {
@@ -512,18 +564,15 @@ impl ControlPanelApp {
             .allow_zoom(false)
             .show(ui, |plot_ui| {
                 plot_ui.line(
-                    Line::new(processed)
-                        .name("processed")
+                    Line::new("processed", processed)
                         .color(Color32::from_rgb(89, 163, 255)),
                 );
                 plot_ui.line(
-                    Line::new(submitted)
-                        .name("submitted")
+                    Line::new("submitted", submitted)
                         .color(Color32::from_rgb(92, 207, 150)),
                 );
                 plot_ui.line(
-                    Line::new(failed)
-                        .name("failed")
+                    Line::new("failed", failed)
                         .color(Color32::from_rgb(224, 96, 96)),
                 );
             });
@@ -676,12 +725,24 @@ fn supervisor_loop(cmd_rx: Receiver<SupervisorCommand>, event_tx: Sender<Supervi
                     }
                 }
                 SupervisorCommand::Stop => {
-                    stop_child(&mut child, &event_tx, &mut current_state);
+                    stop_child(
+                        &mut child,
+                        launch.as_ref(),
+                        &client,
+                        &event_tx,
+                        &mut current_state,
+                    );
                     launch = None;
                     log_after = 0;
                 }
                 SupervisorCommand::Restart(cfg) => {
-                    stop_child(&mut child, &event_tx, &mut current_state);
+                    stop_child(
+                        &mut child,
+                        launch.as_ref(),
+                        &client,
+                        &event_tx,
+                        &mut current_state,
+                    );
                     launch = None;
                     log_after = 0;
                     match spawn_searcher(&cfg) {
@@ -714,7 +775,13 @@ fn supervisor_loop(cmd_rx: Receiver<SupervisorCommand>, event_tx: Sender<Supervi
                     }
                 }
                 SupervisorCommand::Shutdown => {
-                    stop_child(&mut child, &event_tx, &mut current_state);
+                    stop_child(
+                        &mut child,
+                        launch.as_ref(),
+                        &client,
+                        &event_tx,
+                        &mut current_state,
+                    );
                     break;
                 }
             },
@@ -789,20 +856,55 @@ fn supervisor_loop(cmd_rx: Receiver<SupervisorCommand>, event_tx: Sender<Supervi
 
 fn stop_child(
     child: &mut Option<Child>,
+    launch: Option<&LaunchConfig>,
+    client: &Client,
     event_tx: &Sender<SupervisorEvent>,
     current_state: &mut ProcessState,
 ) {
     if let Some(mut process) = child.take() {
         emit_state(event_tx, current_state, ProcessState::Stopping);
-        if let Err(e) = process.kill() {
-            let _ = event_tx.send(SupervisorEvent::Error(format!(
-                "Failed to stop searcher process: {}",
-                e
-            )));
+        let mut exited = false;
+
+        if let Some(cfg) = launch {
+            if let Err(err) = request_graceful_shutdown(client, cfg) {
+                let _ = event_tx.send(SupervisorEvent::Error(format!(
+                    "Graceful shutdown request failed: {}",
+                    err
+                )));
+            } else {
+                exited = wait_for_exit(&mut process, Duration::from_secs(8));
+            }
         }
-        let _ = process.wait();
+
+        if !exited {
+            if let Err(e) = process.kill() {
+                let _ = event_tx.send(SupervisorEvent::Error(format!(
+                    "Failed to stop searcher process: {}",
+                    e
+                )));
+            }
+            let _ = process.wait();
+        }
     }
     emit_state(event_tx, current_state, ProcessState::Stopped);
+}
+
+fn request_graceful_shutdown(client: &Client, cfg: &LaunchConfig) -> Result<(), String> {
+    let url = format!("{}/shutdown", cfg.base_url());
+    let _: serde_json::Value = authorized_get(client, &url, &cfg.metrics_token)?;
+    Ok(())
+}
+
+fn wait_for_exit(process: &mut Child, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        match process.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => std::thread::sleep(Duration::from_millis(200)),
+            Err(_) => return false,
+        }
+    }
+    false
 }
 
 fn emit_state(event_tx: &Sender<SupervisorEvent>, current: &mut ProcessState, next: ProcessState) {
@@ -913,6 +1015,19 @@ fn configure_visuals(ctx: &egui::Context) {
     ctx.set_style(style);
 }
 
+fn load_embedded_texture(
+    ctx: &egui::Context,
+    name: &str,
+    png_bytes: &[u8],
+) -> Option<TextureHandle> {
+    let icon = eframe::icon_data::from_png_bytes(png_bytes).ok()?;
+    let image = egui::ColorImage::from_rgba_unmultiplied(
+        [icon.width as usize, icon.height as usize],
+        &icon.rgba,
+    );
+    Some(ctx.load_texture(name.to_string(), image, egui::TextureOptions::LINEAR))
+}
+
 fn short_hash(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.len() <= 14 {
@@ -935,11 +1050,16 @@ fn level_color(level: &str) -> Color32 {
 }
 
 fn main() -> Result<(), eframe::Error> {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Oxidity Control Panel")
+        .with_inner_size([1400.0, 900.0])
+        .with_min_inner_size([1150.0, 700.0]);
+    if let Ok(icon) = eframe::icon_data::from_png_bytes(APP_ICON_PNG) {
+        viewport = viewport.with_icon(icon);
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Oxidity Control Panel")
-            .with_inner_size([1400.0, 900.0])
-            .with_min_inner_size([1150.0, 700.0]),
+        viewport,
         ..Default::default()
     };
 

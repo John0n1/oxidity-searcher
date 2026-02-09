@@ -98,6 +98,7 @@ async fn flashloan_builder_encodes_callbacks() {
         true,
         "revm".to_string(),
         4,
+        tokio_util::sync::CancellationToken::new(),
     );
 
     // Two-step callback: approve + dummy swap payload; include reset approvals.
@@ -230,6 +231,7 @@ async fn flashloan_builder_uses_aave_selector() {
         true,
         "revm".to_string(),
         4,
+        tokio_util::sync::CancellationToken::new(),
     );
 
     let callbacks = vec![(WETH_MAINNET, Bytes::from(vec![0x99]), U256::from(0u64))];

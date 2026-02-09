@@ -98,6 +98,7 @@ async fn mev_share_hint_round_trip() {
         true,
         "revm".to_string(),
         4,
+        tokio_util::sync::CancellationToken::new(),
     );
 
     // Craft a simple V2 swapExactETHForTokens payload WETH->token.
