@@ -56,12 +56,20 @@ async fn mev_share_v3_pipeline_manual() {
     let chain_id = http.get_chain_id().await.unwrap_or(1u64);
     let bundle_signer = PrivateKeySigner::random();
     let safety_guard = Arc::new(SafetyGuard::new());
+    let stats = Arc::new(StrategyStats::default());
     let bundle_sender = Arc::new(BundleSender::new(
         http.clone(),
         true,
         "https://relay.flashbots.net".to_string(),
         "https://mev-share.flashbots.net".to_string(),
+        vec![
+            "flashbots".to_string(),
+            "beaverbuild.org".to_string(),
+            "rsync".to_string(),
+            "Titan".to_string(),
+        ],
         bundle_signer.clone(),
+        stats.clone(),
     ));
     let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), signer.address()));
@@ -73,7 +81,6 @@ async fn mev_share_v3_pipeline_manual() {
     );
     let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
     let token_manager = Arc::new(TokenManager::default());
-    let stats = Arc::new(StrategyStats::default());
     let nonce_manager = NonceManager::new(http.clone(), signer.address());
     let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
 
@@ -120,6 +127,10 @@ async fn mev_share_v3_pipeline_manual() {
         "revm".to_string(),
         4,
         tokio_util::sync::CancellationToken::new(),
+        500,
+        60_000,
+        4,
+        false,
     );
 
     // Build a simple V3 exactInputSingle payload swapping WETH -> WETH (no-op) for smoke test.

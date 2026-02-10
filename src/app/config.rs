@@ -78,6 +78,18 @@ pub struct GlobalSettings {
     pub mev_share_history_limit: u32,
     #[serde(default = "default_true")]
     pub mev_share_enabled: bool,
+    #[serde(default = "default_mevshare_builders")]
+    pub mevshare_builders: Vec<String>,
+    #[serde(default = "default_receipt_poll_ms")]
+    pub receipt_poll_ms: u64,
+    #[serde(default = "default_receipt_timeout_ms")]
+    pub receipt_timeout_ms: u64,
+    #[serde(default = "default_receipt_confirm_blocks")]
+    pub receipt_confirm_blocks: u64,
+    #[serde(default = "default_false")]
+    pub emergency_exit_on_unknown_receipt: bool,
+    #[serde(default = "default_rpc_capability_strict")]
+    pub rpc_capability_strict: bool,
 
     // Router discovery
     #[serde(default = "default_router_discovery_enabled")]
@@ -118,6 +130,9 @@ fn default_max_gas() -> u64 {
 fn default_true() -> bool {
     true
 }
+fn default_false() -> bool {
+    false
+}
 fn default_metrics_port() -> u16 {
     9000
 }
@@ -144,6 +159,26 @@ fn default_mev_share_url() -> String {
 }
 fn default_mev_share_history_limit() -> u32 {
     200
+}
+fn default_mevshare_builders() -> Vec<String> {
+    vec![
+        "flashbots".to_string(),
+        "beaverbuild.org".to_string(),
+        "rsync".to_string(),
+        "Titan".to_string(),
+    ]
+}
+fn default_receipt_poll_ms() -> u64 {
+    500
+}
+fn default_receipt_timeout_ms() -> u64 {
+    60_000
+}
+fn default_receipt_confirm_blocks() -> u64 {
+    4
+}
+fn default_rpc_capability_strict() -> bool {
+    true
 }
 fn default_bribe_bps() -> u64 {
     0
@@ -313,7 +348,7 @@ impl GlobalSettings {
         )))
     }
 
-    /// Optional IPC URL for a specific chain, preferring explicit config, then env, then local Nethermind default.
+    /// Optional IPC URL for a specific chain, preferring explicit config and then env.
     pub fn get_ipc_url(&self, chain_id: u64) -> Option<String> {
         if let Some(urls) = &self.ipc_urls {
             if let Some(url) = urls.get(&chain_id.to_string()) {
@@ -334,12 +369,6 @@ impl GlobalSettings {
                     return Some(v);
                 }
             }
-        }
-
-        // Local default for mainnet Nethermind.
-        let default_ipc = "/mnt/pool/ethereum/nethermind/nethermind.ipc";
-        if chain_id == 1 && Path::new(default_ipc).exists() {
-            return Some(default_ipc.to_string());
         }
 
         None
@@ -577,6 +606,40 @@ impl GlobalSettings {
         self.mev_share_stream_url.clone()
     }
 
+    pub fn mevshare_builders_value(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .mevshare_builders
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .collect();
+        if out.is_empty() {
+            out = default_mevshare_builders();
+        }
+        out
+    }
+
+    pub fn receipt_poll_ms_value(&self) -> u64 {
+        self.receipt_poll_ms.max(100)
+    }
+
+    pub fn receipt_timeout_ms_value(&self) -> u64 {
+        self.receipt_timeout_ms.max(self.receipt_poll_ms_value())
+    }
+
+    pub fn receipt_confirm_blocks_value(&self) -> u64 {
+        self.receipt_confirm_blocks.max(1)
+    }
+
+    pub fn rpc_capability_strict_for_chain(&self, chain_id: u64) -> bool {
+        if chain_id == constants::CHAIN_ETHEREUM {
+            self.rpc_capability_strict
+        } else {
+            false
+        }
+    }
+
     pub fn price_api_keys(&self) -> crate::network::price_feed::PriceApiKeys {
         use std::env::var;
         crate::network::price_feed::PriceApiKeys {
@@ -798,6 +861,12 @@ mod tests {
             mev_share_relay_url: None,
             mev_share_history_limit: default_mev_share_history_limit(),
             mev_share_enabled: default_true(),
+            mevshare_builders: default_mevshare_builders(),
+            receipt_poll_ms: default_receipt_poll_ms(),
+            receipt_timeout_ms: default_receipt_timeout_ms(),
+            receipt_confirm_blocks: default_receipt_confirm_blocks(),
+            emergency_exit_on_unknown_receipt: default_false(),
+            rpc_capability_strict: default_rpc_capability_strict(),
             router_discovery_enabled: default_router_discovery_enabled(),
             router_discovery_min_hits: default_router_discovery_min_hits(),
             router_discovery_flush_every: default_router_discovery_flush_every(),
@@ -870,5 +939,42 @@ mod tests {
         let mut settings = base_settings();
         settings.flashloan_provider = "auto,aavev2".to_string();
         assert_eq!(settings.flashloan_providers(), vec![AaveV3, Balancer]);
+    }
+
+    #[test]
+    fn ipc_url_requires_explicit_config_or_env() {
+        unsafe {
+            std::env::remove_var("IPC_URL_1");
+            std::env::remove_var("IPC_PATH_1");
+            std::env::remove_var("IPC_URL");
+            std::env::remove_var("IPC_PATH");
+        }
+        let settings = base_settings();
+        assert!(settings.get_ipc_url(1).is_none());
+    }
+
+    #[test]
+    fn mevshare_builders_defaults_when_empty() {
+        let mut settings = base_settings();
+        settings.mevshare_builders.clear();
+        assert_eq!(settings.mevshare_builders_value(), default_mevshare_builders());
+    }
+
+    #[test]
+    fn receipt_tuning_values_have_safe_floor() {
+        let mut settings = base_settings();
+        settings.receipt_poll_ms = 0;
+        settings.receipt_timeout_ms = 1;
+        settings.receipt_confirm_blocks = 0;
+        assert_eq!(settings.receipt_poll_ms_value(), 100);
+        assert_eq!(settings.receipt_timeout_ms_value(), 100);
+        assert_eq!(settings.receipt_confirm_blocks_value(), 1);
+    }
+
+    #[test]
+    fn rpc_capability_strict_defaults_to_mainnet_only() {
+        let settings = base_settings();
+        assert!(settings.rpc_capability_strict_for_chain(1));
+        assert!(!settings.rpc_capability_strict_for_chain(137));
     }
 }

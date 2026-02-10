@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
 
-use crate::app::logging::{recent_logs_since, set_log_level};
 use crate::core::portfolio::PortfolioManager;
 use crate::core::strategy::StrategyStats;
 use serde_json::json;
@@ -138,7 +137,7 @@ pub async fn spawn_metrics_server(
                         continue;
                     }
 
-                    let (route, query) = path.split_once('?').unwrap_or((path, ""));
+                    let route = path.split('?').next().unwrap_or(path);
 
                     if route == "/health" {
                         let body = json!({"status":"ok","chainId":chain_id}).to_string();
@@ -150,89 +149,10 @@ pub async fn spawn_metrics_server(
                         let _ = socket.write_all(response.as_bytes()).await;
                     } else if route == "/shutdown" {
                         shutdown.cancel();
-                        let body = json!({"status":"ok","message":"shutdown_requested"}).to_string();
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let _ = socket.write_all(response.as_bytes()).await;
-                    } else if route.starts_with("/dashboard") {
-                        let body = render_dashboard_json(&stats, &portfolio, chain_id);
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let _ = socket.write_all(response.as_bytes()).await;
-                    } else if route.starts_with("/bundles") {
-                        let body = render_bundles_json(&stats);
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let _ = socket.write_all(response.as_bytes()).await;
-                    } else if route.starts_with("/logs") {
-                        let after = query
-                            .split('&')
-                            .find_map(|kv| {
-                                let mut parts = kv.split('=');
-                                match (parts.next(), parts.next()) {
-                                    (Some("after"), Some(v)) => Some(v),
-                                    _ => None,
-                                }
-                            })
-                            .and_then(|v| v.parse::<u64>().ok());
-                        let limit = query
-                            .split('&')
-                            .find_map(|kv| {
-                                let mut parts = kv.split('=');
-                                match (parts.next(), parts.next()) {
-                                    (Some("limit"), Some(v)) => Some(v),
-                                    _ => None,
-                                }
-                            })
-                            .and_then(|v| v.parse::<usize>().ok())
-                            .map(|v| v.clamp(1, 500))
-                            .unwrap_or(200);
-                        let logs = recent_logs_since(after, limit);
                         let body =
-                            serde_json::to_string(&logs).unwrap_or_else(|_| "[]".to_string());
+                            json!({"status":"ok","message":"shutdown_requested"}).to_string();
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let _ = socket.write_all(response.as_bytes()).await;
-                    } else if route.starts_with("/log_level") {
-                        let level = query.split('&').find_map(|kv| {
-                            let mut parts = kv.split('=');
-                            match (parts.next(), parts.next()) {
-                                (Some("level"), Some(v)) => Some(v),
-                                _ => None,
-                            }
-                        });
-
-                        let (status, body) = match level {
-                            Some(lvl) => match set_log_level(lvl) {
-                                Ok(_) => {
-                                    ("200 OK", json!({"status": "ok", "level": lvl}).to_string())
-                                }
-                                Err(e) => (
-                                    "400 Bad Request",
-                                    json!({"status": "error", "error": e}).to_string(),
-                                ),
-                            },
-                            None => (
-                                "400 Bad Request",
-                                json!({"status": "error", "error": "missing level"}).to_string(),
-                            ),
-                        };
-
-                        let response = format!(
-                            "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                            status,
                             body.len(),
                             body
                         );
@@ -394,158 +314,6 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
     }
 
     body
-}
-
-fn render_dashboard_json(
-    stats: &Arc<StrategyStats>,
-    portfolio: &Arc<PortfolioManager>,
-    chain_id: u64,
-) -> String {
-    let processed = stats.processed.load(std::sync::atomic::Ordering::Relaxed);
-    let submitted = stats.submitted.load(std::sync::atomic::Ordering::Relaxed);
-    let skipped = stats.skipped.load(std::sync::atomic::Ordering::Relaxed);
-    let failed = stats.failed.load(std::sync::atomic::Ordering::Relaxed);
-    let queue_depth = stats
-        .ingest_queue_depth
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let queue_dropped = stats
-        .ingest_queue_dropped
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let queue_full = stats
-        .ingest_queue_full
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let queue_backpressure = stats
-        .ingest_backpressure
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let skip_decode = stats
-        .skip_decode_failed
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let skip_unknown = stats
-        .skip_unknown_router
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let skip_gas_cap = stats
-        .skip_gas_cap
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let skip_sim_failed = stats
-        .skip_sim_failed
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let skip_profit_guard = stats
-        .skip_profit_guard
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let nonce_loads = stats
-        .nonce_state_loads
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let nonce_load_fail = stats
-        .nonce_state_load_fail
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let nonce_persist = stats
-        .nonce_state_persist
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let nonce_persist_fail = stats
-        .nonce_state_persist_fail
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let sim_sum = stats
-        .sim_latency_ms_sum
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let sim_count = stats
-        .sim_latency_ms_count
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let sim_sum_mem = stats
-        .sim_latency_ms_sum_mempool
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let sim_count_mem = stats
-        .sim_latency_ms_count_mempool
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let sim_sum_mev = stats
-        .sim_latency_ms_sum_mevshare
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let sim_count_mev = stats
-        .sim_latency_ms_count_mevshare
-        .load(std::sync::atomic::Ordering::Relaxed);
-    let success_rate = if submitted > 0 {
-        ((submitted.saturating_sub(failed)) as f64) / (submitted as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    let mut net_profit_by_chain = serde_json::Map::new();
-    let mut total_profit = 0.0;
-    for (chain, profit) in portfolio.net_profit_all() {
-        total_profit += profit;
-        net_profit_by_chain.insert(chain.to_string(), serde_json::json!(profit));
-    }
-
-    let mut token_profit = Vec::new();
-    for (chain, token, profit) in portfolio.token_profit_all() {
-        token_profit.push(serde_json::json!({
-            "chain": chain.to_string(),
-            "token": format!("{:#x}", token),
-            "profit": profit
-        }));
-    }
-
-    let payload = serde_json::json!({
-        "chainId": chain_id,
-        "processed": processed,
-        "submitted": submitted,
-        "skipped": skipped,
-        "failed": failed,
-        "successRate": success_rate,
-        "queueDepth": queue_depth,
-        "queueDropped": queue_dropped,
-        "queueFull": queue_full,
-        "queueBackpressure": queue_backpressure,
-        "skipDecode": skip_decode,
-        "skipUnknownRouter": skip_unknown,
-        "skipGasCap": skip_gas_cap,
-        "skipSimulation": skip_sim_failed,
-        "skipProfitGuard": skip_profit_guard,
-        "nonceStateLoads": nonce_loads,
-        "nonceStateLoadFail": nonce_load_fail,
-        "nonceStatePersist": nonce_persist,
-        "nonceStatePersistFail": nonce_persist_fail,
-        "simLatencyMsSum": sim_sum,
-        "simLatencyMsCount": sim_count,
-        "simLatencyMsSumMempool": sim_sum_mem,
-        "simLatencyMsCountMempool": sim_count_mem,
-        "simLatencyMsSumMevShare": sim_sum_mev,
-        "simLatencyMsCountMevShare": sim_count_mev,
-        "netProfitEth": total_profit,
-        "netProfitByChain": net_profit_by_chain,
-        "tokenProfit": token_profit,
-        "history": render_bundle_history(stats),
-        "table": render_bundle_history(stats)
-    });
-
-    payload.to_string()
-}
-
-fn render_bundle_history(stats: &Arc<StrategyStats>) -> serde_json::Value {
-    let guard = stats
-        .bundles
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
-    let rows: Vec<serde_json::Value> = guard
-        .iter()
-        .rev()
-        .map(|b| {
-            json!({
-                "tx": b.tx_hash,
-                "source": b.source,
-                "profitEth": b.profit_eth,
-                "gasEth": b.gas_cost_eth,
-                "netEth": b.net_eth,
-                "timestampMs": b.timestamp_ms,
-            })
-        })
-        .collect();
-    serde_json::Value::Array(rows)
-}
-
-fn render_bundles_json(stats: &Arc<StrategyStats>) -> String {
-    let history = render_bundle_history(stats);
-    json!({ "history": history }).to_string()
 }
 
 struct RateLimiter {

@@ -100,7 +100,7 @@
 
 ## 10. Metrics & Observability
 
-- TCP mini-server with bearer auth; text Prometheus metrics plus JSON dashboard/bundles; log capture buffer and dynamic log level endpoint.
+- TCP mini-server with bearer auth; Prometheus-style text metrics endpoint.
 - Counters for ingest, skips, nonce persistence, sim latency (by source), queue backpressure.
 - Bundle history ring buffer.
 
@@ -122,9 +122,8 @@
 ## 12. Operational Runbook
 
 - **Start:** `oxidity_builder.db METRICS_TOKEN=… cargo run --release`.
-- **Monitor:** metrics endpoint `/` (bearer), `/dashboard`, `/bundles`, `/logs`; watch `nonce_state` counters and ingest queue depth.
+- **Monitor:** metrics endpoint `/` (bearer); watch `nonce_state` counters and ingest queue depth.
 - **Health:** metrics endpoint `/health` returns liveness + chain id for control-plane integrations.
-- **Logs API:** `/logs?after=<id>&limit=<n>` supports incremental polling (bounded to 500 per call).
 - **Restart safety:** `nonce_state` persists `next_nonce`/`touched_pools` per block; engine reloads on boot.
 - **Backpressure:** ingest queue bounded; drops counted; adjust `STRATEGY_WORKERS` and RPC rate limits accordingly.
 
@@ -138,22 +137,10 @@
 
 ---
 
-## Desktop Control Panel (Preview)
-
-- Start with: `cargo run --bin oxidity_control_panel`
-- Features:
-  - Start/stop/restart `oxidity-builder` with config + runtime flags
-  - Real-time dashboard via authenticated metrics endpoints
-  - Real-time in-app log stream from `/logs` and live log-level updates via `/log_level`
-  - Bundle history view and basic throughput trend chart
-
----
-
 ## Windows Installer (Preview)
 
 - Build installer: `.\scripts\build-installer.ps1`
 - Installer script: `installer/oxidity_installer.iss`
-- Supports optional component install for **Desktop Control Panel**.
 - Setup wizard writes `{app}\config.prod.toml` with required runtime fields.
 
 ---

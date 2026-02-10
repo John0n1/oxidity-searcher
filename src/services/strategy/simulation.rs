@@ -28,6 +28,14 @@ pub struct SimulationOutcome {
 static ETH_SIMULATE_MISSING: OnceLock<()> = OnceLock::new();
 static DEBUG_TRACE_MISSING: OnceLock<()> = OnceLock::new();
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RpcCapabilities {
+    pub fee_history: bool,
+    pub eth_simulate: bool,
+    pub debug_trace_call: bool,
+    pub debug_trace_call_many: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SimulationBackendMethod {
     EthSimulate,
@@ -45,6 +53,16 @@ impl SimulationBackend {
         let primary = SimulationBackendMethod::from_config(config.as_ref());
         Self {
             order: SimulationBackendMethod::build_order(primary),
+        }
+    }
+
+    pub fn mainnet_priority() -> Self {
+        Self {
+            order: vec![
+                SimulationBackendMethod::EthSimulate,
+                SimulationBackendMethod::DebugTraceCall,
+                SimulationBackendMethod::EthCall,
+            ],
         }
     }
 
@@ -104,9 +122,9 @@ impl Simulator {
         Self { provider, backend }
     }
 
-    pub async fn probe_eth_simulate_v1(&self) {
+    async fn probe_eth_simulate_v1_internal(&self) -> bool {
         if ETH_SIMULATE_MISSING.get().is_some() {
-            return;
+            return false;
         }
         let mut req = TransactionRequest::default();
         req.from = Some(Address::ZERO);
@@ -128,24 +146,133 @@ impl Simulator {
         match self.provider.simulate(&payload).await {
             Ok(_) => {
                 tracing::info!(target: "simulation", "eth_simulateV1 available");
+                true
             }
             Err(e) => {
                 let msg = e.to_string().to_lowercase();
-                if msg.contains("method") && msg.contains("not found") {
+                if rpc_method_unavailable(&msg) {
                     let _ = ETH_SIMULATE_MISSING.set(());
                     tracing::warn!(
                         target: "simulation",
                         "eth_simulateV1 not available on node; falling back"
                     );
+                    false
                 } else {
                     tracing::warn!(
                         target: "simulation",
                         error = %e,
                         "eth_simulateV1 probe failed; falling back"
                     );
+                    false
                 }
             }
         }
+    }
+
+    async fn probe_debug_trace_call_internal(&self) -> bool {
+        if DEBUG_TRACE_MISSING.get().is_some() {
+            return false;
+        }
+        let mut req = TransactionRequest::default();
+        req.from = Some(Address::ZERO);
+        req.to = Some(TxKind::Call(Address::ZERO));
+        req.value = Some(U256::ZERO);
+        let block = BlockId::Number(BlockNumberOrTag::Pending);
+        let trace_options = GethDebugTracingCallOptions::default();
+        match self.provider.debug_trace_call(req, block, trace_options).await {
+            Ok(_) => true,
+            Err(e) => {
+                let msg = e.to_string().to_lowercase();
+                if rpc_method_unavailable(&msg) {
+                    let _ = DEBUG_TRACE_MISSING.set(());
+                    tracing::warn!(
+                        target: "simulation",
+                        "debug_traceCall not available on node; falling back"
+                    );
+                    false
+                } else {
+                    tracing::debug!(
+                        target: "simulation",
+                        error = %e,
+                        "debug_traceCall probe failed"
+                    );
+                    false
+                }
+            }
+        }
+    }
+
+    async fn probe_debug_trace_many_internal(&self) -> bool {
+        if DEBUG_TRACE_MISSING.get().is_some() {
+            return false;
+        }
+        let mut req = TransactionRequest::default();
+        req.from = Some(Address::ZERO);
+        req.to = Some(TxKind::Call(Address::ZERO));
+        req.value = Some(U256::ZERO);
+        let bundle = Bundle::from(vec![req]);
+        let context = StateContext {
+            block_number: Some(BlockId::Number(BlockNumberOrTag::Pending)),
+            transaction_index: None,
+        };
+        let trace_options = GethDebugTracingCallOptions::default();
+        match self
+            .provider
+            .debug_trace_call_many(vec![bundle], context, trace_options)
+            .await
+        {
+            Ok(_) => true,
+            Err(e) => {
+                let msg = e.to_string().to_lowercase();
+                if rpc_method_unavailable(&msg) {
+                    let _ = DEBUG_TRACE_MISSING.set(());
+                    tracing::warn!(
+                        target: "simulation",
+                        "debug_traceCallMany not available on node; falling back"
+                    );
+                    false
+                } else {
+                    tracing::debug!(
+                        target: "simulation",
+                        error = %e,
+                        "debug_traceCallMany probe failed"
+                    );
+                    false
+                }
+            }
+        }
+    }
+
+    async fn probe_fee_history_internal(&self) -> bool {
+        self.provider
+            .get_fee_history(1, BlockNumberOrTag::Latest, &[50.0f64])
+            .await
+            .is_ok()
+    }
+
+    pub async fn probe_capabilities(&self) -> RpcCapabilities {
+        let fee_history = self.probe_fee_history_internal().await;
+        let eth_simulate = self.probe_eth_simulate_v1_internal().await;
+        let debug_trace_call = self.probe_debug_trace_call_internal().await;
+        let debug_trace_call_many = self.probe_debug_trace_many_internal().await;
+        tracing::info!(
+            target: "simulation",
+            fee_history,
+            eth_simulate,
+            debug_trace_call,
+            debug_trace_call_many,
+            "RPC simulation capabilities"
+        );
+        RpcCapabilities {
+            fee_history,
+            eth_simulate,
+            debug_trace_call,
+            debug_trace_call_many,
+        }
+    }
+
+    pub async fn probe_eth_simulate_v1(&self) {
+        let _ = self.probe_eth_simulate_v1_internal().await;
     }
 
     pub async fn simulate_transaction(
@@ -220,7 +347,7 @@ impl Simulator {
             }
             Err(e) => {
                 let msg = e.to_string().to_lowercase();
-                if msg.contains("method") && msg.contains("not found") {
+                if rpc_method_unavailable(&msg) {
                     if ETH_SIMULATE_MISSING.set(()).is_ok() {
                         tracing::warn!(
                             target: "simulation",
@@ -268,7 +395,7 @@ impl Simulator {
             },
             Err(e) => {
                 let msg = e.to_string().to_lowercase();
-                if msg.contains("method") && msg.contains("not found") {
+                if rpc_method_unavailable(&msg) {
                     if DEBUG_TRACE_MISSING.set(()).is_ok() {
                         tracing::warn!(
                             target: "simulation",
@@ -411,6 +538,13 @@ impl Simulator {
                 }
             }
             Err(e) => {
+                let msg = e.to_string().to_lowercase();
+                if rpc_method_unavailable(&msg) && ETH_SIMULATE_MISSING.set(()).is_ok() {
+                    tracing::warn!(
+                        target: "simulation",
+                        "eth_simulateV1 unavailable for bundles; cached fallback"
+                    );
+                }
                 tracing::warn!(
                     target: "simulation",
                     backend = "eth_simulate",
@@ -468,6 +602,13 @@ impl Simulator {
                 Ok(Some(outcomes))
             }
             Err(e) => {
+                let msg = e.to_string().to_lowercase();
+                if rpc_method_unavailable(&msg) && DEBUG_TRACE_MISSING.set(()).is_ok() {
+                    tracing::warn!(
+                        target: "simulation",
+                        "debug_traceCallMany unavailable; cached fallback"
+                    );
+                }
                 tracing::warn!(
                     target: "simulation",
                     backend = "debug_trace_call",
@@ -478,6 +619,12 @@ impl Simulator {
             }
         }
     }
+}
+
+fn rpc_method_unavailable(message: &str) -> bool {
+    let msg = message.to_lowercase();
+    (msg.contains("method") && msg.contains("not found"))
+        || (msg.contains("namespace") && msg.contains("disabled"))
 }
 
 fn sim_call_result_to_outcome(call: &SimCallResult) -> SimulationOutcome {

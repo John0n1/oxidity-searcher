@@ -69,10 +69,16 @@ pub struct Engine {
     mev_share_stream_url: String,
     mev_share_history_limit: u32,
     mev_share_enabled: bool,
+    mevshare_builders: Vec<String>,
     sandwich_attacks_enabled: bool,
     simulation_backend: String,
     worker_limit: usize,
     address_registry_path: String,
+    receipt_poll_ms: u64,
+    receipt_timeout_ms: u64,
+    receipt_confirm_blocks: u64,
+    emergency_exit_on_unknown_receipt: bool,
+    rpc_capability_strict: bool,
 }
 
 impl Engine {
@@ -113,10 +119,16 @@ impl Engine {
         mev_share_stream_url: String,
         mev_share_history_limit: u32,
         mev_share_enabled: bool,
+        mevshare_builders: Vec<String>,
         sandwich_attacks_enabled: bool,
         simulation_backend: String,
         worker_limit: usize,
         address_registry_path: String,
+        receipt_poll_ms: u64,
+        receipt_timeout_ms: u64,
+        receipt_confirm_blocks: u64,
+        emergency_exit_on_unknown_receipt: bool,
+        rpc_capability_strict: bool,
     ) -> Self {
         Self {
             http_provider,
@@ -154,10 +166,16 @@ impl Engine {
             mev_share_stream_url,
             mev_share_history_limit,
             mev_share_enabled,
+            mevshare_builders,
             sandwich_attacks_enabled,
             simulation_backend,
             worker_limit,
             address_registry_path,
+            receipt_poll_ms,
+            receipt_timeout_ms,
+            receipt_confirm_blocks,
+            emergency_exit_on_unknown_receipt,
+            rpc_capability_strict,
         }
     }
 
@@ -246,7 +264,20 @@ impl Engine {
         }
 
         self.log_rpc_capabilities().await;
-        self.simulator.probe_eth_simulate_v1().await;
+        let capabilities = self.simulator.probe_capabilities().await;
+        if !capabilities.fee_history {
+            tracing::warn!(
+                target: "rpc",
+                "eth_feeHistory probe failed; GasOracle will use fallback strategy"
+            );
+        }
+        if self.rpc_capability_strict && !(capabilities.eth_simulate || capabilities.debug_trace_call)
+        {
+            return Err(AppError::Config(
+                "rpc_capability_strict=true but neither eth_simulateV1 nor debug_traceCall is available"
+                    .into(),
+            ));
+        }
 
         let shutdown = CancellationToken::new();
         {
@@ -261,6 +292,8 @@ impl Engine {
         let stats = Arc::new(StrategyStats::default());
         let (tx_sender, tx_receiver) = mpsc::channel::<StrategyWork>(INGEST_QUEUE_BOUND);
         let (block_sender, block_receiver) = broadcast::channel(32);
+        let mevshare_builders =
+            BundleSender::canonicalize_mevshare_builders(self.mevshare_builders.clone()).await;
 
         let mempool = MempoolScanner::new(
             self.ws_provider.clone(),
@@ -280,7 +313,9 @@ impl Engine {
             self.dry_run,
             self.relay_url.clone(),
             self.mev_share_relay_url.clone(),
+            mevshare_builders,
             self.bundle_signer.clone(),
+            stats.clone(),
         ));
         let reserve_cache = Arc::new(ReserveCache::new(self.http_provider.clone()));
         if Path::new("data/pairs.json").exists() {
@@ -456,6 +491,10 @@ impl Engine {
                 self.simulation_backend.clone(),
                 self.worker_limit,
                 shutdown.clone(),
+                self.receipt_poll_ms,
+                self.receipt_timeout_ms,
+                self.receipt_confirm_blocks,
+                self.emergency_exit_on_unknown_receipt,
             );
 
             if self.mev_share_enabled {

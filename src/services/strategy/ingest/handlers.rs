@@ -15,7 +15,7 @@ use crate::services::strategy::decode::{
 use crate::services::strategy::planning::bundles::NonceLease;
 use crate::services::strategy::planning::{ApproveTx, BackrunTx, FrontRunTx};
 use crate::services::strategy::strategy::BundleTelemetry;
-use crate::services::strategy::strategy::{StrategyExecutor, StrategyWork};
+use crate::services::strategy::strategy::{ReceiptStatus, SkipReason, StrategyExecutor, StrategyWork};
 use alloy::consensus::Transaction as ConsensusTx;
 use alloy::eips::eip2718::Encodable2718;
 use alloy::network::TransactionResponse;
@@ -126,7 +126,7 @@ impl StrategyExecutor {
         let has_wrapped = observed_swap.path.contains(&self.wrapped_native);
         if observed_swap.amount_in.is_zero() || (!has_wrapped && !self.allow_non_wrapped_swaps) {
             self.log_skip(
-                "zero_amount_or_no_wrapped_native",
+                SkipReason::MissingWrappedOrZeroAmount,
                 "path missing wrapped native or zero amount",
             );
             return None;
@@ -136,12 +136,12 @@ impl StrategyExecutor {
         let target_token = match target_token(&observed_swap.path, self.wrapped_native) {
             Some(t) => t,
             None => {
-                self.log_skip("decode_failed", "no target token");
+                self.log_skip(SkipReason::DecodeFailed, "no target token");
                 return None;
             }
         };
         if self.toxic_tokens.contains(&target_token) {
-            self.log_skip("toxic_token", &format!("token={:#x}", target_token));
+            self.log_skip(SkipReason::ToxicToken, &format!("token={:#x}", target_token));
             return None;
         }
         self.inventory_tokens.insert(target_token);
@@ -160,18 +160,18 @@ impl StrategyExecutor {
 
         if !self.router_allowlist.contains(&to_addr) {
             if Self::is_common_token_call(tx.input()) {
-                self.log_skip("token_call", "erc20 transfer/approve");
+                self.log_skip(SkipReason::TokenCall, "erc20 transfer/approve");
                 return Ok(None);
             }
             if let Some(discovery) = &self.router_discovery {
                 discovery.record_unknown_router(to_addr, "mempool");
             }
-            self.log_skip("unknown_router", &format!("to={to_addr:#x}"));
+            self.log_skip(SkipReason::UnknownRouter, &format!("to={to_addr:#x}"));
             return Ok(None);
         }
 
         let Some(observed_swap) = decode_swap(tx) else {
-            self.log_skip("decode_failed", "unable to decode swap input");
+            self.log_skip(SkipReason::DecodeFailed, "unable to decode swap input");
             return Ok(None);
         };
         let (direction, target_token) = match self.validate_swap(to_addr, &observed_swap) {
@@ -259,6 +259,9 @@ impl StrategyExecutor {
             gas_limit = profit.bundle_gas_limit,
             max_fee_per_gas = parts.gas_fees.max_fee_per_gas,
             gas_cost_wei = %profit.gas_cost_wei,
+            bribe_wei = %profit.bribe_wei,
+            flashloan_premium_wei = %profit.flashloan_premium_wei,
+            effective_cost_wei = %profit.effective_cost_wei,
             net_profit_wei = %profit.net_profit_wei,
             net_profit_eth = profit.net_profit_eth_f64,
             wallet_eth = self.amount_to_display(parts.wallet_balance, self.wrapped_native),
@@ -307,10 +310,7 @@ impl StrategyExecutor {
         let plan_hashes = match self.merge_and_send_bundle(plan, touched_pools, lease).await {
             Ok(Some(h)) => h,
             Ok(None) => return Ok(None),
-            Err(e) => {
-                self.emergency_exit_inventory("bundle send failed").await;
-                return Err(e);
-            }
+            Err(e) => return Err(e),
         };
 
         let to_addr = match tx.kind() {
@@ -374,11 +374,20 @@ impl StrategyExecutor {
                 &profit.gross_profit_wei.to_string(),
                 &profit.gas_cost_wei.to_string(),
                 &profit.net_profit_wei.to_string(),
+                &profit.bribe_wei.to_string(),
+                &profit.flashloan_premium_wei.to_string(),
+                &profit.effective_cost_wei.to_string(),
             )
             .await?;
 
-        self.portfolio
-            .record_profit(self.chain_id, profit.gross_profit_wei, profit.gas_cost_wei);
+        self.portfolio.record_trade_components(
+            self.chain_id,
+            profit.gross_profit_wei,
+            profit.gas_cost_wei,
+            profit.bribe_wei,
+            profit.flashloan_premium_wei,
+            profit.net_profit_wei,
+        );
 
         let price_symbol = format!(
             "{}USD",
@@ -395,9 +404,23 @@ impl StrategyExecutor {
             .await;
 
         let receipt_target = plan_hashes.main;
-        if !self.await_receipt(&receipt_target).await? {
-            self.emergency_exit_inventory("bundle receipt missing/failed")
-                .await;
+        match self.await_receipt(&receipt_target).await? {
+            ReceiptStatus::ConfirmedSuccess => {}
+            ReceiptStatus::ConfirmedRevert => {
+                self.emergency_exit_inventory("bundle receipt reverted").await;
+            }
+            ReceiptStatus::UnknownTimeout => {
+                if self.emergency_exit_on_unknown_receipt {
+                    self.emergency_exit_inventory("bundle receipt unknown timeout")
+                        .await;
+                } else {
+                    tracing::warn!(
+                        target: "strategy",
+                        tx_hash = %format!("{:#x}", receipt_target),
+                        "Receipt timeout without confirmed revert; emergency exit suppressed"
+                    );
+                }
+            }
         }
 
         self.stats.record_bundle(BundleTelemetry {
@@ -421,13 +444,13 @@ impl StrategyExecutor {
             if let Some(discovery) = &self.router_discovery {
                 discovery.record_unknown_router(hint.router, "mev_share");
             }
-            self.log_skip("unknown_router", &format!("to={:#x}", hint.router));
+            self.log_skip(SkipReason::UnknownRouter, &format!("to={:#x}", hint.router));
             return Ok(None);
         }
 
         let Some(observed_swap) = decode_swap_input(hint.router, &hint.call_data, hint.value)
         else {
-            self.log_skip("decode_failed", "unable to decode swap input");
+            self.log_skip(SkipReason::DecodeFailed, "unable to decode swap input");
             return Ok(None);
         };
         let (direction, target_token) = match self.validate_swap(hint.router, &observed_swap) {
@@ -453,14 +476,14 @@ impl StrategyExecutor {
 
         if parts.front_run.is_some() {
             self.log_skip(
-                "unsupported_router",
+                SkipReason::UnsupportedRouter,
                 "MEV-Share path requires single backrun tx (no frontrun)",
             );
             return Ok(None);
         }
         if parts.executor_request.is_none() && !parts.approvals.is_empty() {
             self.log_skip(
-                "unsupported_router",
+                SkipReason::UnsupportedRouter,
                 "MEV-Share path requires executor-wrapped approvals",
             );
             return Ok(None);
@@ -534,6 +557,9 @@ impl StrategyExecutor {
             gas_limit = profit.bundle_gas_limit,
             max_fee_per_gas = parts.gas_fees.max_fee_per_gas,
             gas_cost_wei = %profit.gas_cost_wei,
+            bribe_wei = %profit.bribe_wei,
+            flashloan_premium_wei = %profit.flashloan_premium_wei,
+            effective_cost_wei = %profit.effective_cost_wei,
             net_profit_wei = %profit.net_profit_wei,
             net_profit_eth = profit.net_profit_eth_f64,
             wallet_eth = self.amount_to_display(parts.wallet_balance, self.wrapped_native),
@@ -602,8 +628,6 @@ impl StrategyExecutor {
         let _ = self.db.update_status(&tx_hash, None, Some(false)).await;
 
         if let Err(e) = self.bundle_sender.send_mev_share_bundle(&bundle_body).await {
-            self.emergency_exit_inventory("mev_share bundle send failed")
-                .await;
             return Err(e);
         }
 
@@ -652,11 +676,20 @@ impl StrategyExecutor {
                 &profit.gross_profit_wei.to_string(),
                 &profit.gas_cost_wei.to_string(),
                 &profit.net_profit_wei.to_string(),
+                &profit.bribe_wei.to_string(),
+                &profit.flashloan_premium_wei.to_string(),
+                &profit.effective_cost_wei.to_string(),
             )
             .await?;
 
-        self.portfolio
-            .record_profit(self.chain_id, profit.gross_profit_wei, profit.gas_cost_wei);
+        self.portfolio.record_trade_components(
+            self.chain_id,
+            profit.gross_profit_wei,
+            profit.gas_cost_wei,
+            profit.bribe_wei,
+            profit.flashloan_premium_wei,
+            profit.net_profit_wei,
+        );
 
         let price_symbol = format!(
             "{}USD",
@@ -673,9 +706,24 @@ impl StrategyExecutor {
             .await;
 
         let receipt_target = executor_hash.unwrap_or(backrun.hash);
-        if !self.await_receipt(&receipt_target).await? {
-            self.emergency_exit_inventory("mev_share receipt missing/failed")
-                .await;
+        match self.await_receipt(&receipt_target).await? {
+            ReceiptStatus::ConfirmedSuccess => {}
+            ReceiptStatus::ConfirmedRevert => {
+                self.emergency_exit_inventory("mev_share receipt reverted")
+                    .await;
+            }
+            ReceiptStatus::UnknownTimeout => {
+                if self.emergency_exit_on_unknown_receipt {
+                    self.emergency_exit_inventory("mev_share receipt unknown timeout")
+                        .await;
+                } else {
+                    tracing::warn!(
+                        target: "strategy",
+                        tx_hash = %format!("{:#x}", receipt_target),
+                        "MEV-Share receipt timeout without confirmed revert; emergency exit suppressed"
+                    );
+                }
+            }
         }
 
         self.stats.record_bundle(BundleTelemetry {
@@ -720,11 +768,11 @@ impl StrategyExecutor {
         };
 
         if self.router_is_risky(observed_swap.router) {
-            self.log_skip("router_revert_rate", "router failure rate too high");
+            self.log_skip(SkipReason::RouterRevertRate, "router failure rate too high");
             return Ok(None);
         }
         if !self.liquidity_depth_ok(observed_swap, wallet_chain_balance) {
-            self.log_skip("liquidity_depth", "price impact too high");
+            self.log_skip(SkipReason::LiquidityDepth, "price impact too high");
             return Ok(None);
         }
         if observed_swap.router_kind == RouterKind::V2Like {
@@ -740,7 +788,7 @@ impl StrategyExecutor {
                         && wallet_chain_balance < U256::from(100_000_000_000_000_000u128)
                     {
                         self.log_skip(
-                            "sandwich_risk",
+                            SkipReason::SandwichRisk,
                             "victim slippage too loose for small wallet",
                         );
                         return Ok(None);
@@ -765,7 +813,7 @@ impl StrategyExecutor {
         let dynamic_cap = U256::from(adjusted_dynamic).min(hard_cap);
         if U256::from(gas_fees.max_fee_per_gas) > dynamic_cap {
             self.log_skip(
-                "gas_price_cap",
+                SkipReason::GasPriceCap,
                 &format!(
                     "max_fee_per_gas={} cap_wei={} base_plus_tip={} base_dynamic={} balance_factor_bps={} hard_cap={} wallet_wei={}",
                     gas_fees.max_fee_per_gas,
@@ -793,7 +841,7 @@ impl StrategyExecutor {
                 .update_token_balance(self.chain_id, token_in)
                 .await?;
             if token_balance.is_zero() {
-                self.log_skip("non_wrapped_balance", &format!("token={token_in:#x}"));
+                self.log_skip(SkipReason::NonWrappedBalance, &format!("token={token_in:#x}"));
                 return Ok(None);
             }
             tracing::info!(
@@ -823,7 +871,7 @@ impl StrategyExecutor {
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    self.log_skip("front_run_build_failed", &e.to_string());
+                    self.log_skip(SkipReason::FrontRunBuildFailed, &e.to_string());
                     return Ok(None);
                 }
             }
@@ -890,7 +938,7 @@ impl StrategyExecutor {
         {
             Ok(b) => b,
             Err(e) => {
-                self.log_skip("backrun_build_failed", &e.to_string());
+                self.log_skip(SkipReason::BackrunBuildFailed, &e.to_string());
                 return Ok(None);
             }
         };
@@ -982,7 +1030,7 @@ impl StrategyExecutor {
                 .reason
                 .clone()
                 .unwrap_or_else(|| "bundle sim returned failure".to_string());
-            self.log_skip("simulation_failed", &detail);
+            self.log_skip(SkipReason::SimulationFailed, &detail);
             return Ok(None);
         }
         self.record_router_sim(router, true);
@@ -1021,7 +1069,7 @@ impl StrategyExecutor {
         let upfront_need = total_eth_in.saturating_add(gas_cost_wei);
         if wallet_chain_balance < upfront_need {
             self.log_skip(
-                "insufficient_balance",
+                SkipReason::InsufficientBalance,
                 &format!(
                     "need {} wei (value+bribe+gas) have {}",
                     upfront_need, wallet_chain_balance
@@ -1033,19 +1081,20 @@ impl StrategyExecutor {
             .estimate_native_out(backrun.expected_out, backrun.expected_out_token)
             .await
         else {
-            self.log_skip("profit_or_gas_guard", "non_native_expected_out");
+            self.log_skip(SkipReason::ProfitOrGasGuard, "non_native_expected_out");
             return Ok(None);
         };
         let gross_profit_wei = native_out.saturating_sub(total_eth_in);
 
         if gas_cost_wei > gross_profit_wei {
-            self.log_skip("profit_or_gas_guard", "Gas > Gross Profit");
+            self.log_skip(SkipReason::ProfitOrGasGuard, "Gas > Gross Profit");
             return Ok(None);
         }
 
-        let net_profit_wei = gross_profit_wei
-            .saturating_sub(gas_cost_wei)
-            .saturating_sub(backrun.flashloan_premium);
+        let effective_cost_wei = gas_cost_wei
+            .saturating_add(bribe_wei)
+            .saturating_add(backrun.flashloan_premium);
+        let net_profit_wei = gross_profit_wei.saturating_sub(effective_cost_wei);
         let profit_floor = StrategyExecutor::dynamic_profit_floor_with_costs(
             wallet_chain_balance,
             gas_cost_wei,
@@ -1054,14 +1103,14 @@ impl StrategyExecutor {
 
         if net_profit_wei < profit_floor {
             self.log_skip(
-                "profit_or_gas_guard",
+                SkipReason::ProfitOrGasGuard,
                 &format!("Net {} < Floor {}", net_profit_wei, profit_floor),
             );
             return Ok(None);
         }
 
         if !self.gas_ratio_ok(gas_cost_wei, gross_profit_wei, wallet_chain_balance) {
-            self.log_skip("profit_or_gas_guard", "Bad Risk/Reward");
+            self.log_skip(SkipReason::ProfitOrGasGuard, "Bad Risk/Reward");
             return Ok(None);
         }
 
@@ -1092,6 +1141,9 @@ impl StrategyExecutor {
             gas_cost_wei,
             gross_profit_wei,
             net_profit_wei,
+            bribe_wei,
+            flashloan_premium_wei: backrun.flashloan_premium,
+            effective_cost_wei,
             profit_eth_f64,
             gas_cost_eth_f64,
             net_profit_eth_f64,
@@ -1119,6 +1171,9 @@ struct ProfitOutcome {
     gas_cost_wei: U256,
     gross_profit_wei: U256,
     net_profit_wei: U256,
+    bribe_wei: U256,
+    flashloan_premium_wei: U256,
+    effective_cost_wei: U256,
     profit_eth_f64: f64,
     gas_cost_eth_f64: f64,
     net_profit_eth_f64: f64,

@@ -146,12 +146,28 @@ impl Database {
         profit_wei: &str,
         gas_cost_wei: &str,
         net_profit_wei: &str,
+        bribe_wei: &str,
+        flashloan_premium_wei: &str,
+        effective_cost_wei: &str,
     ) -> Result<i64, AppError> {
         let chain_id_i64 = chain_id as i64;
         let row = sqlx::query(
             r#"
-            INSERT INTO profit_records (tx_hash, chain_id, strategy, profit_eth, gas_cost_eth, net_profit_eth, profit_wei, gas_cost_wei, net_profit_wei)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO profit_records (
+                tx_hash,
+                chain_id,
+                strategy,
+                profit_eth,
+                gas_cost_eth,
+                net_profit_eth,
+                profit_wei,
+                gas_cost_wei,
+                net_profit_wei,
+                bribe_wei,
+                flashloan_premium_wei,
+                effective_cost_wei
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING id
             "#,
         )
@@ -164,6 +180,9 @@ impl Database {
         .bind(profit_wei)
         .bind(gas_cost_wei)
         .bind(net_profit_wei)
+        .bind(bribe_wei)
+        .bind(flashloan_premium_wei)
+        .bind(effective_cost_wei)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| AppError::Initialization(format!("Profit insert failed: {}", e)))?;
@@ -331,6 +350,9 @@ mod tests {
                 "200000000000000000",
                 "50000000000000000",
                 "150000000000000000",
+                "0",
+                "0",
+                "50000000000000000",
             )
             .await
             .unwrap();

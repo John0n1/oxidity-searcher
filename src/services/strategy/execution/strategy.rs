@@ -28,7 +28,7 @@ use alloy::rpc::types::eth::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolCall;
 use dashmap::{DashMap, DashSet};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -46,6 +46,72 @@ pub enum StrategyWork {
         hint: MevShareHint,
         received_at: std::time::Instant,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SkipReason {
+    UnknownRouter,
+    DecodeFailed,
+    MissingWrappedOrZeroAmount,
+    NonWrappedBalance,
+    GasPriceCap,
+    SimulationFailed,
+    ProfitOrGasGuard,
+    UnsupportedRouter,
+    TokenCall,
+    InsufficientBalance,
+    ToxicToken,
+    RouterRevertRate,
+    LiquidityDepth,
+    SandwichRisk,
+    FrontRunBuildFailed,
+    BackrunBuildFailed,
+}
+
+impl SkipReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SkipReason::UnknownRouter => "unknown_router",
+            SkipReason::DecodeFailed => "decode_failed",
+            SkipReason::MissingWrappedOrZeroAmount => "zero_amount_or_no_wrapped_native",
+            SkipReason::NonWrappedBalance => "non_wrapped_balance",
+            SkipReason::GasPriceCap => "gas_price_cap",
+            SkipReason::SimulationFailed => "simulation_failed",
+            SkipReason::ProfitOrGasGuard => "profit_or_gas_guard",
+            SkipReason::UnsupportedRouter => "unsupported_router",
+            SkipReason::TokenCall => "token_call",
+            SkipReason::InsufficientBalance => "insufficient_balance",
+            SkipReason::ToxicToken => "toxic_token",
+            SkipReason::RouterRevertRate => "router_revert_rate",
+            SkipReason::LiquidityDepth => "liquidity_depth",
+            SkipReason::SandwichRisk => "sandwich_risk",
+            SkipReason::FrontRunBuildFailed => "front_run_build_failed",
+            SkipReason::BackrunBuildFailed => "backrun_build_failed",
+        }
+    }
+
+    fn noisy(self) -> bool {
+        matches!(
+            self,
+            SkipReason::UnknownRouter | SkipReason::TokenCall | SkipReason::DecodeFailed
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReceiptStatus {
+    ConfirmedSuccess,
+    ConfirmedRevert,
+    UnknownTimeout,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RelayOutcomeStats {
+    pub attempts: u64,
+    pub successes: u64,
+    pub failures: u64,
+    pub timeouts: u64,
+    pub retries: u64,
 }
 
 pub(crate) const VICTIM_FEE_BUMP_BPS: u64 = 11_000;
@@ -91,6 +157,7 @@ pub struct StrategyStats {
     pub sim_latency_ms_count_mempool: AtomicU64,
     pub sim_latency_ms_sum_mevshare: AtomicU64,
     pub sim_latency_ms_count_mevshare: AtomicU64,
+    pub relay_outcomes: StdMutex<HashMap<String, RelayOutcomeStats>>,
 }
 
 #[derive(Clone, Debug)]
@@ -129,6 +196,30 @@ impl StrategyStats {
                     .fetch_add(1, Ordering::Relaxed);
             }
             _ => {}
+        }
+    }
+
+    pub fn record_relay_attempt(
+        &self,
+        relay_name: &str,
+        success: bool,
+        timeout: bool,
+        retries: u64,
+    ) {
+        let mut guard = self
+            .relay_outcomes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let entry = guard.entry(relay_name.to_string()).or_default();
+        entry.attempts = entry.attempts.saturating_add(1);
+        entry.retries = entry.retries.saturating_add(retries);
+        if success {
+            entry.successes = entry.successes.saturating_add(1);
+        } else {
+            entry.failures = entry.failures.saturating_add(1);
+            if timeout {
+                entry.timeouts = entry.timeouts.saturating_add(1);
+            }
         }
     }
 }
@@ -181,6 +272,10 @@ pub struct StrategyExecutor {
     pub(in crate::services::strategy) simulation_backend: String,
     pub(in crate::services::strategy) worker_semaphore: Arc<Semaphore>,
     pub(in crate::services::strategy) shutdown: CancellationToken,
+    pub(in crate::services::strategy) receipt_poll_ms: u64,
+    pub(in crate::services::strategy) receipt_timeout_ms: u64,
+    pub(in crate::services::strategy) receipt_confirm_blocks: u64,
+    pub(in crate::services::strategy) emergency_exit_on_unknown_receipt: bool,
 }
 
 impl StrategyExecutor {
@@ -389,62 +484,69 @@ impl StrategyExecutor {
             || msg.contains("missing nonce")
     }
 
-    pub(in crate::services::strategy) fn log_skip(&self, reason: &str, detail: &str) {
+    pub(in crate::services::strategy) fn log_skip(&self, reason: SkipReason, detail: &str) {
         let count = match reason {
-            "unknown_router" => {
+            SkipReason::UnknownRouter => {
                 self.stats
                     .skip_unknown_router
                     .fetch_add(1, Ordering::Relaxed)
                     + 1
             }
-            "decode_failed" => {
+            SkipReason::DecodeFailed => {
                 self.stats
                     .skip_decode_failed
                     .fetch_add(1, Ordering::Relaxed)
                     + 1
             }
-            "zero_amount_or_no_wrapped_native" => {
+            SkipReason::MissingWrappedOrZeroAmount => {
                 self.stats
                     .skip_missing_wrapped
                     .fetch_add(1, Ordering::Relaxed)
                     + 1
             }
-            "non_wrapped_balance" => {
+            SkipReason::NonWrappedBalance => {
                 self.stats
                     .skip_non_wrapped_balance
                     .fetch_add(1, Ordering::Relaxed)
                     + 1
             }
-            "gas_price_cap" => self.stats.skip_gas_cap.fetch_add(1, Ordering::Relaxed) + 1,
-            "simulation_failed" => self.stats.skip_sim_failed.fetch_add(1, Ordering::Relaxed) + 1,
-            "profit_or_gas_guard" => {
+            SkipReason::GasPriceCap => self.stats.skip_gas_cap.fetch_add(1, Ordering::Relaxed) + 1,
+            SkipReason::SimulationFailed => {
+                self.stats.skip_sim_failed.fetch_add(1, Ordering::Relaxed) + 1
+            }
+            SkipReason::ProfitOrGasGuard => {
                 self.stats.skip_profit_guard.fetch_add(1, Ordering::Relaxed) + 1
             }
-            "unsupported_router_type" => {
+            SkipReason::UnsupportedRouter => {
                 self.stats
                     .skip_unsupported_router
                     .fetch_add(1, Ordering::Relaxed)
                     + 1
             }
-            "token_call" => self.stats.skip_token_call.fetch_add(1, Ordering::Relaxed) + 1,
-            "toxic_token" => self.stats.skip_toxic_token.fetch_add(1, Ordering::Relaxed) + 1,
-            "insufficient_balance" => {
+            SkipReason::TokenCall => self.stats.skip_token_call.fetch_add(1, Ordering::Relaxed) + 1,
+            SkipReason::ToxicToken => self.stats.skip_toxic_token.fetch_add(1, Ordering::Relaxed) + 1,
+            SkipReason::InsufficientBalance => {
                 self.stats
                     .skip_insufficient_balance
                     .fetch_add(1, Ordering::Relaxed)
                     + 1
             }
-            _ => 0,
+            SkipReason::RouterRevertRate
+            | SkipReason::LiquidityDepth
+            | SkipReason::SandwichRisk
+            | SkipReason::FrontRunBuildFailed
+            | SkipReason::BackrunBuildFailed => 0,
         };
 
-        let noisy = matches!(reason, "unknown_router" | "token_call" | "decode_failed");
+        let noisy = reason.noisy();
         let should_log = self.dry_run || !noisy || count % self.skip_log_every == 0;
+        let reason_str = reason.as_str();
 
         if should_log {
             if self.dry_run {
-                tracing::info!(target: "strategy_skip", %reason, %detail, count, "Dry-run skip");
+                tracing::info!(target: "strategy_skip", reason = %reason_str, %detail, count, "Dry-run skip");
             } else {
-                tracing::debug!(target: "strategy_skip", %reason, %detail, count);
+                tracing::debug!(target: "strategy_skip", reason = %reason_str, %detail, count);
             }
         }
     }
@@ -581,6 +683,10 @@ impl StrategyExecutor {
         simulation_backend: String,
         worker_limit: usize,
         shutdown: CancellationToken,
+        receipt_poll_ms: u64,
+        receipt_timeout_ms: u64,
+        receipt_confirm_blocks: u64,
+        emergency_exit_on_unknown_receipt: bool,
     ) -> Self {
         let semaphore_size = worker_limit.max(1);
         let universal_router = constants::default_uniswap_universal_router(chain_id);
@@ -633,6 +739,10 @@ impl StrategyExecutor {
             simulation_backend,
             worker_semaphore: Arc::new(Semaphore::new(semaphore_size)),
             shutdown,
+            receipt_poll_ms: receipt_poll_ms.max(100),
+            receipt_timeout_ms: receipt_timeout_ms.max(receipt_poll_ms.max(100)),
+            receipt_confirm_blocks: receipt_confirm_blocks.max(1),
+            emergency_exit_on_unknown_receipt,
         }
     }
 
@@ -840,30 +950,88 @@ impl StrategyExecutor {
         }
     }
 
+    fn current_head_or(&self, fallback: u64) -> u64 {
+        let head = self.current_block.load(Ordering::Relaxed);
+        if head > 0 { head } else { fallback }
+    }
+
+    fn receipt_is_confirmed(
+        current_head: u64,
+        receipt_block: u64,
+        confirm_blocks: u64,
+    ) -> bool {
+        let needed_head = receipt_block.saturating_add(confirm_blocks.saturating_sub(1));
+        current_head >= needed_head
+    }
+
     pub(in crate::services::strategy) async fn await_receipt(
         &self,
         hash: &B256,
-    ) -> Result<bool, AppError> {
-        for _ in 0..3 {
-            if let Ok(Some(rcpt)) = self.http_provider.get_transaction_receipt(*hash).await {
-                let block_num = rcpt.block_number;
-                let status = rcpt.status();
-                if let Err(e) = self
-                    .db
-                    .update_status(
-                        &format!("{:#x}", hash),
-                        block_num.map(|b| b as i64),
-                        Some(status),
-                    )
-                    .await
-                {
-                    tracing::warn!(target: "strategy", error = %e, "Failed to persist tx status");
-                }
-                return Ok(status);
+    ) -> Result<ReceiptStatus, AppError> {
+        let timeout = std::time::Duration::from_millis(self.receipt_timeout_ms.max(1));
+        let poll = std::time::Duration::from_millis(self.receipt_poll_ms.max(1));
+        let started = std::time::Instant::now();
+
+        loop {
+            if started.elapsed() >= timeout {
+                break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+            let mut current_head = self.current_head_or(0);
+            if current_head == 0 {
+                if let Ok(head) = self.http_provider.get_block_number().await {
+                    current_head = head;
+                    self.current_block.store(head, Ordering::Relaxed);
+                }
+            }
+
+            match self.http_provider.get_transaction_receipt(*hash).await {
+                Ok(Some(rcpt)) => {
+                    let block_num = rcpt.block_number;
+                    let status = rcpt.status();
+                    if let Err(e) = self
+                        .db
+                        .update_status(
+                            &format!("{:#x}", hash),
+                            block_num.map(|b| b as i64),
+                            Some(status),
+                        )
+                        .await
+                    {
+                        tracing::warn!(target: "strategy", error = %e, "Failed to persist tx status");
+                    }
+
+                    if !status {
+                        return Ok(ReceiptStatus::ConfirmedRevert);
+                    }
+
+                    if let Some(receipt_block) = block_num {
+                        if Self::receipt_is_confirmed(
+                            current_head.max(receipt_block),
+                            receipt_block,
+                            self.receipt_confirm_blocks.max(1),
+                        ) {
+                            return Ok(ReceiptStatus::ConfirmedSuccess);
+                        }
+                    } else {
+                        return Ok(ReceiptStatus::ConfirmedSuccess);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::debug!(
+                        target: "strategy",
+                        error = %e,
+                        hash = %format!("{:#x}", hash),
+                        "Receipt lookup error; retrying"
+                    );
+                }
+            }
+
+            tokio::time::sleep(poll).await;
         }
-        Ok(false)
+
+        Ok(ReceiptStatus::UnknownTimeout)
     }
 }
 
@@ -1061,7 +1229,7 @@ mod tests {
             floor_large > floor_small,
             "profit floor should scale with balance"
         );
-        assert!(floor_small >= U256::ZERO);
+        assert!(floor_small >= U256::from(20_000_000_000_000u64));
     }
 
     #[test]
@@ -1228,12 +1396,20 @@ mod tests {
         let (_block_tx, block_rx) = tokio::sync::broadcast::channel::<Header>(1);
         let http = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
         let safety_guard = Arc::new(SafetyGuard::new());
+        let stats = Arc::new(StrategyStats::default());
         let bundle_sender = Arc::new(BundleSender::new(
             http.clone(),
             true,
             "http://localhost:8545".to_string(),
             "http://localhost:8545".to_string(),
+            vec![
+                "flashbots".to_string(),
+                "beaverbuild.org".to_string(),
+                "rsync".to_string(),
+                "Titan".to_string(),
+            ],
             PrivateKeySigner::random(),
+            stats.clone(),
         ));
         let db = Database::new("sqlite::memory:").await.expect("db");
         let portfolio = Arc::new(PortfolioManager::new(http.clone(), Address::ZERO));
@@ -1241,7 +1417,6 @@ mod tests {
         let price_feed = PriceFeed::new(http.clone(), HashMap::new(), PriceApiKeys::default());
         let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
         let token_manager = Arc::new(TokenManager::default());
-        let stats = Arc::new(StrategyStats::default());
         let nonce_manager = NonceManager::new(http.clone(), Address::ZERO);
         let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
         let router_allowlist = Arc::new(DashSet::new());
@@ -1282,6 +1457,10 @@ mod tests {
             "revm".to_string(),
             8,
             CancellationToken::new(),
+            500,
+            60_000,
+            4,
+            false,
         )
     }
 

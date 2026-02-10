@@ -46,7 +46,7 @@ pub const DEFAULT_PRIORITY_FEE_GWEI: u64 = 2;
 
 lazy_static! {
     // 0.00002 ETH (accept small edges by default)
-    pub static ref MIN_PROFIT_THRESHOLD_WEI: U256 = U256::ZERO;
+    pub static ref MIN_PROFIT_THRESHOLD_WEI: U256 = U256::from(20_000_000_000_000u64);
 
     // 0.05 ETH
     pub static ref LOW_BALANCE_THRESHOLD_WEI: U256 = U256::from(50_000_000_000_000_000u64);

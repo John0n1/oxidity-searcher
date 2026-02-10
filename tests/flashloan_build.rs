@@ -35,12 +35,20 @@ async fn flashloan_builder_encodes_callbacks() {
     let http = HttpProvider::new_http(Url::parse("http://127.0.0.1:8545").unwrap());
     let safety_guard = Arc::new(SafetyGuard::new());
     let bundle_signer = PrivateKeySigner::random();
+    let stats = Arc::new(StrategyStats::default());
     let bundle_sender = Arc::new(BundleSender::new(
         http.clone(),
         true,
         "https://relay.flashbots.net".to_string(),
         "https://mev-share.flashbots.net".to_string(),
+        vec![
+            "flashbots".to_string(),
+            "beaverbuild.org".to_string(),
+            "rsync".to_string(),
+            "Titan".to_string(),
+        ],
         bundle_signer.clone(),
+        stats.clone(),
     ));
     let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), bundle_signer.address()));
@@ -53,7 +61,6 @@ async fn flashloan_builder_encodes_callbacks() {
     let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
     let token_manager =
         Arc::new(oxidity_builder::infrastructure::data::token_manager::TokenManager::default());
-    let stats = Arc::new(StrategyStats::default());
     let nonce_manager = NonceManager::new(http.clone(), bundle_signer.address());
     let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
     let router_allowlist = Arc::new(DashSet::<Address>::new());
@@ -99,6 +106,10 @@ async fn flashloan_builder_encodes_callbacks() {
         "revm".to_string(),
         4,
         tokio_util::sync::CancellationToken::new(),
+        500,
+        60_000,
+        4,
+        false,
     );
 
     // Two-step callback: approve + dummy swap payload; include reset approvals.
@@ -167,12 +178,20 @@ async fn flashloan_builder_uses_aave_selector() {
     let http = HttpProvider::new_http(Url::parse("http://127.0.0.1:8545").unwrap());
     let safety_guard = Arc::new(SafetyGuard::new());
     let bundle_signer = PrivateKeySigner::random();
+    let stats = Arc::new(StrategyStats::default());
     let bundle_sender = Arc::new(BundleSender::new(
         http.clone(),
         true,
         "https://relay.flashbots.net".to_string(),
         "https://mev-share.flashbots.net".to_string(),
+        vec![
+            "flashbots".to_string(),
+            "beaverbuild.org".to_string(),
+            "rsync".to_string(),
+            "Titan".to_string(),
+        ],
         bundle_signer.clone(),
+        stats.clone(),
     ));
     let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), bundle_signer.address()));
@@ -185,7 +204,6 @@ async fn flashloan_builder_uses_aave_selector() {
     let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
     let token_manager =
         Arc::new(oxidity_builder::infrastructure::data::token_manager::TokenManager::default());
-    let stats = Arc::new(StrategyStats::default());
     let nonce_manager = NonceManager::new(http.clone(), bundle_signer.address());
     let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
     let router_allowlist = Arc::new(DashSet::<Address>::new());
@@ -232,6 +250,10 @@ async fn flashloan_builder_uses_aave_selector() {
         "revm".to_string(),
         4,
         tokio_util::sync::CancellationToken::new(),
+        500,
+        60_000,
+        4,
+        false,
     );
 
     let callbacks = vec![(WETH_MAINNET, Bytes::from(vec![0x99]), U256::from(0u64))];

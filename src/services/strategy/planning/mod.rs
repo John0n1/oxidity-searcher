@@ -337,7 +337,7 @@ impl StrategyExecutor {
             values,
             bribeRecipient: bribe_recipient,
             bribeAmount: bribe,
-            allowPartial: true,
+            allowPartial: false,
             balanceCheckToken: balance_check_token,
         };
         let calldata = exec_call.abi_encode();
@@ -1235,7 +1235,11 @@ impl StrategyExecutor {
                 }
             }
         } else {
-            let tokens_in = token_in_override.unwrap();
+            let Some(tokens_in) = token_in_override else {
+                return Err(AppError::Strategy(
+                    "token_in_override missing for sell backrun path".into(),
+                ));
+            };
             let (value, expected_out, calldata, access_list) = match observed.router_kind {
                 RouterKind::V2Like => {
                     expected_out_token = if has_wrapped {

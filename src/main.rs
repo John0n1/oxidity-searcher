@@ -182,10 +182,12 @@ async fn main() -> Result<(), AppError> {
             chainlink_feeds,
             settings.price_api_keys(),
         );
-        let simulator = Simulator::new(
-            http_provider.clone(),
-            SimulationBackend::new(settings.simulation_backend.clone()),
-        );
+        let simulation_backend = if chain_id == 1 {
+            SimulationBackend::mainnet_priority()
+        } else {
+            SimulationBackend::new(settings.simulation_backend.clone())
+        };
+        let simulator = Simulator::new(http_provider.clone(), simulation_backend);
 
         let strategy_enabled = strategy_enabled_flag;
         let router_allowlist = Arc::new(DashSet::new());
@@ -264,10 +266,16 @@ async fn main() -> Result<(), AppError> {
             settings.mev_share_stream_url.clone(),
             settings.mev_share_history_limit,
             settings.mev_share_enabled,
+            settings.mevshare_builders_value(),
             settings.sandwich_attacks_enabled,
             settings.simulation_backend.clone(),
             worker_limit,
             settings.address_registry_path(),
+            settings.receipt_poll_ms_value(),
+            settings.receipt_timeout_ms_value(),
+            settings.receipt_confirm_blocks_value(),
+            settings.emergency_exit_on_unknown_receipt,
+            settings.rpc_capability_strict_for_chain(chain_id),
         );
 
         engine_tasks.push(tokio::spawn(async move { engine.run().await }));
