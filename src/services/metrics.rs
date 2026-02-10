@@ -313,6 +313,40 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
         ));
     }
 
+    let relay_outcomes: Vec<(String, crate::core::strategy::RelayOutcomeStats)> = {
+        let guard = stats
+            .relay_outcomes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard
+            .iter()
+            .map(|(name, outcome)| (name.clone(), outcome.clone()))
+            .collect()
+    };
+    for (relay, outcome) in relay_outcomes {
+        let relay = relay.replace('"', "_");
+        body.push_str(&format!(
+            "# TYPE relay_attempts_total counter\nrelay_attempts_total{{relay=\"{}\"}} {}\n",
+            relay, outcome.attempts
+        ));
+        body.push_str(&format!(
+            "# TYPE relay_successes_total counter\nrelay_successes_total{{relay=\"{}\"}} {}\n",
+            relay, outcome.successes
+        ));
+        body.push_str(&format!(
+            "# TYPE relay_failures_total counter\nrelay_failures_total{{relay=\"{}\"}} {}\n",
+            relay, outcome.failures
+        ));
+        body.push_str(&format!(
+            "# TYPE relay_timeouts_total counter\nrelay_timeouts_total{{relay=\"{}\"}} {}\n",
+            relay, outcome.timeouts
+        ));
+        body.push_str(&format!(
+            "# TYPE relay_retries_total counter\nrelay_retries_total{{relay=\"{}\"}} {}\n",
+            relay, outcome.retries
+        ));
+    }
+
     body
 }
 

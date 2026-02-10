@@ -9,7 +9,7 @@ use crate::core::simulation::Simulator;
 use crate::data::db::Database;
 use crate::domain::constants;
 use crate::infrastructure::data::token_manager::TokenManager;
-use crate::network::gas::GasOracle;
+use crate::network::gas::{GasFees, GasOracle};
 use crate::network::mev_share::MevShareHint;
 use crate::network::nonce::NonceManager;
 use crate::network::price_feed::PriceFeed;
@@ -118,6 +118,16 @@ pub(crate) const VICTIM_FEE_BUMP_BPS: u64 = 11_000;
 pub(crate) const TAX_TOLERANCE_BPS: u64 = 500;
 pub(crate) const PROBE_GAS_LIMIT: u64 = 220_000;
 pub(crate) const V3_QUOTE_CACHE_TTL_MS: u64 = 250;
+
+#[derive(Clone, Copy, Debug)]
+pub struct DynamicGasCap {
+    pub cap_wei: U256,
+    pub base_plus_tip_wei: u128,
+    pub base_dynamic_wei: u128,
+    pub adjusted_dynamic_wei: u128,
+    pub balance_factor_bps: u64,
+    pub floor_wei: u128,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlashloanProvider {
@@ -347,6 +357,70 @@ impl StrategyExecutor {
         let vol_adjust = volatility * 0.15;
         let impact = base - vol_adjust;
         impact.round().clamp(30.0, 200.0) as u64
+    }
+
+    pub(in crate::services::strategy) fn hard_gas_cap_wei(&self) -> U256 {
+        if self.max_gas_price_gwei == 0 {
+            U256::MAX
+        } else {
+            U256::from(self.max_gas_price_gwei) * U256::from(1_000_000_000u64)
+        }
+    }
+
+    pub(in crate::services::strategy) fn dynamic_gas_cap(
+        &self,
+        wallet_balance: U256,
+        gas_fees: &GasFees,
+        hard_cap: U256,
+    ) -> DynamicGasCap {
+        let base_plus_tip_wei = gas_fees
+            .next_base_fee_per_gas
+            .saturating_add(gas_fees.max_priority_fee_per_gas);
+        let fallback_dynamic_wei =
+            base_plus_tip_wei.saturating_mul(self.gas_cap_multiplier_bps as u128) / 10_000u128;
+        let base_dynamic_wei = gas_fees
+            .suggested_max_fee_per_gas
+            .unwrap_or(fallback_dynamic_wei);
+        let balance_factor_bps = self.balance_cap_multiplier_bps(wallet_balance);
+        let adjusted_dynamic_wei =
+            base_dynamic_wei.saturating_mul(balance_factor_bps as u128) / 10_000u128;
+
+        // Avoid impossible caps below current base fee on tiny balances.
+        let floor_wei = gas_fees.base_fee_per_gas.max(gas_fees.next_base_fee_per_gas);
+        let cap_wei = U256::from(adjusted_dynamic_wei.max(floor_wei)).min(hard_cap);
+
+        DynamicGasCap {
+            cap_wei,
+            base_plus_tip_wei,
+            base_dynamic_wei,
+            adjusted_dynamic_wei,
+            balance_factor_bps,
+            floor_wei,
+        }
+    }
+
+    pub(in crate::services::strategy) fn enforce_dynamic_gas_cap(
+        gas_fees: &mut GasFees,
+        cap_wei: U256,
+    ) -> bool {
+        if U256::from(gas_fees.max_fee_per_gas) <= cap_wei {
+            return false;
+        }
+
+        let cap_u128 = if cap_wei > U256::from(u128::MAX) {
+            u128::MAX
+        } else {
+            cap_wei.to::<u128>()
+        };
+        let base_anchor = gas_fees.next_base_fee_per_gas.max(gas_fees.base_fee_per_gas);
+        if cap_u128 < base_anchor {
+            return true;
+        }
+
+        gas_fees.max_fee_per_gas = cap_u128;
+        let tip_cap = cap_u128.saturating_sub(base_anchor);
+        gas_fees.max_priority_fee_per_gas = gas_fees.max_priority_fee_per_gas.min(tip_cap);
+        false
     }
 
     pub(in crate::services::strategy) fn record_router_sim(&self, router: Address, success: bool) {
@@ -1056,8 +1130,8 @@ mod tests {
     use crate::network::gas::GasFees;
     use crate::network::price_feed::PriceApiKeys;
     use crate::services::strategy::decode::{
-        ObservedSwap, RouterKind, SwapDirection, decode_swap_input, direction, parse_v3_path,
-        target_token, v3_fee_sane,
+        ObservedSwap, RouterKind, SwapDirection, decode_swap_input, direction, encode_v3_path,
+        parse_v3_path, target_token, v3_fee_sane,
     };
     use crate::services::strategy::routers::UniV2Router;
     use alloy::rpc::types::Header;
@@ -1107,6 +1181,95 @@ mod tests {
             decode_swap_input(WETH_MAINNET, &data, U256::from(0u64)).expect("decode v3 single");
         assert_eq!(decoded.router_kind, RouterKind::V3Like);
         assert_eq!(decoded.path.len(), 2);
+    }
+
+    #[test]
+    fn decodes_uniswap_v2_exact_out_variant() {
+        let router = WETH_MAINNET;
+        let token = Address::from([2u8; 20]);
+        let call = UniV2Router::swapTokensForExactETHCall {
+            amountOut: U256::from(3_000u64),
+            amountInMax: U256::from(10_000u64),
+            path: vec![token, WETH_MAINNET],
+            to: Address::from([3u8; 20]),
+            deadline: U256::from(100u64),
+        };
+        let data = call.abi_encode();
+        let decoded = decode_swap_input(router, &data, U256::ZERO).expect("decode v2 exact out");
+        assert_eq!(decoded.router_kind, RouterKind::V2Like);
+        assert_eq!(decoded.amount_in, U256::from(10_000u64));
+        assert_eq!(decoded.min_out, U256::from(3_000u64));
+    }
+
+    #[test]
+    fn decodes_uniswap_v2_fee_on_transfer_variant() {
+        let router = WETH_MAINNET;
+        let token = Address::from([2u8; 20]);
+        let call = UniV2Router::swapExactTokensForETHSupportingFeeOnTransferTokensCall {
+            amountIn: U256::from(9_000u64),
+            amountOutMin: U256::from(2_000u64),
+            path: vec![token, WETH_MAINNET],
+            to: Address::from([3u8; 20]),
+            deadline: U256::from(100u64),
+        };
+        let data = call.abi_encode();
+        let decoded = decode_swap_input(router, &data, U256::ZERO).expect("decode v2 fot");
+        assert_eq!(decoded.router_kind, RouterKind::V2Like);
+        assert_eq!(decoded.amount_in, U256::from(9_000u64));
+        assert_eq!(decoded.min_out, U256::from(2_000u64));
+    }
+
+    #[test]
+    fn decodes_uniswap_v3_exact_output_single() {
+        use alloy::primitives::{U160, aliases::U24};
+        let token_out = Address::from([2u8; 20]);
+        let params = UniV3Router::ExactOutputSingleParams {
+            tokenIn: WETH_MAINNET,
+            tokenOut: token_out,
+            fee: U24::from(500u32),
+            recipient: Address::from([3u8; 20]),
+            deadline: U256::from(100u64),
+            amountOut: U256::from(8_000u64),
+            amountInMaximum: U256::from(10_000u64),
+            sqrtPriceLimitX96: U160::ZERO,
+        };
+        let call = UniV3Router::exactOutputSingleCall { params };
+        let data = call.abi_encode();
+        let decoded = decode_swap_input(WETH_MAINNET, &data, U256::ZERO).expect("decode v3 out");
+        assert_eq!(decoded.router_kind, RouterKind::V3Like);
+        assert_eq!(decoded.path, vec![WETH_MAINNET, token_out]);
+        assert_eq!(decoded.v3_fees, vec![500u32]);
+        assert_eq!(decoded.amount_in, U256::from(10_000u64));
+        assert_eq!(decoded.min_out, U256::from(8_000u64));
+    }
+
+    #[test]
+    fn decodes_uniswap_v3_exact_output_reverses_path_to_canonical() {
+        let token_mid = Address::from([7u8; 20]);
+        let token_out = Address::from([9u8; 20]);
+        // exactOutput path is encoded in reverse order: out -> ... -> in
+        let reverse_path = encode_v3_path(&[token_out, token_mid, WETH_MAINNET], &[3000, 500])
+            .expect("encode reverse v3 path");
+        let params = UniV3Router::ExactOutputParams {
+            path: reverse_path.into(),
+            recipient: Address::from([3u8; 20]),
+            deadline: U256::from(100u64),
+            amountOut: U256::from(5_000u64),
+            amountInMaximum: U256::from(9_000u64),
+        };
+        let call = UniV3Router::exactOutputCall { params };
+        let data = call.abi_encode();
+        let decoded =
+            decode_swap_input(WETH_MAINNET, &data, U256::ZERO).expect("decode v3 exact out");
+        assert_eq!(decoded.router_kind, RouterKind::V3Like);
+        assert_eq!(decoded.path, vec![WETH_MAINNET, token_mid, token_out]);
+        assert_eq!(decoded.v3_fees, vec![500u32, 3000u32]);
+        assert_eq!(decoded.amount_in, U256::from(9_000u64));
+        assert_eq!(decoded.min_out, U256::from(5_000u64));
+        assert_eq!(
+            decoded.v3_path,
+            encode_v3_path(&[WETH_MAINNET, token_mid, token_out], &[500, 3000])
+        );
     }
 
     #[test]
@@ -1389,6 +1552,141 @@ mod tests {
             U256::from(3_000u64),
             U256::from(1_000_000u64)
         ));
+    }
+
+    #[tokio::test]
+    async fn skip_reason_maps_to_expected_counter() {
+        let exec = dummy_executor_for_tests().await;
+        exec.log_skip(SkipReason::UnsupportedRouter, "unsupported");
+        assert_eq!(
+            exec.stats
+                .skip_unsupported_router
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        exec.log_skip(SkipReason::DecodeFailed, "decode");
+        assert_eq!(
+            exec.stats
+                .skip_decode_failed
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[test]
+    fn receipt_confirmation_depth_window() {
+        assert!(!StrategyExecutor::receipt_is_confirmed(100, 100, 4));
+        assert!(!StrategyExecutor::receipt_is_confirmed(102, 100, 4));
+        assert!(StrategyExecutor::receipt_is_confirmed(103, 100, 4));
+    }
+
+    #[tokio::test]
+    async fn receipt_timeout_returns_unknown_status() {
+        let mut exec = dummy_executor_for_tests().await;
+        exec.receipt_poll_ms = 100;
+        exec.receipt_timeout_ms = 100;
+        let status = exec.await_receipt(&B256::ZERO).await.expect("receipt status");
+        assert_eq!(status, ReceiptStatus::UnknownTimeout);
+    }
+
+    #[tokio::test]
+    async fn zero_gas_cap_is_unbounded() {
+        let mut exec = dummy_executor_for_tests().await;
+        exec.max_gas_price_gwei = 0;
+        assert_eq!(exec.hard_gas_cap_wei(), U256::MAX);
+    }
+
+    #[tokio::test]
+    async fn dynamic_gas_cap_never_drops_below_base_fee_floor() {
+        let exec = dummy_executor_for_tests().await;
+        let fees = GasFees {
+            max_fee_per_gas: 130,
+            max_priority_fee_per_gas: 25,
+            next_base_fee_per_gas: 120,
+            base_fee_per_gas: 110,
+            p50_priority_fee_per_gas: Some(20),
+            p90_priority_fee_per_gas: Some(40),
+            gas_used_ratio: Some(0.6),
+            suggested_max_fee_per_gas: Some(150),
+        };
+        let cap = exec.dynamic_gas_cap(U256::from(1u64), &fees, U256::MAX);
+        assert_eq!(cap.floor_wei, 120);
+        assert_eq!(cap.cap_wei, U256::from(120u64));
+    }
+
+    #[tokio::test]
+    async fn enforce_dynamic_gas_cap_clamps_tip_and_fee() {
+        let _exec = dummy_executor_for_tests().await;
+        let mut fees = GasFees {
+            max_fee_per_gas: 180,
+            max_priority_fee_per_gas: 60,
+            next_base_fee_per_gas: 120,
+            base_fee_per_gas: 110,
+            p50_priority_fee_per_gas: Some(20),
+            p90_priority_fee_per_gas: Some(40),
+            gas_used_ratio: Some(0.6),
+            suggested_max_fee_per_gas: Some(150),
+        };
+        let impossible = StrategyExecutor::enforce_dynamic_gas_cap(&mut fees, U256::from(145u64));
+        assert!(!impossible);
+        assert_eq!(fees.max_fee_per_gas, 145);
+        assert_eq!(fees.max_priority_fee_per_gas, 25);
+    }
+
+    #[tokio::test]
+    async fn enforce_dynamic_gas_cap_flags_impossible_cap() {
+        let _exec = dummy_executor_for_tests().await;
+        let mut fees = GasFees {
+            max_fee_per_gas: 180,
+            max_priority_fee_per_gas: 60,
+            next_base_fee_per_gas: 120,
+            base_fee_per_gas: 110,
+            p50_priority_fee_per_gas: Some(20),
+            p90_priority_fee_per_gas: Some(40),
+            gas_used_ratio: Some(0.6),
+            suggested_max_fee_per_gas: Some(150),
+        };
+        let impossible = StrategyExecutor::enforce_dynamic_gas_cap(&mut fees, U256::from(100u64));
+        assert!(impossible);
+        assert_eq!(fees.max_fee_per_gas, 180);
+        assert_eq!(fees.max_priority_fee_per_gas, 60);
+    }
+
+    #[tokio::test]
+    async fn boost_fees_respects_suggested_cap_with_tip_outlier() {
+        let exec = dummy_executor_for_tests().await;
+        let mut fees = GasFees {
+            max_fee_per_gas: 200_000_000,
+            max_priority_fee_per_gas: 100_000_000,
+            next_base_fee_per_gas: 120_000_000,
+            base_fee_per_gas: 110_000_000,
+            p50_priority_fee_per_gas: Some(400_000_000),
+            p90_priority_fee_per_gas: Some(20_000_000_000),
+            gas_used_ratio: Some(0.5),
+            suggested_max_fee_per_gas: Some(160_000_000),
+        };
+        exec.boost_fees(&mut fees, None, None);
+        assert!(fees.max_fee_per_gas <= 160_000_000);
+        assert!(fees.max_priority_fee_per_gas <= 40_000_000);
+        assert!(fees.max_fee_per_gas >= 120_000_000);
+    }
+
+    #[tokio::test]
+    async fn boost_fees_never_drops_below_base_when_suggested_cap_is_tiny() {
+        let exec = dummy_executor_for_tests().await;
+        let mut fees = GasFees {
+            max_fee_per_gas: 22_000_000_000,
+            max_priority_fee_per_gas: 2_000_000_000,
+            next_base_fee_per_gas: 19_800_000_000,
+            base_fee_per_gas: 19_500_000_000,
+            p50_priority_fee_per_gas: Some(2_000_000_000),
+            p90_priority_fee_per_gas: Some(4_000_000_000),
+            gas_used_ratio: Some(0.7),
+            suggested_max_fee_per_gas: Some(155_000_000),
+        };
+        exec.boost_fees(&mut fees, None, None);
+        assert_eq!(fees.max_fee_per_gas, 19_800_000_000);
+        assert_eq!(fees.max_priority_fee_per_gas, 0);
     }
 
     pub(crate) async fn dummy_executor_for_tests() -> StrategyExecutor {

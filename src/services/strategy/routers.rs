@@ -8,8 +8,14 @@ sol! {
     #[sol(rpc)]
     contract UniV2Router {
         function swapExactETHForTokens(uint256 amountOutMin, address[] calldata path, address to, uint256 deadline) payable returns (uint256[] memory amounts);
+        function swapETHForExactTokens(uint256 amountOut, address[] calldata path, address to, uint256 deadline) payable returns (uint256[] memory amounts);
         function swapExactTokensForETH(uint256 amountIn, uint256 amountOutMin, address[] calldata path, address to, uint256 deadline) returns (uint256[] memory amounts);
+        function swapTokensForExactETH(uint256 amountOut, uint256 amountInMax, address[] calldata path, address to, uint256 deadline) returns (uint256[] memory amounts);
         function swapExactTokensForTokens(uint256 amountIn, uint256 amountOutMin, address[] calldata path, address to, uint256 deadline) returns (uint256[] memory amounts);
+        function swapTokensForExactTokens(uint256 amountOut, uint256 amountInMax, address[] calldata path, address to, uint256 deadline) returns (uint256[] memory amounts);
+        function swapExactETHForTokensSupportingFeeOnTransferTokens(uint256 amountOutMin, address[] calldata path, address to, uint256 deadline) payable;
+        function swapExactTokensForETHSupportingFeeOnTransferTokens(uint256 amountIn, uint256 amountOutMin, address[] calldata path, address to, uint256 deadline);
+        function swapExactTokensForTokensSupportingFeeOnTransferTokens(uint256 amountIn, uint256 amountOutMin, address[] calldata path, address to, uint256 deadline);
         function getAmountsOut(uint256 amountIn, address[] calldata path) external view returns (uint256[] memory amounts);
     }
 
@@ -33,8 +39,27 @@ sol! {
             uint256 amountIn;
             uint256 amountOutMinimum;
         }
+        struct ExactOutputSingleParams {
+            address tokenIn;
+            address tokenOut;
+            uint24 fee;
+            address recipient;
+            uint256 deadline;
+            uint256 amountOut;
+            uint256 amountInMaximum;
+            uint160 sqrtPriceLimitX96;
+        }
+        struct ExactOutputParams {
+            bytes path;
+            address recipient;
+            uint256 deadline;
+            uint256 amountOut;
+            uint256 amountInMaximum;
+        }
         function exactInputSingle(ExactInputSingleParams calldata params) external payable returns (uint256 amountOut);
         function exactInput(ExactInputParams calldata params) external payable returns (uint256 amountOut);
+        function exactOutputSingle(ExactOutputSingleParams calldata params) external payable returns (uint256 amountIn);
+        function exactOutput(ExactOutputParams calldata params) external payable returns (uint256 amountIn);
     }
 
     #[derive(Debug, PartialEq, Eq)]

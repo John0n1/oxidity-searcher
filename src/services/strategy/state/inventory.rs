@@ -62,11 +62,7 @@ impl StrategyExecutor {
         let mut gas_fees: crate::network::gas::GasFees =
             self.gas_oracle.estimate_eip1559_fees().await?;
         self.boost_fees(&mut gas_fees, None, None);
-        let gas_cap_wei = if self.max_gas_price_gwei == 0 {
-            U256::MAX
-        } else {
-            U256::from(self.max_gas_price_gwei) * U256::from(1_000_000_000u64)
-        };
+        let gas_cap_wei = self.hard_gas_cap_wei();
         if U256::from(gas_fees.max_fee_per_gas) > gas_cap_wei {
             return Ok(());
         }

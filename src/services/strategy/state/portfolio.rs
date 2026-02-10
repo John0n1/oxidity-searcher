@@ -116,24 +116,48 @@ impl PortfolioManager {
             .unwrap_or(U256::ZERO)
     }
 
-    /// Record a completed trade.
-    /// Takes raw Wei (U256) for revenue and cost to avoid float precision loss.
-    pub fn record_profit(&self, chain_id: u64, revenue_wei: U256, gas_cost_wei: U256) {
-        let rev_i256 = I256::from_raw(revenue_wei);
-        let cost_i256 = I256::from_raw(gas_cost_wei);
-
-        // Net = Revenue - Cost (Can be negative)
-        let net = rev_i256.saturating_sub(cost_i256);
+    /// Record a completed trade with explicit cost components.
+    pub fn record_trade_components(
+        &self,
+        chain_id: u64,
+        gross_wei: U256,
+        gas_wei: U256,
+        bribe_wei: U256,
+        flashloan_premium_wei: U256,
+        net_wei: U256,
+    ) {
+        let effective_cost_wei = gas_wei
+            .saturating_add(bribe_wei)
+            .saturating_add(flashloan_premium_wei);
+        let computed_net_wei = gross_wei.saturating_sub(effective_cost_wei);
+        let applied_net_wei = if computed_net_wei == net_wei {
+            net_wei
+        } else {
+            computed_net_wei
+        };
+        let net_i256 = I256::from_raw(applied_net_wei);
 
         self.net_pnl_wei
             .entry(chain_id)
-            .and_modify(|v| *v = v.saturating_add(net))
-            .or_insert(net);
+            .and_modify(|v| *v = v.saturating_add(net_i256))
+            .or_insert(net_i256);
 
         self.total_gas_spent_wei
             .entry(chain_id)
-            .and_modify(|v| *v = v.saturating_add(gas_cost_wei))
-            .or_insert(gas_cost_wei);
+            .and_modify(|v| *v = v.saturating_add(gas_wei))
+            .or_insert(gas_wei);
+    }
+
+    /// Backward-compatible convenience wrapper: net = revenue - gas.
+    pub fn record_profit(&self, chain_id: u64, revenue_wei: U256, gas_cost_wei: U256) {
+        self.record_trade_components(
+            chain_id,
+            revenue_wei,
+            gas_cost_wei,
+            U256::ZERO,
+            U256::ZERO,
+            revenue_wei.saturating_sub(gas_cost_wei),
+        );
     }
 
     pub fn record_token_profit(&self, chain_id: u64, token: Address, delta_wei: I256) {
@@ -211,5 +235,25 @@ mod tests {
         // Float conversion check
         let float_pnl = pm.net_profit_eth(1);
         assert!((float_pnl - 1.1).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn record_trade_components_uses_effective_cost_formula() {
+        let dummy_provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
+        let pm = PortfolioManager::new(dummy_provider, Address::ZERO);
+
+        let gross = U256::from(1_000_000u64);
+        let gas = U256::from(100_000u64);
+        let bribe = U256::from(50_000u64);
+        let premium = U256::from(25_000u64);
+        let net = U256::from(825_000u64); // 1_000_000 - 100_000 - 50_000 - 25_000
+
+        pm.record_trade_components(1, gross, gas, bribe, premium, net);
+
+        assert_eq!(pm.get_net_profit_i256(1), I256::from_raw(net));
+        assert_eq!(
+            pm.total_gas_spent_wei.get(&1).map(|v| *v).unwrap_or(U256::ZERO),
+            gas
+        );
     }
 }

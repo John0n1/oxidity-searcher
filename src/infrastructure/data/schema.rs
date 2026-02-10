@@ -33,5 +33,8 @@ pub struct ProfitRecord {
     pub profit_wei: String,
     pub gas_cost_wei: String,
     pub net_profit_wei: String,
+    pub bribe_wei: String,
+    pub flashloan_premium_wei: String,
+    pub effective_cost_wei: String,
     pub timestamp: NaiveDateTime,
 }

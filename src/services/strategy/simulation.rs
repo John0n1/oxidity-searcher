@@ -797,4 +797,15 @@ mod tests {
         let msg = decode_flashloan_revert(&[]);
         assert!(msg.contains("Reverted with no data"));
     }
+
+    #[test]
+    fn rpc_unavailable_detection_matches_nethermind_patterns() {
+        assert!(rpc_method_unavailable(
+            "RPC error -32601: Method eth_simulateV1 not found"
+        ));
+        assert!(rpc_method_unavailable(
+            "RPC error -32600: Namespace debug is disabled"
+        ));
+        assert!(!rpc_method_unavailable("execution reverted: custom error"));
+    }
 }

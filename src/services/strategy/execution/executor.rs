@@ -559,7 +559,13 @@ impl BundleSender {
         for entry in parsed {
             canonical_by_lower.insert(entry.name.to_lowercase(), entry.name);
         }
+        Self::normalize_mevshare_builders_with_registry(requested, &canonical_by_lower)
+    }
 
+    fn normalize_mevshare_builders_with_registry(
+        requested: Vec<String>,
+        canonical_by_lower: &HashMap<String, String>,
+    ) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let mut seen = HashSet::new();
         for requested_name in requested {
@@ -582,7 +588,8 @@ impl BundleSender {
                     "Normalized MEV-Share builder to canonical registration name"
                 );
             }
-            if seen.insert(canonical.clone()) {
+            let dedupe_key = canonical.to_lowercase();
+            if seen.insert(dedupe_key) {
                 out.push(canonical);
             }
         }
@@ -690,5 +697,28 @@ mod tests {
             .send_bundle(&boundary, 1)
             .await
             .expect("bundle at byte limit should be accepted");
+    }
+
+    #[test]
+    fn normalize_builders_uses_registry_names_and_dedupes() {
+        let requested = vec![
+            "FlashBots".to_string(),
+            "titan".to_string(),
+            "custom".to_string(),
+            "CUSTOM".to_string(),
+        ];
+        let mut registry = HashMap::new();
+        registry.insert("flashbots".to_string(), "flashbots".to_string());
+        registry.insert("titan".to_string(), "Titan".to_string());
+
+        let out = BundleSender::normalize_mevshare_builders_with_registry(requested, &registry);
+        assert_eq!(
+            out,
+            vec![
+                "flashbots".to_string(),
+                "Titan".to_string(),
+                "custom".to_string()
+            ]
+        );
     }
 }

@@ -187,7 +187,7 @@ impl Engine {
             Ok(module_map) => {
                 let mut names: Vec<String> = module_map.keys().cloned().collect();
                 names.sort();
-                tracing::info!(
+                tracing::debug!(
                     target: "rpc",
                     transport = label,
                     modules = %names.join(","),

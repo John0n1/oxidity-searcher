@@ -94,24 +94,25 @@ impl StrategyExecutor {
             .processed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        if processed % 50 == 0 {
+        if processed % 500 == 0 {
             tracing::info!(
-                target: "strategy_summary",
-                processed,
-                submitted = self.stats.submitted.load(std::sync::atomic::Ordering::Relaxed),
-                skipped = self.stats.skipped.load(std::sync::atomic::Ordering::Relaxed),
-                failed = self.stats.failed.load(std::sync::atomic::Ordering::Relaxed),
-                skip_unknown_router = self.stats.skip_unknown_router.load(std::sync::atomic::Ordering::Relaxed),
-                skip_decode = self.stats.skip_decode_failed.load(std::sync::atomic::Ordering::Relaxed),
-                skip_missing_wrapped = self.stats.skip_missing_wrapped.load(std::sync::atomic::Ordering::Relaxed),
-                skip_non_wrapped_balance = self.stats.skip_non_wrapped_balance.load(std::sync::atomic::Ordering::Relaxed),
-                skip_gas_cap = self.stats.skip_gas_cap.load(std::sync::atomic::Ordering::Relaxed),
-                skip_sim_failed = self.stats.skip_sim_failed.load(std::sync::atomic::Ordering::Relaxed),
-                skip_profit_guard = self.stats.skip_profit_guard.load(std::sync::atomic::Ordering::Relaxed),
-                skip_unsupported_router = self.stats.skip_unsupported_router.load(std::sync::atomic::Ordering::Relaxed),
-                skip_token_call = self.stats.skip_token_call.load(std::sync::atomic::Ordering::Relaxed),
-                skip_insufficient_balance = self.stats.skip_insufficient_balance.load(std::sync::atomic::Ordering::Relaxed),
-                "Strategy loop summary"
+            target: "strategy",
+            processed,
+            "Monitoring Mainnet..."
+            );
+        }
+
+        if processed % 5000 == 0 {
+            tracing::info!(
+            target: "strategy_summary",
+            processed,
+            submitted = self.stats.submitted.load(std::sync::atomic::Ordering::Relaxed),
+            skipped = self.stats.skipped.load(std::sync::atomic::Ordering::Relaxed),
+            failed = self.stats.failed.load(std::sync::atomic::Ordering::Relaxed),
+            skip_gas_cap = self.stats.skip_gas_cap.load(std::sync::atomic::Ordering::Relaxed),
+            skip_profit_guard = self.stats.skip_profit_guard.load(std::sync::atomic::Ordering::Relaxed),
+            skip_insufficient_balance = self.stats.skip_insufficient_balance.load(std::sync::atomic::Ordering::Relaxed),
+            "Strategy loop summary"
             );
         }
 
@@ -749,11 +750,7 @@ impl StrategyExecutor {
     ) -> Result<Option<BundleParts>, AppError> {
         let mut gas_fees: GasFees = self.gas_oracle.estimate_eip1559_fees().await?;
         self.boost_fees(&mut gas_fees, fee_hints.0, fee_hints.1);
-        let hard_cap = if self.max_gas_price_gwei == 0 {
-            U256::MAX
-        } else {
-            U256::from(self.max_gas_price_gwei) * U256::from(1_000_000_000u64)
-        };
+        let hard_cap = self.hard_gas_cap_wei();
 
         let real_balance = self.portfolio.update_eth_balance(self.chain_id).await?;
         let (wallet_chain_balance, _) = if self.dry_run {
@@ -797,35 +794,38 @@ impl StrategyExecutor {
             }
         }
 
-        let base_plus_tip = gas_fees
-            .next_base_fee_per_gas
-            .saturating_add(gas_fees.max_priority_fee_per_gas);
-        let fallback_dynamic = {
-            let scaled =
-                base_plus_tip.saturating_mul(self.gas_cap_multiplier_bps as u128) / 10_000u128;
-            scaled
-        };
-        let base_dynamic = gas_fees
-            .suggested_max_fee_per_gas
-            .unwrap_or(fallback_dynamic);
-        let balance_factor_bps = self.balance_cap_multiplier_bps(wallet_chain_balance);
-        let adjusted_dynamic = base_dynamic.saturating_mul(balance_factor_bps as u128) / 10_000u128;
-        let dynamic_cap = U256::from(adjusted_dynamic).min(hard_cap);
-        if U256::from(gas_fees.max_fee_per_gas) > dynamic_cap {
+        let dynamic_cap = self.dynamic_gas_cap(wallet_chain_balance, &gas_fees, hard_cap);
+        let max_fee_before_cap = gas_fees.max_fee_per_gas;
+        let max_tip_before_cap = gas_fees.max_priority_fee_per_gas;
+        if StrategyExecutor::enforce_dynamic_gas_cap(&mut gas_fees, dynamic_cap.cap_wei) {
             self.log_skip(
                 SkipReason::GasPriceCap,
                 &format!(
-                    "max_fee_per_gas={} cap_wei={} base_plus_tip={} base_dynamic={} balance_factor_bps={} hard_cap={} wallet_wei={}",
-                    gas_fees.max_fee_per_gas,
-                    dynamic_cap,
-                    base_plus_tip,
-                    base_dynamic,
-                    balance_factor_bps,
+                    "max_fee_per_gas={} cap_wei={} base_plus_tip={} base_dynamic={} adjusted_dynamic={} balance_factor_bps={} floor_wei={} hard_cap={} wallet_wei={}",
+                    max_fee_before_cap,
+                    dynamic_cap.cap_wei,
+                    dynamic_cap.base_plus_tip_wei,
+                    dynamic_cap.base_dynamic_wei,
+                    dynamic_cap.adjusted_dynamic_wei,
+                    dynamic_cap.balance_factor_bps,
+                    dynamic_cap.floor_wei,
                     hard_cap,
                     wallet_chain_balance
                 ),
             );
             return Ok(None);
+        }
+        if gas_fees.max_fee_per_gas != max_fee_before_cap {
+            tracing::debug!(
+                target: "strategy",
+                max_fee_before = max_fee_before_cap,
+                max_fee_after = gas_fees.max_fee_per_gas,
+                max_tip_before = max_tip_before_cap,
+                max_tip_after = gas_fees.max_priority_fee_per_gas,
+                cap_wei = %dynamic_cap.cap_wei,
+                floor_wei = dynamic_cap.floor_wei,
+                "Clamped gas fees to dynamic cap"
+            );
         }
 
         let has_wrapped = observed_swap.path.contains(&self.wrapped_native);

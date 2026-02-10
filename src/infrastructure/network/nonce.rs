@@ -75,7 +75,7 @@ impl NonceManager {
         .await
         .map_err(|e| AppError::Connection(format!("Failed to resync nonce: {}", e)))?;
 
-        tracing::info!("Nonce resynced to {}", on_chain_nonce);
+        tracing::debug!("Nonce resynced to {}", on_chain_nonce);
         *self.cache.lock().unwrap() = Some((block, on_chain_nonce));
         Ok(())
     }

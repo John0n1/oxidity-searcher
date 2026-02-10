@@ -103,11 +103,10 @@ impl StrategyExecutor {
         let tip_floor = tip_p90.max(tip_p50);
         let boosted_tip = tip_floor.saturating_mul(boost_bps as u128) / 10_000u128;
 
+        let base_anchor = fees.next_base_fee_per_gas.max(fees.base_fee_per_gas);
+
         // Keep max_fee aligned to next_base + boosted tip; allow victim hints to pull higher.
-        let min_fee = fees
-            .next_base_fee_per_gas
-            .max(fees.base_fee_per_gas)
-            .saturating_add(boosted_tip);
+        let min_fee = base_anchor.saturating_add(boosted_tip);
         let mut max_fee = fees.max_fee_per_gas.max(min_fee);
         let mut max_tip = fees.max_priority_fee_per_gas.max(boosted_tip);
 
@@ -120,27 +119,26 @@ impl StrategyExecutor {
             max_tip = max_tip.max(tip_target);
         }
 
-        // Respect dynamic cap if provided by GasOracle to avoid runaway bids.
-        if let Some(cap) = fees.suggested_max_fee_per_gas {
-            if max_fee > cap {
-                max_fee = cap;
-            }
+        // Suggested cap may be stale/low on some providers; never allow it to dip below base fee.
+        let effective_cap = fees
+            .suggested_max_fee_per_gas
+            .map(|cap| cap.max(base_anchor));
+        if let Some(cap) = effective_cap {
+            max_fee = max_fee.min(cap);
+        }
+
+        // Keep tip bounded by available headroom under max_fee.
+        let max_tip_under_fee = max_fee.saturating_sub(base_anchor);
+        max_tip = max_tip.min(max_tip_under_fee);
+
+        // Preserve invariant: max_fee >= base + tip while still respecting cap.
+        max_fee = base_anchor.saturating_add(max_tip);
+        if let Some(cap) = effective_cap {
+            max_fee = max_fee.min(cap);
         }
 
         fees.max_priority_fee_per_gas = max_tip;
-        fees.max_fee_per_gas = max_fee.max(
-            fees.base_fee_per_gas
-                .saturating_add(fees.max_priority_fee_per_gas),
-        );
-
-        if let Some(v_fee) = victim_max_fee {
-            let fee_target = v_fee.saturating_mul(VICTIM_FEE_BUMP_BPS as u128) / 10_000u128;
-            fees.max_fee_per_gas = fees.max_fee_per_gas.max(fee_target);
-        }
-        if let Some(v_tip) = victim_tip {
-            let tip_target = v_tip.saturating_mul(VICTIM_FEE_BUMP_BPS as u128) / 10_000u128;
-            fees.max_priority_fee_per_gas = fees.max_priority_fee_per_gas.max(tip_target);
-        }
+        fees.max_fee_per_gas = max_fee;
     }
 
     pub(crate) fn gas_ratio_ok(

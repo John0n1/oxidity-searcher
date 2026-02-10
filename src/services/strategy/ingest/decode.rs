@@ -105,6 +105,19 @@ pub fn decode_swap_input(router: Address, input: &[u8], eth_value: U256) -> Opti
                 router_kind: RouterKind::V2Like,
             })
         }
+        UniV2Router::swapETHForExactTokensCall::SELECTOR => {
+            let decoded = UniV2Router::swapETHForExactTokensCall::abi_decode(input).ok()?;
+            Some(ObservedSwap {
+                router,
+                path: decoded.path,
+                v3_fees: Vec::new(),
+                v3_path: None,
+                amount_in: eth_value,
+                min_out: decoded.amountOut,
+                recipient: decoded.to,
+                router_kind: RouterKind::V2Like,
+            })
+        }
         UniV2Router::swapExactTokensForETHCall::SELECTOR => {
             let decoded = UniV2Router::swapExactTokensForETHCall::abi_decode(input).ok()?;
             Some(ObservedSwap {
@@ -118,8 +131,85 @@ pub fn decode_swap_input(router: Address, input: &[u8], eth_value: U256) -> Opti
                 router_kind: RouterKind::V2Like,
             })
         }
+        UniV2Router::swapTokensForExactETHCall::SELECTOR => {
+            let decoded = UniV2Router::swapTokensForExactETHCall::abi_decode(input).ok()?;
+            Some(ObservedSwap {
+                router,
+                path: decoded.path,
+                v3_fees: Vec::new(),
+                v3_path: None,
+                amount_in: decoded.amountInMax,
+                min_out: decoded.amountOut,
+                recipient: decoded.to,
+                router_kind: RouterKind::V2Like,
+            })
+        }
         UniV2Router::swapExactTokensForTokensCall::SELECTOR => {
             let decoded = UniV2Router::swapExactTokensForTokensCall::abi_decode(input).ok()?;
+            Some(ObservedSwap {
+                router,
+                path: decoded.path,
+                v3_fees: Vec::new(),
+                v3_path: None,
+                amount_in: decoded.amountIn,
+                min_out: decoded.amountOutMin,
+                recipient: decoded.to,
+                router_kind: RouterKind::V2Like,
+            })
+        }
+        UniV2Router::swapTokensForExactTokensCall::SELECTOR => {
+            let decoded = UniV2Router::swapTokensForExactTokensCall::abi_decode(input).ok()?;
+            Some(ObservedSwap {
+                router,
+                path: decoded.path,
+                v3_fees: Vec::new(),
+                v3_path: None,
+                amount_in: decoded.amountInMax,
+                min_out: decoded.amountOut,
+                recipient: decoded.to,
+                router_kind: RouterKind::V2Like,
+            })
+        }
+        UniV2Router::swapExactETHForTokensSupportingFeeOnTransferTokensCall::SELECTOR => {
+            let decoded =
+                UniV2Router::swapExactETHForTokensSupportingFeeOnTransferTokensCall::abi_decode(
+                    input,
+                )
+                .ok()?;
+            Some(ObservedSwap {
+                router,
+                path: decoded.path,
+                v3_fees: Vec::new(),
+                v3_path: None,
+                amount_in: eth_value,
+                min_out: decoded.amountOutMin,
+                recipient: decoded.to,
+                router_kind: RouterKind::V2Like,
+            })
+        }
+        UniV2Router::swapExactTokensForETHSupportingFeeOnTransferTokensCall::SELECTOR => {
+            let decoded =
+                UniV2Router::swapExactTokensForETHSupportingFeeOnTransferTokensCall::abi_decode(
+                    input,
+                )
+                .ok()?;
+            Some(ObservedSwap {
+                router,
+                path: decoded.path,
+                v3_fees: Vec::new(),
+                v3_path: None,
+                amount_in: decoded.amountIn,
+                min_out: decoded.amountOutMin,
+                recipient: decoded.to,
+                router_kind: RouterKind::V2Like,
+            })
+        }
+        UniV2Router::swapExactTokensForTokensSupportingFeeOnTransferTokensCall::SELECTOR => {
+            let decoded =
+                UniV2Router::swapExactTokensForTokensSupportingFeeOnTransferTokensCall::abi_decode(
+                    input,
+                )
+                .ok()?;
             Some(ObservedSwap {
                 router,
                 path: decoded.path,
@@ -153,6 +243,28 @@ pub fn decode_swap_input(router: Address, input: &[u8], eth_value: U256) -> Opti
                 router_kind: RouterKind::V3Like,
             })
         }
+        UniV3Router::exactOutputSingleCall::SELECTOR => {
+            let decoded = UniV3Router::exactOutputSingleCall::abi_decode(input).ok()?;
+            let params = decoded.params;
+            let path_bytes = encode_v3_path(&[params.tokenIn, params.tokenOut], &[params.fee.to()]);
+            let fee_u32: u32 = params.fee.to::<u32>();
+            if !v3_fee_sane(fee_u32) {
+                return None;
+            }
+            if !validate_v3_tokens(&[params.tokenIn, params.tokenOut]) {
+                return None;
+            }
+            Some(ObservedSwap {
+                router,
+                path: vec![params.tokenIn, params.tokenOut],
+                v3_fees: vec![fee_u32],
+                v3_path: path_bytes,
+                amount_in: params.amountInMaximum,
+                min_out: params.amountOut,
+                recipient: params.recipient,
+                router_kind: RouterKind::V3Like,
+            })
+        }
         UniV3Router::exactInputCall::SELECTOR => {
             let decoded = UniV3Router::exactInputCall::abi_decode(input).ok()?;
             let params = decoded.params;
@@ -166,6 +278,26 @@ pub fn decode_swap_input(router: Address, input: &[u8], eth_value: U256) -> Opti
                 v3_path: Some(params.path.to_vec()),
                 amount_in: params.amountIn,
                 min_out: params.amountOutMinimum,
+                recipient: params.recipient,
+                router_kind: RouterKind::V3Like,
+            })
+        }
+        UniV3Router::exactOutputCall::SELECTOR => {
+            let decoded = UniV3Router::exactOutputCall::abi_decode(input).ok()?;
+            let params = decoded.params;
+            let Some(path) = parse_v3_path(&params.path) else {
+                return None;
+            };
+            let tokens: Vec<Address> = path.tokens.iter().rev().copied().collect();
+            let fees: Vec<u32> = path.fees.iter().rev().copied().collect();
+            let canonical_path = encode_v3_path(&tokens, &fees);
+            Some(ObservedSwap {
+                router,
+                path: tokens,
+                v3_fees: fees,
+                v3_path: canonical_path,
+                amount_in: params.amountInMaximum,
+                min_out: params.amountOut,
                 recipient: params.recipient,
                 router_kind: RouterKind::V3Like,
             })
@@ -245,11 +377,13 @@ fn decode_universal_router(
                 let Some(path) = parse_v3_path(decoded.path.as_ref()) else {
                     continue;
                 };
+                let tokens: Vec<Address> = path.tokens.iter().rev().copied().collect();
+                let fees: Vec<u32> = path.fees.iter().rev().copied().collect();
                 return Some(ObservedSwap {
                     router,
-                    path: path.tokens.clone(),
-                    v3_fees: path.fees.clone(),
-                    v3_path: Some(decoded.path.to_vec()),
+                    path: tokens.clone(),
+                    v3_fees: fees.clone(),
+                    v3_path: encode_v3_path(&tokens, &fees),
                     amount_in: decoded.amountInMax,
                     min_out: decoded.amountOut,
                     recipient: decoded.recipient,
