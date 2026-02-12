@@ -83,6 +83,25 @@ sol! {
 
     #[derive(Debug, PartialEq, Eq)]
     #[sol(rpc)]
+    contract OneInchAggregationRouter {
+        struct SwapDescription {
+            address srcToken;
+            address dstToken;
+            address srcReceiver;
+            address dstReceiver;
+            uint256 amount;
+            uint256 minReturnAmount;
+            uint256 flags;
+        }
+
+        function swap(address executor, SwapDescription calldata desc, bytes calldata data)
+            external
+            payable
+            returns (uint256 returnAmount, uint256 spentAmount);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
     contract ERC20 {
         function balanceOf(address) external view returns (uint256);
         function allowance(address owner, address spender) external view returns (uint256);

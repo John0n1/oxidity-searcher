@@ -37,6 +37,12 @@ struct TokenEntry {
 }
 
 impl TokenManager {
+    fn is_native_token(info: &TokenInfo) -> bool {
+        info.tags
+            .iter()
+            .any(|tag| tag.trim().eq_ignore_ascii_case("native"))
+    }
+
     pub fn load_from_file(path: &str) -> Result<Self, AppError> {
         let raw = fs::read_to_string(path)
             .map_err(|e| AppError::Config(format!("Failed to read tokenlist {path}: {e}")))?;
@@ -100,7 +106,12 @@ impl TokenManager {
             return 0;
         };
         let mut invalid = 0usize;
-        for addr in tokens.keys() {
+        for (addr, info) in tokens {
+            // Native sentinel entries (for example 0xeeee...) intentionally have no bytecode.
+            if Self::is_native_token(info) {
+                self.invalid_tokens.remove(&(chain_id, *addr));
+                continue;
+            }
             match provider.get_code_at(*addr).await {
                 Ok(code) => {
                     if code.is_empty() {
@@ -121,6 +132,32 @@ impl TokenManager {
             }
         }
         invalid
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TokenInfo;
+    use super::TokenManager;
+
+    #[test]
+    fn native_tag_is_detected_case_insensitive() {
+        let info = TokenInfo {
+            symbol: "ETH".to_string(),
+            decimals: 18,
+            tags: vec!["Tier1".to_string(), "NATIVE".to_string()],
+        };
+        assert!(TokenManager::is_native_token(&info));
+    }
+
+    #[test]
+    fn non_native_token_is_not_flagged() {
+        let info = TokenInfo {
+            symbol: "USDC".to_string(),
+            decimals: 6,
+            tags: vec!["tier1".to_string(), "stablecoin".to_string()],
+        };
+        assert!(!TokenManager::is_native_token(&info));
     }
 }
 

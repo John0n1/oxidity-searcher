@@ -8,7 +8,7 @@ use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolType;
 use alloy_sol_types::SolCall;
 use dashmap::DashSet;
-use oxidity_builder::common::constants::WETH_MAINNET;
+use oxidity_builder::common::constants::{wrapped_native_for_chain, CHAIN_ETHEREUM};
 use oxidity_builder::core::executor::BundleSender;
 use oxidity_builder::core::portfolio::PortfolioManager;
 use oxidity_builder::core::safety::SafetyGuard;
@@ -93,7 +93,7 @@ async fn flashloan_builder_encodes_callbacks() {
         router_allowlist.clone(),
         None,
         500,
-        WETH_MAINNET,
+        wrapped_native_for_chain(CHAIN_ETHEREUM),
         false,
         Some(executor_addr),
         0,
@@ -114,7 +114,7 @@ async fn flashloan_builder_encodes_callbacks() {
 
     // Two-step callback: approve + dummy swap payload; include reset approvals.
     let callbacks = vec![
-        (WETH_MAINNET, Bytes::from(vec![0x01, 0x02]), U256::ZERO),
+        (wrapped_native_for_chain(CHAIN_ETHEREUM), Bytes::from(vec![0x01, 0x02]), U256::ZERO),
         (
             Address::from([0x22; 20]),
             Bytes::from(vec![0x03]),
@@ -142,7 +142,7 @@ async fn flashloan_builder_encodes_callbacks() {
     ) = exec
         .build_flashloan_transaction(
             executor_addr,
-            WETH_MAINNET,
+            wrapped_native_for_chain(CHAIN_ETHEREUM),
             U256::from(1_000_000u64),
             callbacks.clone(),
             250_000,
@@ -169,7 +169,7 @@ async fn flashloan_builder_encodes_callbacks() {
     assert_eq!(inner.values[1], callbacks[1].2);
     assert_eq!(inner.payloads[0].to_vec(), callbacks[0].1.to_vec());
     // Sanity: expected asset list matches request
-    assert_eq!(decoded.assets[0], WETH_MAINNET);
+    assert_eq!(decoded.assets[0], wrapped_native_for_chain(CHAIN_ETHEREUM));
 }
 
 /// Ensure Aave flashloan selector is used when provider is set to AaveV3.
@@ -237,7 +237,7 @@ async fn flashloan_builder_uses_aave_selector() {
         router_allowlist.clone(),
         None,
         500,
-        WETH_MAINNET,
+        wrapped_native_for_chain(CHAIN_ETHEREUM),
         false,
         Some(executor_addr),
         0,
@@ -256,7 +256,7 @@ async fn flashloan_builder_uses_aave_selector() {
         false,
     );
 
-    let callbacks = vec![(WETH_MAINNET, Bytes::from(vec![0x99]), U256::from(0u64))];
+    let callbacks = vec![(wrapped_native_for_chain(CHAIN_ETHEREUM), Bytes::from(vec![0x99]), U256::from(0u64))];
 
     let gas_fees = GasFees {
         max_fee_per_gas: 30_000_000_000,
@@ -272,7 +272,7 @@ async fn flashloan_builder_uses_aave_selector() {
     let built = exec
         .build_flashloan_transaction(
             executor_addr,
-            WETH_MAINNET,
+            wrapped_native_for_chain(CHAIN_ETHEREUM),
             U256::from(1_000_000u64),
             callbacks,
             250_000,

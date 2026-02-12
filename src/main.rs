@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
 
+use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use clap::Parser;
 use dashmap::DashSet;
@@ -8,8 +9,8 @@ use futures::future::try_join_all;
 use oxidity_builder::app::config::GlobalSettings;
 use oxidity_builder::app::logging::setup_logging;
 use oxidity_builder::domain::error::AppError;
-use oxidity_builder::infrastructure::data::db::Database;
 use oxidity_builder::infrastructure::data::address_registry::validate_address_map;
+use oxidity_builder::infrastructure::data::db::Database;
 use oxidity_builder::infrastructure::data::token_manager::TokenManager;
 use oxidity_builder::infrastructure::network::gas::GasOracle;
 use oxidity_builder::infrastructure::network::nonce::NonceManager;
@@ -21,7 +22,6 @@ use oxidity_builder::services::strategy::safety::SafetyGuard;
 use oxidity_builder::services::strategy::simulation::{SimulationBackend, Simulator};
 use std::str::FromStr;
 use std::sync::Arc;
-use alloy::providers::Provider;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Oxidity Builder")]
@@ -128,11 +128,10 @@ async fn main() -> Result<(), AppError> {
             TokenManager::default()
         }),
     );
-    let profit_receiver = settings.profit_receiver_or_wallet();
-
     let mut engine_tasks = Vec::new();
 
     for (idx, chain_id) in chains.iter().copied().enumerate() {
+        let rpc_url = settings.get_rpc_url(chain_id)?;
         let ipc_url = settings.get_ipc_url(chain_id);
         let (ws_provider, http_provider) = if let Some(ipc_path) = ipc_url {
             let ipc = ConnectionFactory::ipc(&ipc_path).await.map_err(|e| {
@@ -161,7 +160,6 @@ async fn main() -> Result<(), AppError> {
                     None
                 }
             };
-            let rpc_url = settings.get_rpc_url(chain_id)?;
             ConnectionFactory::preferred(None, ws_url.as_deref(), &rpc_url).await?
         };
 
@@ -204,11 +202,12 @@ async fn main() -> Result<(), AppError> {
         }
 
         let router_discovery = if settings.router_discovery_enabled {
-            Some(Arc::new(
+            let discovery = Arc::new(
                 oxidity_builder::services::strategy::router_discovery::RouterDiscovery::new(
                     chain_id,
                     router_allowlist.clone(),
                     db.clone(),
+                    Some(rpc_url.clone()),
                     settings.etherscan_api_key_value(),
                     settings.router_discovery_enabled,
                     settings.router_discovery_auto_allow,
@@ -217,7 +216,9 @@ async fn main() -> Result<(), AppError> {
                     settings.router_discovery_check_interval(),
                     settings.router_discovery_max_entries,
                 ),
-            ))
+            );
+            discovery.spawn_bootstrap_top_unknown(1000, 512);
+            Some(discovery)
         } else {
             None
         };
@@ -245,7 +246,7 @@ async fn main() -> Result<(), AppError> {
             bundle_signer.clone(),
             settings.executor_address,
             settings.executor_bribe_bps,
-            settings.executor_bribe_recipient.or(Some(profit_receiver)),
+            settings.executor_bribe_recipient,
             settings.flashloan_enabled,
             settings.flashloan_providers(),
             settings.aave_pool_for_chain(chain_id),

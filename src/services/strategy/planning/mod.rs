@@ -271,6 +271,29 @@ impl StrategyExecutor {
             // Unwrapping reduces WETH balance, so disable balance invariant.
             balance_check_token = Address::ZERO;
         }
+        if targets.is_empty() && unwrap_amount.is_none() {
+            return Ok(None);
+        }
+
+        let backrun_target = match backrun.request.to {
+            Some(TxKind::Call(addr)) => addr,
+            _ => {
+                return Err(AppError::Strategy(
+                    "Backrun wrapper requires call target".into(),
+                ));
+            }
+        };
+        let backrun_payload = backrun
+            .request
+            .input
+            .clone()
+            .into_input()
+            .unwrap_or_default();
+        let backrun_value = backrun.request.value.unwrap_or(backrun.value);
+        targets.push(backrun_target);
+        payloads.push(backrun_payload);
+        values.push(backrun_value);
+
         if let Some(amount) = unwrap_amount {
             targets.push(self.wrapped_native);
             let mut withdraw_calldata = Vec::with_capacity(4 + 32);
@@ -278,10 +301,6 @@ impl StrategyExecutor {
             withdraw_calldata.extend_from_slice(&amount.to_be_bytes::<32>());
             payloads.push(Bytes::from(withdraw_calldata));
             values.push(U256::ZERO);
-        }
-
-        if targets.is_empty() {
-            return Ok(None);
         }
 
         let approval_gas: u64 = approvals.iter().map(|a| a.request.gas.unwrap_or(0)).sum();
@@ -1281,7 +1300,12 @@ impl StrategyExecutor {
                         })?
                     };
                     let ratio_ppm = StrategyExecutor::price_ratio_ppm(expected_out, sell_amount);
-                    if ratio_ppm < U256::from(1_000u64) {
+                    // Ratio-only checks are pathological for ultra-low unit-price tokens.
+                    // Keep a dust floor for native-out paths and a very loose ratio guard otherwise.
+                    let min_native_out_wei = U256::from(5_000_000_000_000u64); // 0.000005 ETH
+                    if (has_wrapped && expected_out < min_native_out_wei)
+                        || (!has_wrapped && ratio_ppm < U256::from(10u64))
+                    {
                         return Err(AppError::Strategy("Sell liquidity too low".into()));
                     }
                     if !self.dry_run {
@@ -1344,7 +1368,10 @@ impl StrategyExecutor {
                         .ok_or_else(|| AppError::Strategy("Reverse V3 path failed".into()))?;
                     let expected_out = self.quote_v3_path(&rev_path, tokens_in).await?;
                     let ratio_ppm = StrategyExecutor::price_ratio_ppm(expected_out, tokens_in);
-                    if ratio_ppm < U256::from(1_000u64) {
+                    let min_native_out_wei = U256::from(5_000_000_000_000u64); // 0.000005 ETH
+                    if (has_wrapped && expected_out < min_native_out_wei)
+                        || (!has_wrapped && ratio_ppm < U256::from(10u64))
+                    {
                         return Err(AppError::Strategy("Sell liquidity too low".into()));
                     }
                     if !self.dry_run {

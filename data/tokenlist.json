@@ -37,7 +37,8 @@
     "decimals": 18,
     "coingecko_id": "aave",
     "tags": [
-      "tier1"
+      "tier1",
+      "prefetch"
     ]
   },
   {
@@ -159,7 +160,8 @@
     "decimals": 18,
     "coingecko_id": "curve-dao-token",
     "tags": [
-      "tier1"
+      "tier1",
+      "prefetch"
     ]
   },
   {
@@ -184,7 +186,9 @@
     "coingecko_id": "dai",
     "tags": [
       "tier1",
-      "stablecoin"
+      "stablecoin",
+      "prefetch",
+      "core"
     ]
   },
   {
@@ -209,7 +213,8 @@
     "coingecko_id": "lido-dao",
     "tags": [
       "tier1",
-      "prefetch"
+      "prefetch",
+      "liquid_staking"
     ]
   },
   {
@@ -221,7 +226,8 @@
     "decimals": 18,
     "coingecko_id": "maker",
     "tags": [
-      "tier1"
+      "tier1",
+      "prefetch"
     ]
   },
   {
@@ -415,7 +421,8 @@
     "decimals": 18,
     "coingecko_id": "chainlink",
     "tags": [
-      "tier1"
+      "tier1",
+      "prefetch"
     ]
   },
   {
@@ -535,7 +542,8 @@
     "decimals": 18,
     "coingecko_id": "pepe",
     "tags": [
-      "tier1"
+      "tier1",
+      "prefetch"
     ]
   },
   {
@@ -645,7 +653,8 @@
     "decimals": 18,
     "coingecko_id": "shiba-inu",
     "tags": [
-      "tier1"
+      "tier1",
+      "prefetch"
     ]
   },
   {
@@ -695,7 +704,8 @@
     "decimals": 18,
     "coingecko_id": "uniswap",
     "tags": [
-      "tier1"
+      "tier1",
+      "prefetch"
     ]
   },
   {
@@ -721,7 +731,9 @@
     "coingecko_id": "usd-coin",
     "tags": [
       "tier1",
-      "stablecoin"
+      "stablecoin",
+      "prefetch",
+      "core"
     ]
   },
   {
@@ -773,7 +785,9 @@
     "coingecko_id": "tether",
     "tags": [
       "tier1",
-      "stablecoin"
+      "stablecoin",
+      "prefetch",
+      "core"
     ]
   },
   {
@@ -886,7 +900,9 @@
     "coingecko_id": "wrapped-bitcoin",
     "tags": [
       "tier1",
-      "wrapped"
+      "wrapped",
+      "prefetch",
+      "core"
     ]
   },
   {
@@ -899,7 +915,9 @@
     "coingecko_id": "weth",
     "tags": [
       "tier1",
-      "wrapped"
+      "wrapped",
+      "prefetch",
+      "core"
     ]
   },
   {
@@ -1098,7 +1116,9 @@
     "decimals": 18,
     "coingecko_id": "steth",
     "tags": [
-      "tier1"
+      "tier1",
+      "prefetch",
+      "liquid_staking"
     ]
   },
   {
@@ -1212,80 +1232,9 @@
     "coingecko_id": "wrapped-liquid-staked-ether-2-0",
     "tags": [
       "tier1",
-      "wrapped"
-    ]
-  },
-  {
-    "symbol": "LDO",
-    "name": "Lido DAO Token",
-    "addresses": {
-      "1": "0x5a98fcbea516cf06857215779fd812ca3bef1b32"
-    },
-    "decimals": 18,
-    "coingecko_id": "lido-dao",
-    "tags": [
-      "tier1",
+      "wrapped",
+      "prefetch",
       "liquid_staking"
-    ]
-  },
-  {
-    "symbol": "MKR",
-    "name": "Maker",
-    "addresses": {
-      "1": "0x9f8f72aa9304c8b593d555f12ef6589cc3a579a2"
-    },
-    "decimals": 18,
-    "coingecko_id": "maker",
-    "tags": [
-      "tier1"
-    ]
-  },
-  {
-    "symbol": "COMP",
-    "name": "Compound",
-    "addresses": {
-      "1": "0xc00e94cb662c3520282e6f5717214004a7f26888"
-    },
-    "decimals": 18,
-    "coingecko_id": "compound-governance-token",
-    "tags": [
-      "tier1"
-    ]
-  },
-  {
-    "symbol": "APE",
-    "name": "ApeCoin",
-    "addresses": {
-      "1": "0x4d224452801ACEd8B2f0aebe155379bb5d594381"
-    },
-    "decimals": 18,
-    "coingecko_id": "apecoin",
-    "tags": [
-      "tier1"
-    ]
-  },
-  {
-    "symbol": "BLUR",
-    "name": "Blur",
-    "addresses": {
-      "1": "0x5283d291dbcf85356a21ba090e6db59121208b44"
-    },
-    "decimals": 18,
-    "coingecko_id": "blur",
-    "tags": [
-      "tier1"
-    ]
-  },
-  {
-    "symbol": "LQTY",
-    "name": "Liquity",
-    "addresses": {
-      "1": "0x6dea81c8171d0ba574754ef6f8b412f2ed88c54d"
-    },
-    "decimals": 18,
-    "coingecko_id": "liquity",
-    "tags": [
-      "tier1"
     ]
   }
 ]

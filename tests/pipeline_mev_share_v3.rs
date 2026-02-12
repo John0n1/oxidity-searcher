@@ -5,7 +5,7 @@ use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolCall;
 use dashmap::DashSet;
-use oxidity_builder::common::constants::WETH_MAINNET;
+use oxidity_builder::common::constants::{wrapped_native_for_chain, CHAIN_ETHEREUM};
 use oxidity_builder::core::executor::BundleSender;
 use oxidity_builder::core::portfolio::PortfolioManager;
 use oxidity_builder::core::safety::SafetyGuard;
@@ -114,7 +114,7 @@ async fn mev_share_v3_pipeline_manual() {
         router_allowlist,
         None,
         500,
-        WETH_MAINNET,
+        wrapped_native_for_chain(CHAIN_ETHEREUM),
         false,
         None,
         0,
@@ -135,8 +135,8 @@ async fn mev_share_v3_pipeline_manual() {
 
     // Build a simple V3 exactInputSingle payload swapping WETH -> WETH (no-op) for smoke test.
     let params = UniV3Router::ExactInputSingleParams {
-        tokenIn: WETH_MAINNET,
-        tokenOut: WETH_MAINNET,
+        tokenIn: wrapped_native_for_chain(CHAIN_ETHEREUM),
+        tokenOut: wrapped_native_for_chain(CHAIN_ETHEREUM),
         fee: U24::from(500u32),
         recipient: signer.address(),
         deadline: U256::from(999_999_999u64),

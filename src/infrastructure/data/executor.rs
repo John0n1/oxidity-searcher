@@ -46,6 +46,9 @@ sol! {
         error ApprovalFailed();
         error BribeFailed();
         error BalanceInvariantBroken(address token, uint256 beforeBalance, uint256 afterBalance);
+        error OnlyPool();
+        error InvalidPool();
+        error InvalidAsset();
     }
 
     // Matches abi.decode(userData, (address[], uint256[], bytes[])) in receiveFlashLoan

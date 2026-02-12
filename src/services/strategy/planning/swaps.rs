@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
 
-use crate::common::constants::{CHAIN_ARBITRUM, CHAIN_ETHEREUM, CHAIN_OPTIMISM, CHAIN_POLYGON};
+use crate::common::constants;
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
 use crate::services::strategy::routers::{UniV2Router, UniV3Quoter, UniV3Router};
 use crate::services::strategy::strategy::{StrategyExecutor, V3_QUOTE_CACHE_TTL_MS};
 use crate::services::strategy::time_utils::current_unix;
 use alloy::eips::eip2930::AccessList;
-use alloy::primitives::{Address, B256, U256, address, keccak256};
+use alloy::primitives::{Address, B256, U256, keccak256};
 use std::time::{Duration, Instant};
 
 pub struct V2SwapBuild {
@@ -83,13 +83,11 @@ impl StrategyExecutor {
     }
 
     pub(crate) fn v3_quoter_for_chain(chain_id: u64) -> Option<Address> {
-        match chain_id {
-            CHAIN_ETHEREUM => Some(address!("b27308f9F90D607463bb33eA1BeBb41C27CE5AB6")),
-            CHAIN_OPTIMISM | CHAIN_ARBITRUM | CHAIN_POLYGON => {
-                Some(address!("61fFE014bA17989E743c5F6cB21bF9697530B21e"))
-            }
-            _ => None,
-        }
+        let routers = constants::default_routers_for_chain(chain_id);
+        routers
+            .get("uniswap_v3_quoter_v2")
+            .copied()
+            .or_else(|| routers.get("uniswap_v3_quoter").copied())
     }
 
     pub(crate) fn build_v3_swap_payload(

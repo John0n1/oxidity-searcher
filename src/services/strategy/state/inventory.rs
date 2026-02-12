@@ -4,7 +4,9 @@
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
 use crate::services::strategy::routers::{ERC20, UniV2Router};
-use crate::services::strategy::strategy::StrategyExecutor;
+use crate::services::strategy::strategy::{
+    StrategyExecutor, TOXIC_PROBE_FAILURE_THRESHOLD, TOXIC_PROBE_FAILURE_WINDOW_SECS,
+};
 use alloy::primitives::TxKind;
 use alloy::primitives::{Address, U256};
 use alloy::rpc::types::eth::TransactionInput;
@@ -12,6 +14,47 @@ use alloy::sol_types::SolCall;
 use std::time::Duration;
 
 impl StrategyExecutor {
+    pub(in crate::services::strategy) fn clear_toxic_probe_failures(&self, token: Address) {
+        self.toxic_probe_failures.remove(&token);
+    }
+
+    pub(in crate::services::strategy) fn record_toxic_probe_failure(
+        &self,
+        token: Address,
+        reason: &str,
+    ) -> bool {
+        let now = std::time::Instant::now();
+        let mut count = 1u32;
+        if let Some(mut entry) = self.toxic_probe_failures.get_mut(&token) {
+            let (ref mut prev_count, ref mut first_seen) = *entry;
+            if first_seen.elapsed().as_secs() > TOXIC_PROBE_FAILURE_WINDOW_SECS {
+                *prev_count = 1;
+                *first_seen = now;
+            } else {
+                *prev_count = prev_count.saturating_add(1);
+            }
+            count = *prev_count;
+        } else {
+            self.toxic_probe_failures.insert(token, (1, now));
+        }
+
+        if count >= TOXIC_PROBE_FAILURE_THRESHOLD {
+            self.toxic_probe_failures.remove(&token);
+            self.mark_toxic_token(token, reason);
+            true
+        } else {
+            tracing::debug!(
+                target: "strategy",
+                token = %format!("{:#x}", token),
+                %reason,
+                failures = count,
+                threshold = TOXIC_PROBE_FAILURE_THRESHOLD,
+                "Probe failure recorded below toxic threshold"
+            );
+            false
+        }
+    }
+
     pub async fn maybe_rebalance_inventory(&self) -> Result<(), AppError> {
         let mut guard = self.last_rebalance.lock().await;
         if guard.elapsed().as_secs() < 60 {
@@ -237,6 +280,7 @@ impl StrategyExecutor {
     }
 
     pub fn mark_toxic_token(&self, token: Address, reason: &str) {
+        self.clear_toxic_probe_failures(token);
         if self.toxic_tokens.insert(token) {
             tracing::warn!(
                 target: "strategy",
@@ -304,12 +348,13 @@ impl StrategyExecutor {
         }
         let outcome = &sims[1];
         if !outcome.success {
-            self.mark_toxic_token(token, "probe_revert");
+            let _ = self.record_toxic_probe_failure(token, "probe_revert");
             return Ok(false);
         }
         self.record_probe_gas(router, outcome.gas_used);
 
         if outcome.return_data.is_empty() {
+            self.clear_toxic_probe_failures(token);
             return Ok(true);
         }
 
@@ -323,7 +368,9 @@ impl StrategyExecutor {
                 let ok = actual_out.saturating_mul(U256::from(10_000u64))
                     >= expected_out.saturating_mul(tolerance_bps);
                 if !ok {
-                    self.mark_toxic_token(token, "probe_output_too_low");
+                    let _ = self.record_toxic_probe_failure(token, "probe_output_too_low");
+                } else {
+                    self.clear_toxic_probe_failures(token);
                 }
                 Ok(ok)
             }

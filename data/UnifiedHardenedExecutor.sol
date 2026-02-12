@@ -341,7 +341,14 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
             _distributeProfit(asset, surplus);
         }
 
-        _safeTransfer(asset, msg.sender, amountOwing);
+        // Aave pulls repayment from receiver via transferFrom, so we must approve the Pool.
+        uint256 currentAllowance = IERC20(asset).allowance(address(this), msg.sender);
+        if (currentAllowance != 0 && currentAllowance != amountOwing) {
+            _lowLevelApprove(asset, msg.sender, 0);
+        }
+        if (currentAllowance != amountOwing) {
+            _lowLevelApprove(asset, msg.sender, amountOwing);
+        }
 
         uint256 ethBal = address(this).balance;
         if (ethBal > 0) {

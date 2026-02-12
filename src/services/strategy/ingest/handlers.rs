@@ -15,7 +15,9 @@ use crate::services::strategy::decode::{
 use crate::services::strategy::planning::bundles::NonceLease;
 use crate::services::strategy::planning::{ApproveTx, BackrunTx, FrontRunTx};
 use crate::services::strategy::strategy::BundleTelemetry;
-use crate::services::strategy::strategy::{ReceiptStatus, SkipReason, StrategyExecutor, StrategyWork};
+use crate::services::strategy::strategy::{
+    ReceiptStatus, SkipReason, StrategyExecutor, StrategyWork,
+};
 use alloy::consensus::Transaction as ConsensusTx;
 use alloy::eips::eip2718::Encodable2718;
 use alloy::network::TransactionResponse;
@@ -109,9 +111,22 @@ impl StrategyExecutor {
             submitted = self.stats.submitted.load(std::sync::atomic::Ordering::Relaxed),
             skipped = self.stats.skipped.load(std::sync::atomic::Ordering::Relaxed),
             failed = self.stats.failed.load(std::sync::atomic::Ordering::Relaxed),
+            skip_unknown_router = self.stats.skip_unknown_router.load(std::sync::atomic::Ordering::Relaxed),
+            skip_decode = self.stats.skip_decode_failed.load(std::sync::atomic::Ordering::Relaxed),
+            skip_missing_wrapped = self.stats.skip_missing_wrapped.load(std::sync::atomic::Ordering::Relaxed),
+            skip_non_wrapped_balance = self.stats.skip_non_wrapped_balance.load(std::sync::atomic::Ordering::Relaxed),
             skip_gas_cap = self.stats.skip_gas_cap.load(std::sync::atomic::Ordering::Relaxed),
+            skip_sim_failed = self.stats.skip_sim_failed.load(std::sync::atomic::Ordering::Relaxed),
             skip_profit_guard = self.stats.skip_profit_guard.load(std::sync::atomic::Ordering::Relaxed),
+            skip_unsupported_router = self.stats.skip_unsupported_router.load(std::sync::atomic::Ordering::Relaxed),
+            skip_token_call = self.stats.skip_token_call.load(std::sync::atomic::Ordering::Relaxed),
+            skip_toxic_token = self.stats.skip_toxic_token.load(std::sync::atomic::Ordering::Relaxed),
             skip_insufficient_balance = self.stats.skip_insufficient_balance.load(std::sync::atomic::Ordering::Relaxed),
+            skip_router_revert_rate = self.stats.skip_router_revert_rate.load(std::sync::atomic::Ordering::Relaxed),
+            skip_liquidity_depth = self.stats.skip_liquidity_depth.load(std::sync::atomic::Ordering::Relaxed),
+            skip_sandwich_risk = self.stats.skip_sandwich_risk.load(std::sync::atomic::Ordering::Relaxed),
+            skip_front_run_build_failed = self.stats.skip_front_run_build_failed.load(std::sync::atomic::Ordering::Relaxed),
+            skip_backrun_build_failed = self.stats.skip_backrun_build_failed.load(std::sync::atomic::Ordering::Relaxed),
             "Strategy loop summary"
             );
         }
@@ -142,7 +157,10 @@ impl StrategyExecutor {
             }
         };
         if self.toxic_tokens.contains(&target_token) {
-            self.log_skip(SkipReason::ToxicToken, &format!("token={:#x}", target_token));
+            self.log_skip(
+                SkipReason::ToxicToken,
+                &format!("token={:#x}", target_token),
+            );
             return None;
         }
         self.inventory_tokens.insert(target_token);
@@ -250,7 +268,11 @@ impl StrategyExecutor {
             .await?
         {
             Some(p) => p,
-            None => return Ok(None),
+            None => {
+                let sim_ms = sim_start.elapsed().as_millis() as u64;
+                self.stats.record_sim_latency("mempool", sim_ms);
+                return Ok(None);
+            }
         };
         let sim_ms = sim_start.elapsed().as_millis() as u64;
         self.stats.record_sim_latency("mempool", sim_ms);
@@ -408,7 +430,8 @@ impl StrategyExecutor {
         match self.await_receipt(&receipt_target).await? {
             ReceiptStatus::ConfirmedSuccess => {}
             ReceiptStatus::ConfirmedRevert => {
-                self.emergency_exit_inventory("bundle receipt reverted").await;
+                self.emergency_exit_inventory("bundle receipt reverted")
+                    .await;
             }
             ReceiptStatus::UnknownTimeout => {
                 if self.emergency_exit_on_unknown_receipt {
@@ -548,7 +571,11 @@ impl StrategyExecutor {
             .await?
         {
             Some(p) => p,
-            None => return Ok(None),
+            None => {
+                let sim_ms = sim_start.elapsed().as_millis() as u64;
+                self.stats.record_sim_latency("mev_share", sim_ms);
+                return Ok(None);
+            }
         };
         let sim_ms = sim_start.elapsed().as_millis() as u64;
         self.stats.record_sim_latency("mev_share", sim_ms);
@@ -764,6 +791,22 @@ impl StrategyExecutor {
             (real_balance, false)
         };
 
+        // Hard floor: if wallet cannot even afford a single bundle tx at current fee settings,
+        // abort early to avoid spending cycles on paths that can never be submitted.
+        let min_bundle_gas = gas_limit_hint.clamp(180_000, 450_000);
+        let min_bundle_gas_cost =
+            U256::from(min_bundle_gas).saturating_mul(U256::from(gas_fees.max_fee_per_gas));
+        if wallet_chain_balance < min_bundle_gas_cost {
+            self.log_skip(
+                SkipReason::InsufficientBalance,
+                &format!(
+                    "wallet={} below min_bundle_gas_cost={} (gas={} max_fee={})",
+                    wallet_chain_balance, min_bundle_gas_cost, min_bundle_gas, gas_fees.max_fee_per_gas
+                ),
+            );
+            return Ok(None);
+        }
+
         if self.router_is_risky(observed_swap.router) {
             self.log_skip(SkipReason::RouterRevertRate, "router failure rate too high");
             return Ok(None);
@@ -841,7 +884,10 @@ impl StrategyExecutor {
                 .update_token_balance(self.chain_id, token_in)
                 .await?;
             if token_balance.is_zero() {
-                self.log_skip(SkipReason::NonWrappedBalance, &format!("token={token_in:#x}"));
+                self.log_skip(
+                    SkipReason::NonWrappedBalance,
+                    &format!("token={token_in:#x}"),
+                );
                 return Ok(None);
             }
             tracing::info!(
@@ -1095,16 +1141,21 @@ impl StrategyExecutor {
             .saturating_add(bribe_wei)
             .saturating_add(backrun.flashloan_premium);
         let net_profit_wei = gross_profit_wei.saturating_sub(effective_cost_wei);
+        let base_profit_floor = StrategyExecutor::dynamic_profit_floor(wallet_chain_balance);
+        let extra_costs = bribe_wei.saturating_add(backrun.flashloan_premium);
         let profit_floor = StrategyExecutor::dynamic_profit_floor_with_costs(
             wallet_chain_balance,
             gas_cost_wei,
-            bribe_wei.saturating_add(backrun.flashloan_premium),
+            extra_costs,
         );
 
         if net_profit_wei < profit_floor {
             self.log_skip(
                 SkipReason::ProfitOrGasGuard,
-                &format!("Net {} < Floor {}", net_profit_wei, profit_floor),
+                &format!(
+                    "Net {} < Floor {} (base_floor={} gas_cost={} extra_costs={})",
+                    net_profit_wei, profit_floor, base_profit_floor, gas_cost_wei, extra_costs
+                ),
             );
             return Ok(None);
         }

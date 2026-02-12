@@ -4,9 +4,9 @@
 use crate::common::error::AppError;
 use crate::data::executor::UnifiedHardenedExecutor;
 use crate::network::provider::HttpProvider;
+use alloy::primitives::{Address, TxKind, U256};
 use alloy::providers::Provider;
 use alloy::providers::ext::DebugApi;
-use alloy::primitives::{Address, TxKind, U256};
 use alloy::rpc::types::eth::simulate::{SimBlock, SimCallResult, SimulatePayload};
 use alloy::rpc::types::eth::state::StateOverride;
 use alloy::rpc::types::eth::{
@@ -85,14 +85,8 @@ impl SimulationBackendMethod {
                     return Self::DebugTraceCall;
                 }
                 "eth_call" | "ethcall" | "call" => return Self::EthCall,
-                "eth_simulate"
-                | "ethsimulate"
-                | "eth_simulatev1"
-                | "ethsimulatev1"
-                | "simulate"
-                | "revm"
-                | "revmv1"
-                | "anvil" => return Self::EthSimulate,
+                "eth_simulate" | "ethsimulate" | "eth_simulatev1" | "ethsimulatev1"
+                | "simulate" | "revm" | "revmv1" | "anvil" => return Self::EthSimulate,
                 _ => {}
             }
         }
@@ -179,7 +173,11 @@ impl Simulator {
         req.value = Some(U256::ZERO);
         let block = BlockId::Number(BlockNumberOrTag::Pending);
         let trace_options = GethDebugTracingCallOptions::default();
-        match self.provider.debug_trace_call(req, block, trace_options).await {
+        match self
+            .provider
+            .debug_trace_call(req, block, trace_options)
+            .await
+        {
             Ok(_) => true,
             Err(e) => {
                 let msg = e.to_string().to_lowercase();
@@ -630,7 +628,7 @@ fn rpc_method_unavailable(message: &str) -> bool {
 fn sim_call_result_to_outcome(call: &SimCallResult) -> SimulationOutcome {
     let success = call.error.is_none() && call.status;
     if !success {
-        tracing::warn!(
+        tracing::debug!(
             target: "simulation",
             "Simulation Revert Reason: {}",
             decode_flashloan_revert(&call.return_data)
@@ -658,7 +656,7 @@ fn sim_call_result_to_outcome(call: &SimCallResult) -> SimulationOutcome {
 fn default_frame_to_outcome(frame: DefaultFrame) -> SimulationOutcome {
     let success = !frame.failed;
     if !success {
-        tracing::warn!(
+        tracing::debug!(
             target: "simulation",
             "Simulation Revert Reason: {}",
             decode_flashloan_revert(&frame.return_value)
@@ -729,6 +727,15 @@ pub fn decode_flashloan_revert(revert_data: &[u8]) -> String {
             UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::OnlyVault(_) => {
                 "🚫 Caller is not Balancer Vault".to_string()
             }
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::OnlyPool(_) => {
+                "🚫 Caller is not configured Aave pool".to_string()
+            }
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::InvalidPool(_) => {
+                "🚫 Invalid Aave pool address".to_string()
+            }
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::InvalidAsset(_) => {
+                "🚫 Invalid flashloan asset".to_string()
+            }
             _ => "Reverted with known custom error".to_string(),
         };
     }
@@ -796,6 +803,36 @@ mod tests {
     fn decodes_empty_revert() {
         let msg = decode_flashloan_revert(&[]);
         assert!(msg.contains("Reverted with no data"));
+    }
+
+    #[test]
+    fn decodes_only_pool_error() {
+        let err = UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::OnlyPool(
+            UnifiedHardenedExecutor::OnlyPool {},
+        );
+        let data = err.abi_encode();
+        let msg = decode_flashloan_revert(&data);
+        assert!(msg.contains("configured Aave pool"));
+    }
+
+    #[test]
+    fn decodes_invalid_pool_error() {
+        let err = UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::InvalidPool(
+            UnifiedHardenedExecutor::InvalidPool {},
+        );
+        let data = err.abi_encode();
+        let msg = decode_flashloan_revert(&data);
+        assert!(msg.contains("Invalid Aave pool"));
+    }
+
+    #[test]
+    fn decodes_invalid_asset_error() {
+        let err = UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::InvalidAsset(
+            UnifiedHardenedExecutor::InvalidAsset {},
+        );
+        let data = err.abi_encode();
+        let msg = decode_flashloan_revert(&data);
+        assert!(msg.contains("Invalid flashloan asset"));
     }
 
     #[test]

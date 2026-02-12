@@ -118,6 +118,8 @@ pub(crate) const VICTIM_FEE_BUMP_BPS: u64 = 11_000;
 pub(crate) const TAX_TOLERANCE_BPS: u64 = 500;
 pub(crate) const PROBE_GAS_LIMIT: u64 = 220_000;
 pub(crate) const V3_QUOTE_CACHE_TTL_MS: u64 = 250;
+pub(crate) const TOXIC_PROBE_FAILURE_THRESHOLD: u32 = 3;
+pub(crate) const TOXIC_PROBE_FAILURE_WINDOW_SECS: u64 = 1_800;
 
 #[derive(Clone, Copy, Debug)]
 pub struct DynamicGasCap {
@@ -152,6 +154,11 @@ pub struct StrategyStats {
     pub skip_token_call: AtomicU64,
     pub skip_insufficient_balance: AtomicU64,
     pub skip_toxic_token: AtomicU64,
+    pub skip_router_revert_rate: AtomicU64,
+    pub skip_liquidity_depth: AtomicU64,
+    pub skip_sandwich_risk: AtomicU64,
+    pub skip_front_run_build_failed: AtomicU64,
+    pub skip_backrun_build_failed: AtomicU64,
     pub ingest_queue_depth: AtomicU64,
     pub ingest_queue_dropped: AtomicU64,
     pub ingest_queue_full: AtomicU64,
@@ -260,12 +267,14 @@ pub struct StrategyExecutor {
     pub(in crate::services::strategy) skip_log_every: u64,
     pub(in crate::services::strategy) wrapped_native: Address,
     pub(in crate::services::strategy) allow_non_wrapped_swaps: bool,
-    pub(in crate::services::strategy) universal_router: Option<Address>,
+    pub(in crate::services::strategy) universal_routers: HashSet<Address>,
+    pub(in crate::services::strategy) oneinch_routers: HashSet<Address>,
     pub(in crate::services::strategy) exec_router_v2: Option<Address>,
     pub(in crate::services::strategy) exec_router_v3: Option<Address>,
     pub(in crate::services::strategy) inventory_tokens: DashSet<Address>,
     pub(in crate::services::strategy) last_rebalance: Mutex<Instant>,
     pub(in crate::services::strategy) toxic_tokens: DashSet<Address>,
+    pub(in crate::services::strategy) toxic_probe_failures: DashMap<Address, (u32, Instant)>,
     pub(in crate::services::strategy) executor: Option<Address>,
     pub(in crate::services::strategy) executor_bribe_bps: u64,
     pub(in crate::services::strategy) executor_bribe_recipient: Option<Address>,
@@ -605,11 +614,33 @@ impl StrategyExecutor {
                     .fetch_add(1, Ordering::Relaxed)
                     + 1
             }
-            SkipReason::RouterRevertRate
-            | SkipReason::LiquidityDepth
-            | SkipReason::SandwichRisk
-            | SkipReason::FrontRunBuildFailed
-            | SkipReason::BackrunBuildFailed => 0,
+            SkipReason::RouterRevertRate => {
+                self.stats
+                    .skip_router_revert_rate
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1
+            }
+            SkipReason::LiquidityDepth => {
+                self.stats
+                    .skip_liquidity_depth
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1
+            }
+            SkipReason::SandwichRisk => {
+                self.stats.skip_sandwich_risk.fetch_add(1, Ordering::Relaxed) + 1
+            }
+            SkipReason::FrontRunBuildFailed => {
+                self.stats
+                    .skip_front_run_build_failed
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1
+            }
+            SkipReason::BackrunBuildFailed => {
+                self.stats
+                    .skip_backrun_build_failed
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1
+            }
         };
 
         let noisy = reason.noisy();
@@ -654,7 +685,7 @@ impl StrategyExecutor {
         &self,
         observed: &ObservedSwap,
     ) -> Address {
-        if Some(observed.router) == self.universal_router {
+        if self.universal_routers.contains(&observed.router) {
             match observed.router_kind {
                 crate::services::strategy::decode::RouterKind::V2Like => {
                     self.exec_router_v2.unwrap_or(observed.router)
@@ -663,6 +694,10 @@ impl StrategyExecutor {
                     self.exec_router_v3.unwrap_or(observed.router)
                 }
             }
+        } else if self.oneinch_routers.contains(&observed.router) {
+            // We can decode 1inch intents, but execute against a deterministic
+            // canonical router path to keep strategy behavior predictable.
+            self.exec_router_v2.unwrap_or(observed.router)
         } else {
             observed.router
         }
@@ -764,6 +799,17 @@ impl StrategyExecutor {
     ) -> Self {
         let semaphore_size = worker_limit.max(1);
         let universal_router = constants::default_uniswap_universal_router(chain_id);
+        let mut universal_routers: HashSet<Address> = constants::default_uniswap_universal_routers(
+            chain_id,
+        )
+        .into_iter()
+        .collect();
+        if let Some(primary) = universal_router {
+            universal_routers.insert(primary);
+        }
+        let oneinch_routers: HashSet<Address> = constants::default_oneinch_routers(chain_id)
+            .into_iter()
+            .collect();
         let exec_router_v2 = constants::default_uniswap_v2_router(chain_id);
         let exec_router_v3 = constants::default_uniswap_v3_router(chain_id);
         Self {
@@ -791,12 +837,14 @@ impl StrategyExecutor {
             skip_log_every: skip_log_every.max(1),
             wrapped_native,
             allow_non_wrapped_swaps,
-            universal_router,
+            universal_routers,
+            oneinch_routers,
             exec_router_v2,
             exec_router_v3,
             inventory_tokens: DashSet::new(),
             last_rebalance: Mutex::new(Instant::now()),
             toxic_tokens: DashSet::new(),
+            toxic_probe_failures: DashMap::new(),
             executor,
             executor_bribe_bps,
             executor_bribe_recipient,
@@ -1006,11 +1054,12 @@ impl StrategyExecutor {
         }
         let outcome = &sims[1];
         if !outcome.success {
-            tracing::debug!(target: "strategy", "V3 probe revert; marking toxic");
+            let _ = self.record_toxic_probe_failure(token_in, "v3_probe_revert");
             return Ok(false);
         }
         self.record_probe_gas(router, outcome.gas_used);
         if outcome.return_data.is_empty() {
+            self.clear_toxic_probe_failures(token_in);
             return Ok(true);
         }
         match UniV3Router::exactInputCall::abi_decode_returns(&outcome.return_data) {
@@ -1018,9 +1067,17 @@ impl StrategyExecutor {
                 let tolerance_bps = U256::from(10_000u64 - TAX_TOLERANCE_BPS);
                 let ok = amount_out.saturating_mul(U256::from(10_000u64))
                     >= expected_out.saturating_mul(tolerance_bps);
+                if ok {
+                    self.clear_toxic_probe_failures(token_in);
+                } else {
+                    let _ = self.record_toxic_probe_failure(token_in, "v3_probe_output_too_low");
+                }
                 Ok(ok)
             }
-            Err(_) => Ok(true),
+            Err(_) => {
+                self.clear_toxic_probe_failures(token_in);
+                Ok(true)
+            }
         }
     }
 
@@ -1124,7 +1181,6 @@ fn units_to_float(value: U256, decimals: u8) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::constants::WETH_MAINNET;
     use crate::core::executor::BundleSender;
     use crate::core::simulation::SimulationBackend;
     use crate::network::gas::GasFees;
@@ -1139,12 +1195,16 @@ mod tests {
     use std::sync::atomic::Ordering;
     use url::Url;
 
+    fn weth_mainnet() -> Address {
+        crate::common::constants::wrapped_native_for_chain(crate::common::constants::CHAIN_ETHEREUM)
+    }
+
     #[test]
     fn decodes_eth_swap() {
-        let router = WETH_MAINNET;
+        let router = weth_mainnet();
         let call = UniV2Router::swapExactETHForTokensCall {
             amountOutMin: U256::from(5u64),
-            path: vec![WETH_MAINNET, Address::from([2u8; 20])],
+            path: vec![weth_mainnet(), Address::from([2u8; 20])],
             to: Address::from([3u8; 20]),
             deadline: U256::from(100u64),
         };
@@ -1166,7 +1226,7 @@ mod tests {
     fn decodes_uniswap_v3_exact_input_single() {
         use alloy::primitives::{U160, aliases::U24};
         let params = UniV3Router::ExactInputSingleParams {
-            tokenIn: WETH_MAINNET,
+            tokenIn: weth_mainnet(),
             tokenOut: Address::from([2u8; 20]),
             fee: U24::from(500u32),
             recipient: Address::from([3u8; 20]),
@@ -1178,19 +1238,19 @@ mod tests {
         let call = UniV3Router::exactInputSingleCall { params };
         let data = call.abi_encode();
         let decoded =
-            decode_swap_input(WETH_MAINNET, &data, U256::from(0u64)).expect("decode v3 single");
+            decode_swap_input(weth_mainnet(), &data, U256::from(0u64)).expect("decode v3 single");
         assert_eq!(decoded.router_kind, RouterKind::V3Like);
         assert_eq!(decoded.path.len(), 2);
     }
 
     #[test]
     fn decodes_uniswap_v2_exact_out_variant() {
-        let router = WETH_MAINNET;
+        let router = weth_mainnet();
         let token = Address::from([2u8; 20]);
         let call = UniV2Router::swapTokensForExactETHCall {
             amountOut: U256::from(3_000u64),
             amountInMax: U256::from(10_000u64),
-            path: vec![token, WETH_MAINNET],
+            path: vec![token, weth_mainnet()],
             to: Address::from([3u8; 20]),
             deadline: U256::from(100u64),
         };
@@ -1203,12 +1263,12 @@ mod tests {
 
     #[test]
     fn decodes_uniswap_v2_fee_on_transfer_variant() {
-        let router = WETH_MAINNET;
+        let router = weth_mainnet();
         let token = Address::from([2u8; 20]);
         let call = UniV2Router::swapExactTokensForETHSupportingFeeOnTransferTokensCall {
             amountIn: U256::from(9_000u64),
             amountOutMin: U256::from(2_000u64),
-            path: vec![token, WETH_MAINNET],
+            path: vec![token, weth_mainnet()],
             to: Address::from([3u8; 20]),
             deadline: U256::from(100u64),
         };
@@ -1224,7 +1284,7 @@ mod tests {
         use alloy::primitives::{U160, aliases::U24};
         let token_out = Address::from([2u8; 20]);
         let params = UniV3Router::ExactOutputSingleParams {
-            tokenIn: WETH_MAINNET,
+            tokenIn: weth_mainnet(),
             tokenOut: token_out,
             fee: U24::from(500u32),
             recipient: Address::from([3u8; 20]),
@@ -1235,9 +1295,9 @@ mod tests {
         };
         let call = UniV3Router::exactOutputSingleCall { params };
         let data = call.abi_encode();
-        let decoded = decode_swap_input(WETH_MAINNET, &data, U256::ZERO).expect("decode v3 out");
+        let decoded = decode_swap_input(weth_mainnet(), &data, U256::ZERO).expect("decode v3 out");
         assert_eq!(decoded.router_kind, RouterKind::V3Like);
-        assert_eq!(decoded.path, vec![WETH_MAINNET, token_out]);
+        assert_eq!(decoded.path, vec![weth_mainnet(), token_out]);
         assert_eq!(decoded.v3_fees, vec![500u32]);
         assert_eq!(decoded.amount_in, U256::from(10_000u64));
         assert_eq!(decoded.min_out, U256::from(8_000u64));
@@ -1248,7 +1308,7 @@ mod tests {
         let token_mid = Address::from([7u8; 20]);
         let token_out = Address::from([9u8; 20]);
         // exactOutput path is encoded in reverse order: out -> ... -> in
-        let reverse_path = encode_v3_path(&[token_out, token_mid, WETH_MAINNET], &[3000, 500])
+        let reverse_path = encode_v3_path(&[token_out, token_mid, weth_mainnet()], &[3000, 500])
             .expect("encode reverse v3 path");
         let params = UniV3Router::ExactOutputParams {
             path: reverse_path.into(),
@@ -1260,22 +1320,22 @@ mod tests {
         let call = UniV3Router::exactOutputCall { params };
         let data = call.abi_encode();
         let decoded =
-            decode_swap_input(WETH_MAINNET, &data, U256::ZERO).expect("decode v3 exact out");
+            decode_swap_input(weth_mainnet(), &data, U256::ZERO).expect("decode v3 exact out");
         assert_eq!(decoded.router_kind, RouterKind::V3Like);
-        assert_eq!(decoded.path, vec![WETH_MAINNET, token_mid, token_out]);
+        assert_eq!(decoded.path, vec![weth_mainnet(), token_mid, token_out]);
         assert_eq!(decoded.v3_fees, vec![500u32, 3000u32]);
         assert_eq!(decoded.amount_in, U256::from(9_000u64));
         assert_eq!(decoded.min_out, U256::from(5_000u64));
         assert_eq!(
             decoded.v3_path,
-            encode_v3_path(&[WETH_MAINNET, token_mid, token_out], &[500, 3000])
+            encode_v3_path(&[weth_mainnet(), token_mid, token_out], &[500, 3000])
         );
     }
 
     #[test]
     fn parses_uniswap_v3_path() {
         let mut path: Vec<u8> = Vec::new();
-        path.extend_from_slice(WETH_MAINNET.as_slice());
+        path.extend_from_slice(weth_mainnet().as_slice());
         path.extend_from_slice(&[0u8, 1u8, 244u8]); // fee 500
         let out = Address::from([9u8; 20]);
         path.extend_from_slice(out.as_slice());
@@ -1289,23 +1349,23 @@ mod tests {
     fn target_token_prefers_terminal_on_buy_paths() {
         let token_mid = Address::from([2u8; 20]);
         let token_final = Address::from([3u8; 20]);
-        let path = vec![WETH_MAINNET, token_mid, token_final];
-        assert_eq!(target_token(&path, WETH_MAINNET), Some(token_final));
+        let path = vec![weth_mainnet(), token_mid, token_final];
+        assert_eq!(target_token(&path, weth_mainnet()), Some(token_final));
     }
 
     #[test]
     fn target_token_prefers_source_on_sell_paths() {
         let token_start = Address::from([4u8; 20]);
         let token_mid = Address::from([5u8; 20]);
-        let path = vec![token_start, token_mid, WETH_MAINNET];
-        assert_eq!(target_token(&path, WETH_MAINNET), Some(token_start));
+        let path = vec![token_start, token_mid, weth_mainnet()];
+        assert_eq!(target_token(&path, weth_mainnet()), Some(token_start));
     }
 
     #[test]
     fn rejects_invalid_v3_path_length() {
         // Missing last token bytes.
         let mut path: Vec<u8> = Vec::new();
-        path.extend_from_slice(WETH_MAINNET.as_slice());
+        path.extend_from_slice(weth_mainnet().as_slice());
         path.extend_from_slice(&[0u8, 1u8, 244u8]); // fee 500
         path.extend_from_slice(&[1u8; 10]); // truncated address
         assert!(parse_v3_path(&path).is_none());
@@ -1314,7 +1374,7 @@ mod tests {
     #[test]
     fn rejects_invalid_v3_fee() {
         let mut path: Vec<u8> = Vec::new();
-        path.extend_from_slice(WETH_MAINNET.as_slice());
+        path.extend_from_slice(weth_mainnet().as_slice());
         path.extend_from_slice(&[0u8, 0u8, 1u8]); // fee 1 (not standard)
         path.extend_from_slice([2u8; 20].as_slice());
         assert!(parse_v3_path(&path).is_none());
@@ -1337,7 +1397,7 @@ mod tests {
     fn classifies_swap_direction() {
         let buy = ObservedSwap {
             router: Address::ZERO,
-            path: vec![WETH_MAINNET, Address::from([2u8; 20])],
+            path: vec![weth_mainnet(), Address::from([2u8; 20])],
             v3_fees: Vec::new(),
             v3_path: None,
             amount_in: U256::from(1u64),
@@ -1345,12 +1405,12 @@ mod tests {
             recipient: Address::ZERO,
             router_kind: RouterKind::V2Like,
         };
-        assert_eq!(direction(&buy, WETH_MAINNET), SwapDirection::BuyWithEth);
+        assert_eq!(direction(&buy, weth_mainnet()), SwapDirection::BuyWithEth);
         let sell = ObservedSwap {
-            path: vec![Address::from([2u8; 20]), WETH_MAINNET],
+            path: vec![Address::from([2u8; 20]), weth_mainnet()],
             ..buy
         };
-        assert_eq!(direction(&sell, WETH_MAINNET), SwapDirection::SellForEth);
+        assert_eq!(direction(&sell, weth_mainnet()), SwapDirection::SellForEth);
     }
 
     #[test]
@@ -1435,7 +1495,7 @@ mod tests {
         let other = Address::from([9u8; 20]);
         assert!(exec.ensure_native_out(U256::from(10u64), other).is_none());
         assert_eq!(
-            exec.ensure_native_out(U256::from(5u64), WETH_MAINNET),
+            exec.ensure_native_out(U256::from(5u64), weth_mainnet()),
             Some(U256::from(5u64))
         );
     }
@@ -1742,7 +1802,7 @@ mod tests {
             router_allowlist,
             None,
             500,
-            WETH_MAINNET,
+            weth_mainnet(),
             false,
             None,
             0,

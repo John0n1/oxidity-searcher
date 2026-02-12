@@ -314,10 +314,21 @@ impl GlobalSettings {
             }
         }
 
-        // Fallback to env var convention: RPC_URL_1, RPC_URL_137
-        let env_key = format!("RPC_URL_{}", chain_id);
-        std::env::var(&env_key)
-            .map_err(|_| AppError::Config(format!("No RPC URL found for chain {}", chain_id)))
+        // Fallback to env var convention: RPC_URL_1, RPC_URL_137, then generic RPC_URL
+        let candidates = [format!("RPC_URL_{}", chain_id), "RPC_URL".to_string()];
+        for key in candidates {
+            if let Ok(v) = std::env::var(&key) {
+                let trimmed = v.trim();
+                if !trimmed.is_empty() {
+                    return Ok(trimmed.to_string());
+                }
+            }
+        }
+
+        Err(AppError::Config(format!(
+            "No RPC URL found for chain {}",
+            chain_id
+        )))
     }
 
     /// Helper to get WS URL for a specific chain
@@ -331,6 +342,8 @@ impl GlobalSettings {
         let candidates = [
             format!("WS_URL_{}", chain_id),
             format!("WEBSOCKET_URL_{}", chain_id),
+            "WS_URL".to_string(),
+            "WEBSOCKET_URL".to_string(),
         ];
 
         for key in candidates {

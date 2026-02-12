@@ -197,6 +197,12 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
     let skip_unknown = stats
         .skip_unknown_router
         .load(std::sync::atomic::Ordering::Relaxed);
+    let skip_missing_wrapped = stats
+        .skip_missing_wrapped
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let skip_non_wrapped_balance = stats
+        .skip_non_wrapped_balance
+        .load(std::sync::atomic::Ordering::Relaxed);
     let skip_gas_cap = stats
         .skip_gas_cap
         .load(std::sync::atomic::Ordering::Relaxed);
@@ -205,6 +211,33 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
         .load(std::sync::atomic::Ordering::Relaxed);
     let skip_profit_guard = stats
         .skip_profit_guard
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let skip_unsupported_router = stats
+        .skip_unsupported_router
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let skip_token_call = stats
+        .skip_token_call
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let skip_toxic_token = stats
+        .skip_toxic_token
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let skip_insufficient_balance = stats
+        .skip_insufficient_balance
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let skip_router_revert_rate = stats
+        .skip_router_revert_rate
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let skip_liquidity_depth = stats
+        .skip_liquidity_depth
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let skip_sandwich_risk = stats
+        .skip_sandwich_risk
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let skip_front_run_build_failed = stats
+        .skip_front_run_build_failed
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let skip_backrun_build_failed = stats
+        .skip_backrun_build_failed
         .load(std::sync::atomic::Ordering::Relaxed);
     let nonce_loads = stats
         .nonce_state_loads
@@ -256,9 +289,20 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
             "# TYPE strategy_failed counter\nstrategy_failed {}\n",
             "# TYPE strategy_skip_decode counter\nstrategy_skip_decode {}\n",
             "# TYPE strategy_skip_unknown_router counter\nstrategy_skip_unknown_router {}\n",
+            "# TYPE strategy_skip_missing_wrapped counter\nstrategy_skip_missing_wrapped {}\n",
+            "# TYPE strategy_skip_non_wrapped_balance counter\nstrategy_skip_non_wrapped_balance {}\n",
             "# TYPE strategy_skip_gas_cap counter\nstrategy_skip_gas_cap {}\n",
             "# TYPE strategy_skip_sim_failed counter\nstrategy_skip_sim_failed {}\n",
             "# TYPE strategy_skip_profit_guard counter\nstrategy_skip_profit_guard {}\n",
+            "# TYPE strategy_skip_unsupported_router counter\nstrategy_skip_unsupported_router {}\n",
+            "# TYPE strategy_skip_token_call counter\nstrategy_skip_token_call {}\n",
+            "# TYPE strategy_skip_toxic_token counter\nstrategy_skip_toxic_token {}\n",
+            "# TYPE strategy_skip_insufficient_balance counter\nstrategy_skip_insufficient_balance {}\n",
+            "# TYPE strategy_skip_router_revert_rate counter\nstrategy_skip_router_revert_rate {}\n",
+            "# TYPE strategy_skip_liquidity_depth counter\nstrategy_skip_liquidity_depth {}\n",
+            "# TYPE strategy_skip_sandwich_risk counter\nstrategy_skip_sandwich_risk {}\n",
+            "# TYPE strategy_skip_front_run_build_failed counter\nstrategy_skip_front_run_build_failed {}\n",
+            "# TYPE strategy_skip_backrun_build_failed counter\nstrategy_skip_backrun_build_failed {}\n",
             "# TYPE nonce_state_loads counter\nnonce_state_loads {}\n",
             "# TYPE nonce_state_load_fail counter\nnonce_state_load_fail {}\n",
             "# TYPE nonce_state_persist counter\nnonce_state_persist {}\n",
@@ -280,9 +324,20 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
         failed,
         skip_decode,
         skip_unknown,
+        skip_missing_wrapped,
+        skip_non_wrapped_balance,
         skip_gas_cap,
         skip_sim_failed,
         skip_profit_guard,
+        skip_unsupported_router,
+        skip_token_call,
+        skip_toxic_token,
+        skip_insufficient_balance,
+        skip_router_revert_rate,
+        skip_liquidity_depth,
+        skip_sandwich_risk,
+        skip_front_run_build_failed,
+        skip_backrun_build_failed,
         nonce_loads,
         nonce_load_fail,
         nonce_persist,

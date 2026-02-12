@@ -7,7 +7,7 @@ use alloy::rpc::types::eth::Transaction;
 use alloy_sol_types::{SolCall, SolType};
 
 use crate::services::strategy::routers::{
-    UniV2Router, UniV3Router, UniversalRouter, UniversalRouterDeadline,
+    OneInchAggregationRouter, UniV2Router, UniV3Router, UniversalRouter, UniversalRouterDeadline,
 };
 
 use alloy::sol;
@@ -92,6 +92,34 @@ pub fn decode_swap_input(router: Address, input: &[u8], eth_value: U256) -> Opti
 
     let selector: [u8; 4] = input[..4].try_into().ok()?;
     match selector {
+        OneInchAggregationRouter::swapCall::SELECTOR => {
+            let decoded = OneInchAggregationRouter::swapCall::abi_decode(input).ok()?;
+            let mut token_in = decoded.desc.srcToken;
+            let mut token_out = decoded.desc.dstToken;
+            let native_sentinel =
+                crate::common::constants::native_sentinel_for_chain(crate::common::constants::CHAIN_ETHEREUM);
+            let mainnet_wrapped_native =
+                crate::common::constants::wrapped_native_for_chain(crate::common::constants::CHAIN_ETHEREUM);
+            if token_in == native_sentinel {
+                token_in = mainnet_wrapped_native;
+            }
+            if token_out == native_sentinel {
+                token_out = mainnet_wrapped_native;
+            }
+            if token_in == Address::ZERO || token_out == Address::ZERO || token_in == token_out {
+                return None;
+            }
+            Some(ObservedSwap {
+                router,
+                path: vec![token_in, token_out],
+                v3_fees: Vec::new(),
+                v3_path: None,
+                amount_in: decoded.desc.amount,
+                min_out: decoded.desc.minReturnAmount,
+                recipient: decoded.desc.dstReceiver,
+                router_kind: RouterKind::V2Like,
+            })
+        }
         UniV2Router::swapExactETHForTokensCall::SELECTOR => {
             let decoded = UniV2Router::swapExactETHForTokensCall::abi_decode(input).ok()?;
             Some(ObservedSwap {
@@ -416,6 +444,89 @@ pub fn target_token(path: &[Address], wrapped_native: Address) -> Option<Address
         .copied()
         .rev()
         .find(|addr| addr != &wrapped_native)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::strategy::routers::OneInchAggregationRouter;
+    use alloy::primitives::Bytes;
+    use alloy::sol_types::SolCall;
+
+    #[test]
+    fn decodes_oneinch_swap_description() {
+        let router = crate::common::constants::default_oneinch_routers(
+            crate::common::constants::CHAIN_ETHEREUM,
+        )
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| Address::from([0x11; 20]));
+        let usdc = Address::from([0x22; 20]);
+        let weth = crate::common::constants::wrapped_native_for_chain(
+            crate::common::constants::CHAIN_ETHEREUM,
+        );
+        let recipient = Address::from([0x33; 20]);
+
+        let call = OneInchAggregationRouter::swapCall {
+            executor: Address::ZERO,
+            desc: OneInchAggregationRouter::SwapDescription {
+                srcToken: usdc,
+                dstToken: weth,
+                srcReceiver: Address::ZERO,
+                dstReceiver: recipient,
+                amount: U256::from(1_000_000u64),
+                minReturnAmount: U256::from(1_000_000_000_000u64),
+                flags: U256::ZERO,
+            },
+            data: Bytes::new(),
+        };
+        let input = call.abi_encode();
+        let observed =
+            decode_swap_input(router, &input, U256::ZERO).expect("decode oneinch swap");
+        assert_eq!(observed.path, vec![usdc, weth]);
+        assert_eq!(observed.amount_in, U256::from(1_000_000u64));
+        assert_eq!(observed.min_out, U256::from(1_000_000_000_000u64));
+        assert_eq!(observed.recipient, recipient);
+        assert_eq!(observed.router_kind, RouterKind::V2Like);
+    }
+
+    #[test]
+    fn maps_oneinch_native_sentinel_to_weth_mainnet() {
+        let router = crate::common::constants::default_oneinch_routers(
+            crate::common::constants::CHAIN_ETHEREUM,
+        )
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| Address::from([0x11; 20]));
+        let native_sentinel = crate::common::constants::native_sentinel_for_chain(
+            crate::common::constants::CHAIN_ETHEREUM,
+        );
+        let dai = Address::from([0x44; 20]);
+
+        let call = OneInchAggregationRouter::swapCall {
+            executor: Address::ZERO,
+            desc: OneInchAggregationRouter::SwapDescription {
+                srcToken: native_sentinel,
+                dstToken: dai,
+                srcReceiver: Address::ZERO,
+                dstReceiver: Address::ZERO,
+                amount: U256::from(1_000_000_000_000_000u64),
+                minReturnAmount: U256::from(1_000_000_000_000_000u64),
+                flags: U256::ZERO,
+            },
+            data: Bytes::new(),
+        };
+        let input = call.abi_encode();
+        let observed =
+            decode_swap_input(router, &input, U256::ZERO).expect("decode oneinch native sentinel");
+        assert_eq!(
+            observed.path[0],
+            crate::common::constants::wrapped_native_for_chain(
+                crate::common::constants::CHAIN_ETHEREUM
+            )
+        );
+        assert_eq!(observed.path[1], dai);
+    }
 }
 
 pub fn direction(observed: &ObservedSwap, wrapped_native: Address) -> SwapDirection {

@@ -7,7 +7,9 @@ use alloy::primitives::{Address, B256, Bytes, U256};
 use alloy::signers::local::PrivateKeySigner;
 use alloy_sol_types::SolCall;
 use dashmap::DashSet;
-use oxidity_builder::common::constants::WETH_MAINNET;
+use oxidity_builder::common::constants::{
+    default_uniswap_v2_router, wrapped_native_for_chain, CHAIN_ETHEREUM,
+};
 use oxidity_builder::core::executor::BundleSender;
 use oxidity_builder::core::portfolio::PortfolioManager;
 use oxidity_builder::core::safety::SafetyGuard;
@@ -23,7 +25,6 @@ use oxidity_builder::network::provider::HttpProvider;
 use oxidity_builder::network::reserves::ReserveCache;
 use oxidity_builder::services::strategy::routers::UniV2Router;
 use oxidity_builder::services::strategy::strategy::StrategyStats as Stats;
-use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use url::Url;
@@ -67,7 +68,7 @@ async fn mev_share_hint_round_trip() {
     let (_block_tx, block_rx) = broadcast::channel(4);
 
     let allowlist = Arc::new(DashSet::new());
-    let router = Address::from_str("7a250d5630B4cF539739dF2C5dAcb4c659F2488D").unwrap();
+    let router = default_uniswap_v2_router(CHAIN_ETHEREUM).unwrap_or_else(|| Address::from([0x11; 20]));
     allowlist.insert(router);
 
     let exec = StrategyExecutor::new(
@@ -93,7 +94,7 @@ async fn mev_share_hint_round_trip() {
         allowlist,
         None,
         500,
-        WETH_MAINNET,
+        wrapped_native_for_chain(CHAIN_ETHEREUM),
         false,
         None,
         0,
@@ -116,7 +117,7 @@ async fn mev_share_hint_round_trip() {
     let token_out = Address::from([0x44; 20]);
     let calldata = UniV2Router::swapExactETHForTokensCall {
         amountOutMin: U256::from(1u64),
-        path: vec![WETH_MAINNET, token_out],
+        path: vec![wrapped_native_for_chain(CHAIN_ETHEREUM), token_out],
         to: signer.address(),
         deadline: U256::from(999_999u64),
     }

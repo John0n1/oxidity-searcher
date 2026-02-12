@@ -330,6 +330,46 @@ impl Database {
         }
         Ok(out)
     }
+
+    pub async fn top_unknown_routers(
+        &self,
+        chain_id: u64,
+        limit: u64,
+    ) -> Result<Vec<(Address, u64)>, AppError> {
+        let chain_id_i64 = chain_id as i64;
+        let limit_i64 = (limit as i64).max(1);
+        let rows = sqlx::query(
+            r#"
+            SELECT address, seen_count
+            FROM router_discovery
+            WHERE chain_id = ?
+              AND COALESCE(status, '') != 'approved'
+            ORDER BY seen_count DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(chain_id_i64)
+        .bind(limit_i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AppError::Initialization(format!("Router discovery top load failed: {}", e)))?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let addr_str: String = row.get("address");
+            let seen_i64: i64 = row.get("seen_count");
+            if let Ok(addr) = Address::from_str(&addr_str) {
+                out.push((addr, seen_i64.max(0) as u64));
+            } else {
+                tracing::warn!(
+                    target: "router_discovery",
+                    address = %addr_str,
+                    "Invalid router address in top unknown list"
+                );
+            }
+        }
+        Ok(out)
+    }
 }
 
 #[cfg(test)]

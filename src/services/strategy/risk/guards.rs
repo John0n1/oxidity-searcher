@@ -49,14 +49,15 @@ impl StrategyExecutor {
         gas_cost_wei: U256,
         extra_costs: U256,
     ) -> U256 {
-        // 10% margin over observed gas cost to guard against basefee drift between simulation and inclusion.
-        let gas_margin = gas_cost_wei
-            .saturating_mul(U256::from(110u64))
+        let base_floor = Self::dynamic_profit_floor(wallet_balance);
+        let cost_basis = gas_cost_wei.saturating_add(extra_costs);
+        // Net profit already excludes effective costs, so only require a small drift buffer
+        // above the base floor instead of re-adding full execution costs.
+        let drift_buffer = cost_basis
+            .saturating_mul(U256::from(5u64))
             .checked_div(U256::from(100u64))
-            .unwrap_or(gas_cost_wei);
-
-        let cost_floor = gas_margin.saturating_add(extra_costs);
-        Self::dynamic_profit_floor(wallet_balance).max(cost_floor)
+            .unwrap_or(U256::ZERO);
+        base_floor.saturating_add(drift_buffer)
     }
 
     #[cfg(test)]
@@ -386,5 +387,36 @@ impl StrategyExecutor {
             base = (base * 105 / 100).min(9500);
         }
         base
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_profit_floor_with_costs_keeps_base_floor_when_costs_zero() {
+        let wallet_balance = U256::from(1_000_000_000_000_000_000u128); // 1 ETH
+        let floor = StrategyExecutor::dynamic_profit_floor_with_costs(
+            wallet_balance,
+            U256::ZERO,
+            U256::ZERO,
+        );
+        assert_eq!(
+            floor,
+            StrategyExecutor::dynamic_profit_floor(wallet_balance)
+        );
+    }
+
+    #[test]
+    fn dynamic_profit_floor_with_costs_adds_small_drift_buffer() {
+        let wallet_balance = U256::from(1_000_000_000_000_000_000u128); // 1 ETH
+        let gas = U256::from(2_000_000_000_000_000u128); // 0.002 ETH
+        let extra = U256::from(1_000_000_000_000_000u128); // 0.001 ETH
+        let floor = StrategyExecutor::dynamic_profit_floor_with_costs(wallet_balance, gas, extra);
+        let base = StrategyExecutor::dynamic_profit_floor(wallet_balance);
+        let expected_buffer =
+            gas.saturating_add(extra).saturating_mul(U256::from(5u64)) / U256::from(100u64);
+        assert_eq!(floor, base.saturating_add(expected_buffer));
     }
 }

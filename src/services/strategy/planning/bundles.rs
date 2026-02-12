@@ -150,7 +150,21 @@ impl StrategyExecutor {
     }
 
     pub async fn populate_access_list(&self, req: &mut TransactionRequest) {
-        match self.http_provider.create_access_list(&req.clone()).await {
+        // We only need access lists for our own signed txs. Victim txs can have fee envelopes
+        // that are invalid against the node's current base fee, which causes noisy
+        // `eth_createAccessList` failures on some clients.
+        if req.from != Some(self.signer.address()) {
+            return;
+        }
+
+        // Access list derivation is fee-agnostic; strip fee fields in the probe request so
+        // Nethermind does not reject low-fee envelopes (`miner premium is negative`).
+        let mut probe_req = req.clone();
+        probe_req.gas_price = None;
+        probe_req.max_fee_per_gas = None;
+        probe_req.max_priority_fee_per_gas = None;
+
+        match self.http_provider.create_access_list(&probe_req).await {
             Ok(res) => {
                 let list = res.ensure_ok().map(|r| r.access_list).unwrap_or_default();
                 if !list.0.is_empty() {
