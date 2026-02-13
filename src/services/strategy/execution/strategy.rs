@@ -40,11 +40,11 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug)]
 pub enum StrategyWork {
     Mempool {
-        tx: Transaction,
+        tx: Box<Transaction>,
         received_at: std::time::Instant,
     },
     MevShareHint {
-        hint: MevShareHint,
+        hint: Box<MevShareHint>,
         received_at: std::time::Instant,
     },
 }
@@ -388,7 +388,7 @@ impl StrategyExecutor {
 
     pub(in crate::services::strategy) fn effective_slippage_bps(&self) -> u64 {
         if self.slippage_bps > 0 {
-            return self.slippage_bps.min(9_999).max(1);
+            return self.slippage_bps.clamp(1, 9_999);
         }
         let wallet_balance = self.portfolio.get_eth_balance_cached(self.chain_id);
         let eth_balance = wei_to_eth_f64(wallet_balance).max(0.0001);
@@ -766,27 +766,24 @@ impl StrategyExecutor {
         if let Some(out) = self
             .reserve_cache
             .quote_v2_path(&[token, self.wrapped_native], amount)
+            && !out.is_zero()
         {
-            if !out.is_zero() {
-                return Some(out);
-            }
+            return Some(out);
         }
         for fee in [500u32, 3_000u32, 10_000u32] {
-            if let Some(path) = encode_v3_path(&[token, self.wrapped_native], &[fee]) {
-                if let Ok(out) = self.quote_v3_path(&path, amount).await {
-                    if !out.is_zero() {
-                        return Some(out);
-                    }
-                }
+            if let Some(path) = encode_v3_path(&[token, self.wrapped_native], &[fee])
+                && let Ok(out) = self.quote_v3_path(&path, amount).await
+                && !out.is_zero()
+            {
+                return Some(out);
             }
         }
         if let Some(plan) = self
             .best_route_plan(token, self.wrapped_native, amount, 0)
             .await
+            && !plan.expected_out.is_zero()
         {
-            if !plan.expected_out.is_zero() {
-                return Some(plan.expected_out);
-            }
+            return Some(plan.expected_out);
         }
         None
     }
@@ -1057,16 +1054,16 @@ impl StrategyExecutor {
                 Ok(header) => {
                     tracing::debug!("StrategyExecutor: observed new block {:?}", header.hash);
                     let number = header.inner.number;
-                    let prev = self.current_block.swap(number as u64, Ordering::Relaxed);
-                    if prev != number as u64 {
+                    let prev = self.current_block.swap(number, Ordering::Relaxed);
+                    if prev != number {
                         let mut guard = self.bundle_state.lock().await;
                         *guard = None;
                         drop(guard);
                         let mut inputs = self.per_block_inputs.lock().await;
                         *inputs = None;
                         // Persist fresh state baseline for the new block.
-                        if let Ok(base) = self.nonce_manager.get_base_nonce(number as u64).await {
-                            self.persist_nonce_state(number as u64, base, &HashSet::new())
+                        if let Ok(base) = self.nonce_manager.get_base_nonce(number).await {
+                            self.persist_nonce_state(number, base, &HashSet::new())
                                 .await;
                         }
                     }
@@ -1219,11 +1216,11 @@ impl StrategyExecutor {
             }
 
             let mut current_head = self.current_head_or(0);
-            if current_head == 0 {
-                if let Ok(head) = self.http_provider.get_block_number().await {
-                    current_head = head;
-                    self.current_block.store(head, Ordering::Relaxed);
-                }
+            if current_head == 0
+                && let Ok(head) = self.http_provider.get_block_number().await
+            {
+                current_head = head;
+                self.current_block.store(head, Ordering::Relaxed);
             }
 
             match self.http_provider.get_transaction_receipt(*hash).await {
@@ -1299,6 +1296,9 @@ fn f64_native_to_wei(value_native: f64) -> Option<U256> {
     let as_u128 = wei.min(u128::MAX as f64) as u128;
     Some(U256::from(as_u128))
 }
+
+#[cfg(test)]
+pub(crate) use tests::dummy_executor_for_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2027,6 +2027,3 @@ mod tests {
         );
     }
 }
-
-#[cfg(test)]
-pub(crate) use tests::dummy_executor_for_tests;

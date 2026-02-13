@@ -270,11 +270,11 @@ impl PriceFeed {
         }
 
         // 8. CoinDesk (BTC only, optional key)
-        if normalized.chainlink_symbol == "BTC" {
-            if let Some(q) = self.try_coindesk().await? {
-                self.store_cache(&normalized.cache_key, q.clone()).await;
-                return Ok(q);
-            }
+        if normalized.chainlink_symbol == "BTC"
+            && let Some(q) = self.try_coindesk().await?
+        {
+            self.store_cache(&normalized.cache_key, q.clone()).await;
+            return Ok(q);
         }
 
         // 9. Soft-fail: serve stale cache if available instead of hard error
@@ -301,29 +301,28 @@ impl PriceFeed {
             );
 
             // Try with API key header if provided
-            if let Some(key) = &self.api_keys.binance {
-                if self.allow("binance", 120).await {
-                    let resp = self
-                        .client
-                        .get(&url)
-                        .header("X-MBX-APIKEY", key)
-                        .send()
-                        .await;
-                    if let Ok(ok_resp) = resp {
-                        if ok_resp.status().is_success() {
-                            return Self::parse_binance(ok_resp).await;
-                        }
-                    }
+            if let Some(key) = &self.api_keys.binance
+                && self.allow("binance", 120).await
+            {
+                let resp = self
+                    .client
+                    .get(&url)
+                    .header("X-MBX-APIKEY", key)
+                    .send()
+                    .await;
+                if let Ok(ok_resp) = resp
+                    && ok_resp.status().is_success()
+                {
+                    return Self::parse_binance(ok_resp).await;
                 }
             }
 
             // Fallback without API key
-            if self.allow("binance_anon", 60).await {
-                if let Ok(resp) = self.client.get(&url).send().await {
-                    if resp.status().is_success() {
-                        return Self::parse_binance(resp).await;
-                    }
-                }
+            if self.allow("binance_anon", 60).await
+                && let Ok(resp) = self.client.get(&url).send().await
+                && resp.status().is_success()
+            {
+                return Self::parse_binance(resp).await;
             }
         }
         Ok(None)
@@ -426,13 +425,13 @@ impl PriceFeed {
             .json()
             .await
             .map_err(|e| AppError::Initialization(format!("CMC decode failed: {}", e)))?;
-        if let Some(entry) = parsed.data.get(&normalized.chainlink_symbol) {
-            if let Some(usd) = entry.quote.get("USD") {
-                return Ok(Some(PriceQuote {
-                    price: usd.price,
-                    source: "coinmarketcap".into(),
-                }));
-            }
+        if let Some(entry) = parsed.data.get(&normalized.chainlink_symbol)
+            && let Some(usd) = entry.quote.get("USD")
+        {
+            return Ok(Some(PriceQuote {
+                price: usd.price,
+                source: "coinmarketcap".into(),
+            }));
         }
         Ok(None)
     }
@@ -829,7 +828,7 @@ impl PriceFeed {
         let read_guard = self.cache.read().await;
         read_guard
             .get(key)
-            .and_then(|(quote, ts)| Some((quote.clone(), ts.elapsed())))
+            .map(|(quote, ts)| (quote.clone(), ts.elapsed()))
             .filter(|(_, age)| age.as_secs() < STALE_CACHE_GRACE_SECS)
     }
 }

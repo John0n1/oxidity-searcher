@@ -67,10 +67,10 @@ impl RoutePlan {
             return true;
         }
         for window in legs.windows(2) {
-            if let [a, b] = window {
-                if a.token_out != b.token_in {
-                    return false;
-                }
+            if let [a, b] = window
+                && a.token_out != b.token_in
+            {
+                return false;
             }
         }
         true

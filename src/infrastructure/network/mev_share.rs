@@ -260,10 +260,10 @@ impl MevShareClient {
     async fn record_seen(&self, key: B256) {
         let mut order = self.seen_order.lock().await;
         order.push_back(key);
-        if order.len() > SEEN_MAX {
-            if let Some(oldest) = order.pop_front() {
-                self.seen.remove(&oldest);
-            }
+        if order.len() > SEEN_MAX
+            && let Some(oldest) = order.pop_front()
+        {
+            self.seen.remove(&oldest);
         }
     }
 
@@ -276,7 +276,7 @@ impl MevShareClient {
                 if self.seen.insert(key) {
                     self.record_seen(key).await;
                     self.enqueue(StrategyWork::MevShareHint {
-                        hint,
+                        hint: Box::new(hint),
                         received_at: std::time::Instant::now(),
                     })
                     .await;
@@ -360,24 +360,6 @@ struct HistoricalRecord {
     hint: Option<RawEvent>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_null_txs_hint() {
-        let json = r#"{"hash":"0xabc","txs":null}"#;
-        let evt: RawEvent = serde_json::from_str(json).expect("parse");
-        assert!(evt.txs.is_none());
-    }
-
-    #[test]
-    fn parses_null_event_payload() {
-        let evt: Option<RawEvent> = serde_json::from_str("null").expect("parse");
-        assert!(evt.is_none());
-    }
-}
-
 fn strip_0x(s: &str) -> &str {
     s.strip_prefix("0x").unwrap_or(s)
 }
@@ -416,4 +398,22 @@ fn retry_after_delay(resp: &reqwest::Response) -> Option<Duration> {
         .and_then(|h| h.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
         .map(Duration::from_secs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_null_txs_hint() {
+        let json = r#"{"hash":"0xabc","txs":null}"#;
+        let evt: RawEvent = serde_json::from_str(json).expect("parse");
+        assert!(evt.txs.is_none());
+    }
+
+    #[test]
+    fn parses_null_event_payload() {
+        let evt: Option<RawEvent> = serde_json::from_str("null").expect("parse");
+        assert!(evt.is_none());
+    }
 }

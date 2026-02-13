@@ -11,6 +11,12 @@ pub struct AbiRegistry {
     abis: HashMap<String, JsonAbi>,
 }
 
+impl Default for AbiRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AbiRegistry {
     pub fn new() -> Self {
         Self {

@@ -5,24 +5,24 @@ use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolCall;
 use dashmap::DashSet;
-use oxidity_builder::common::constants::{CHAIN_ETHEREUM, wrapped_native_for_chain};
-use oxidity_builder::core::executor::BundleSender;
-use oxidity_builder::core::portfolio::PortfolioManager;
-use oxidity_builder::core::safety::SafetyGuard;
-use oxidity_builder::core::simulation::{SimulationBackend, Simulator};
-use oxidity_builder::core::strategy::{
+use oxidity_searcher::common::constants::{CHAIN_ETHEREUM, wrapped_native_for_chain};
+use oxidity_searcher::core::executor::BundleSender;
+use oxidity_searcher::core::portfolio::PortfolioManager;
+use oxidity_searcher::core::safety::SafetyGuard;
+use oxidity_searcher::core::simulation::{SimulationBackend, Simulator};
+use oxidity_searcher::core::strategy::{
     FlashloanProvider, StrategyExecutor, StrategyStats, StrategyWork,
 };
-use oxidity_builder::data::db::Database;
-use oxidity_builder::infrastructure::data::token_manager::TokenManager;
-use oxidity_builder::network::gas::GasOracle;
-use oxidity_builder::network::mev_share::MevShareHint;
-use oxidity_builder::network::nonce::NonceManager;
-use oxidity_builder::network::price_feed::{PriceApiKeys, PriceFeed};
-use oxidity_builder::network::provider::HttpProvider;
-use oxidity_builder::network::reserves::ReserveCache;
-use oxidity_builder::services::strategy::execution::work_queue::WorkQueue;
-use oxidity_builder::services::strategy::routers::UniV3Router;
+use oxidity_searcher::data::db::Database;
+use oxidity_searcher::infrastructure::data::token_manager::TokenManager;
+use oxidity_searcher::network::gas::GasOracle;
+use oxidity_searcher::network::mev_share::MevShareHint;
+use oxidity_searcher::network::nonce::NonceManager;
+use oxidity_searcher::network::price_feed::{PriceApiKeys, PriceFeed};
+use oxidity_searcher::network::provider::HttpProvider;
+use oxidity_searcher::network::reserves::ReserveCache;
+use oxidity_searcher::services::strategy::execution::work_queue::WorkQueue;
+use oxidity_searcher::services::strategy::routers::UniV3Router;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -169,7 +169,7 @@ async fn mev_share_v3_pipeline_manual() {
     let exec = Arc::new(exec);
     exec.clone()
         .process_work(StrategyWork::MevShareHint {
-            hint,
+            hint: Box::new(hint),
             received_at: std::time::Instant::now(),
         })
         .await;

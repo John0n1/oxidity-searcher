@@ -8,20 +8,20 @@ use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolType;
 use alloy_sol_types::SolCall;
 use dashmap::DashSet;
-use oxidity_builder::common::constants::{CHAIN_ETHEREUM, wrapped_native_for_chain};
-use oxidity_builder::core::executor::BundleSender;
-use oxidity_builder::core::portfolio::PortfolioManager;
-use oxidity_builder::core::safety::SafetyGuard;
-use oxidity_builder::core::simulation::{SimulationBackend, Simulator};
-use oxidity_builder::core::strategy::{FlashloanProvider, StrategyExecutor, StrategyStats};
-use oxidity_builder::data::db::Database;
-use oxidity_builder::data::executor::{FlashCallbackData, UnifiedHardenedExecutor};
-use oxidity_builder::network::gas::GasFees;
-use oxidity_builder::network::nonce::NonceManager;
-use oxidity_builder::network::price_feed::PriceFeed;
-use oxidity_builder::network::provider::HttpProvider;
-use oxidity_builder::network::reserves::ReserveCache;
-use oxidity_builder::services::strategy::execution::work_queue::WorkQueue;
+use oxidity_searcher::common::constants::{CHAIN_ETHEREUM, wrapped_native_for_chain};
+use oxidity_searcher::core::executor::BundleSender;
+use oxidity_searcher::core::portfolio::PortfolioManager;
+use oxidity_searcher::core::safety::SafetyGuard;
+use oxidity_searcher::core::simulation::{SimulationBackend, Simulator};
+use oxidity_searcher::core::strategy::{FlashloanProvider, StrategyExecutor, StrategyStats};
+use oxidity_searcher::data::db::Database;
+use oxidity_searcher::data::executor::{FlashCallbackData, UnifiedHardenedExecutor};
+use oxidity_searcher::network::gas::GasFees;
+use oxidity_searcher::network::nonce::NonceManager;
+use oxidity_searcher::network::price_feed::PriceFeed;
+use oxidity_searcher::network::provider::HttpProvider;
+use oxidity_searcher::network::reserves::ReserveCache;
+use oxidity_searcher::services::strategy::execution::work_queue::WorkQueue;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use url::Url;
@@ -53,15 +53,15 @@ async fn flashloan_builder_encodes_callbacks() {
     ));
     let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), bundle_signer.address()));
-    let gas_oracle = oxidity_builder::network::gas::GasOracle::new(http.clone(), 1);
+    let gas_oracle = oxidity_searcher::network::gas::GasOracle::new(http.clone(), 1);
     let price_feed = PriceFeed::new(
         http.clone(),
         std::collections::HashMap::new(),
-        oxidity_builder::network::price_feed::PriceApiKeys::default(),
+        oxidity_searcher::network::price_feed::PriceApiKeys::default(),
     );
     let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
     let token_manager =
-        Arc::new(oxidity_builder::infrastructure::data::token_manager::TokenManager::default());
+        Arc::new(oxidity_searcher::infrastructure::data::token_manager::TokenManager::default());
     let nonce_manager = NonceManager::new(http.clone(), bundle_signer.address());
     let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
     let router_allowlist = Arc::new(DashSet::<Address>::new());
@@ -207,15 +207,15 @@ async fn flashloan_builder_uses_aave_selector() {
     ));
     let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), bundle_signer.address()));
-    let gas_oracle = oxidity_builder::network::gas::GasOracle::new(http.clone(), 1);
+    let gas_oracle = oxidity_searcher::network::gas::GasOracle::new(http.clone(), 1);
     let price_feed = PriceFeed::new(
         http.clone(),
         std::collections::HashMap::new(),
-        oxidity_builder::network::price_feed::PriceApiKeys::default(),
+        oxidity_searcher::network::price_feed::PriceApiKeys::default(),
     );
     let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
     let token_manager =
-        Arc::new(oxidity_builder::infrastructure::data::token_manager::TokenManager::default());
+        Arc::new(oxidity_searcher::infrastructure::data::token_manager::TokenManager::default());
     let nonce_manager = NonceManager::new(http.clone(), bundle_signer.address());
     let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
     let router_allowlist = Arc::new(DashSet::<Address>::new());

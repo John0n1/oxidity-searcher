@@ -120,10 +120,12 @@ impl Simulator {
         if ETH_SIMULATE_MISSING.get().is_some() {
             return false;
         }
-        let mut req = TransactionRequest::default();
-        req.from = Some(Address::ZERO);
-        req.to = Some(TxKind::Call(Address::ZERO));
-        req.value = Some(U256::ZERO);
+        let req = TransactionRequest {
+            from: Some(Address::ZERO),
+            to: Some(TxKind::Call(Address::ZERO)),
+            value: Some(U256::ZERO),
+            ..Default::default()
+        };
 
         let block = SimBlock {
             block_overrides: None,
@@ -167,10 +169,12 @@ impl Simulator {
         if DEBUG_TRACE_MISSING.get().is_some() {
             return false;
         }
-        let mut req = TransactionRequest::default();
-        req.from = Some(Address::ZERO);
-        req.to = Some(TxKind::Call(Address::ZERO));
-        req.value = Some(U256::ZERO);
+        let req = TransactionRequest {
+            from: Some(Address::ZERO),
+            to: Some(TxKind::Call(Address::ZERO)),
+            value: Some(U256::ZERO),
+            ..Default::default()
+        };
         let block = BlockId::Number(BlockNumberOrTag::Pending);
         let trace_options = GethDebugTracingCallOptions::default();
         match self
@@ -204,10 +208,12 @@ impl Simulator {
         if DEBUG_TRACE_MISSING.get().is_some() {
             return false;
         }
-        let mut req = TransactionRequest::default();
-        req.from = Some(Address::ZERO);
-        req.to = Some(TxKind::Call(Address::ZERO));
-        req.value = Some(U256::ZERO);
+        let req = TransactionRequest {
+            from: Some(Address::ZERO),
+            to: Some(TxKind::Call(Address::ZERO)),
+            value: Some(U256::ZERO),
+            ..Default::default()
+        };
         let bundle = Bundle::from(vec![req]);
         let context = StateContext {
             block_number: Some(BlockId::Number(BlockNumberOrTag::Pending)),

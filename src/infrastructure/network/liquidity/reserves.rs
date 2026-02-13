@@ -119,7 +119,7 @@ impl ReserveCache {
         if let Some(meta) = self.balancer_pool_meta.get(&pool) {
             return Some(meta.clone());
         }
-        let vault = { self.balancer_vault.read().await.clone()? };
+        let vault = { (*self.balancer_vault.read().await)? };
 
         let pool_id: B256 = BalancerPoolId::new(pool, self.http_provider.clone())
             .getPoolId()
@@ -251,17 +251,9 @@ impl ReserveCache {
                 let j = coins.iter().position(|t| *t == token_out)? as i128;
                 let curve = CurvePoolLike::new(pool, self.http_provider.clone());
                 let out = if underlying {
-                    curve
-                        .get_dy_underlying(i.into(), j.into(), amount_in)
-                        .call()
-                        .await
-                        .ok()?
+                    curve.get_dy_underlying(i, j, amount_in).call().await.ok()?
                 } else {
-                    curve
-                        .get_dy(i.into(), j.into(), amount_in)
-                        .call()
-                        .await
-                        .ok()?
+                    curve.get_dy(i, j, amount_in).call().await.ok()?
                 };
                 if out > U256::ZERO {
                     return Some((out, underlying, i, j));
@@ -279,13 +271,9 @@ impl ReserveCache {
         amount_in: U256,
     ) -> Option<(U256, B256)> {
         let meta = self.discover_balancer_pool(pool).await?;
-        let vault = { self.balancer_vault.read().await.clone()? };
-        let Some(idx_in) = meta.tokens.iter().position(|t| *t == token_in) else {
-            return None;
-        };
-        let Some(idx_out) = meta.tokens.iter().position(|t| *t == token_out) else {
-            return None;
-        };
+        let vault = { (*self.balancer_vault.read().await)? };
+        let idx_in = meta.tokens.iter().position(|t| *t == token_in)?;
+        let idx_out = meta.tokens.iter().position(|t| *t == token_out)?;
         let step = BalancerVault::BatchSwapStep {
             poolId: meta.pool_id,
             assetInIndex: U256::from(idx_in as u64),
@@ -608,9 +596,7 @@ impl ReserveCache {
         for window in path.windows(2) {
             let from = window[0];
             let to = window[1];
-            let Some((hop_out, _pair)) = self.quote_v2_hop_best(from, to, amount) else {
-                return None;
-            };
+            let (hop_out, _pair) = self.quote_v2_hop_best(from, to, amount)?;
             amount = hop_out;
         }
         Some(amount)

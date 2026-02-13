@@ -3186,7 +3186,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "oxidity-builder"
+name = "oxidity-searcher"
 version = "0.1.1-delta"
 dependencies = [
  "alloy",

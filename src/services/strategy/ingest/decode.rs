@@ -497,9 +497,7 @@ fn decode_swap_input_inner(
         UniV3Router::exactInputCall::SELECTOR => {
             let decoded = UniV3Router::exactInputCall::abi_decode(input).ok()?;
             let params = decoded.params;
-            let Some(path) = parse_v3_path(&params.path) else {
-                return None;
-            };
+            let path = parse_v3_path(&params.path)?;
             Some(ObservedSwap {
                 router,
                 path: path.tokens.clone(),
@@ -514,9 +512,7 @@ fn decode_swap_input_inner(
         UniV3Router::exactOutputCall::SELECTOR => {
             let decoded = UniV3Router::exactOutputCall::abi_decode(input).ok()?;
             let params = decoded.params;
-            let Some(path) = parse_v3_path(&params.path) else {
-                return None;
-            };
+            let path = parse_v3_path(&params.path)?;
             let tokens: Vec<Address> = path.tokens.iter().rev().copied().collect();
             let fees: Vec<u32> = path.fees.iter().rev().copied().collect();
             let canonical_path = encode_v3_path(&tokens, &fees);
@@ -734,9 +730,9 @@ fn decode_universal_router(
 ) -> Option<ObservedSwap> {
     let cmd_bytes = commands.as_ref();
     let count = std::cmp::min(cmd_bytes.len(), inputs.len());
-    for idx in 0..count {
-        let cmd = cmd_bytes[idx] & 0x3f;
-        let input = inputs.get(idx)?;
+    for (idx, cmd_byte) in cmd_bytes.iter().enumerate().take(count) {
+        let cmd = *cmd_byte & 0x3f;
+        let input = &inputs[idx];
         match cmd {
             UR_CMD_V2_SWAP_EXACT_IN => {
                 let decoded = V2SwapExactInParams::abi_decode(input.as_ref()).ok()?;
@@ -824,6 +820,94 @@ pub fn target_token(path: &[Address], wrapped_native: Address) -> Option<Address
         .copied()
         .rev()
         .find(|addr| addr != &wrapped_native)
+}
+
+pub fn direction(observed: &ObservedSwap, wrapped_native: Address) -> SwapDirection {
+    let starts_with_native = observed.path.first().copied() == Some(wrapped_native);
+    let ends_with_native = observed.path.last().copied() == Some(wrapped_native);
+    if starts_with_native {
+        SwapDirection::BuyWithEth
+    } else if ends_with_native {
+        SwapDirection::SellForEth
+    } else {
+        SwapDirection::Other
+    }
+}
+
+pub fn parse_v3_path(path: &[u8]) -> Option<ParsedV3Path> {
+    const ADDRESS_BYTES: usize = 20;
+    const FEE_BYTES: usize = 3;
+    const HOP_BYTES: usize = ADDRESS_BYTES + FEE_BYTES;
+
+    if path.len() < ADDRESS_BYTES + HOP_BYTES {
+        return None;
+    }
+
+    let mut tokens = Vec::new();
+    let mut fees = Vec::new();
+
+    let first = path.get(..ADDRESS_BYTES)?;
+    tokens.push(Address::from_slice(first));
+
+    let mut cursor = ADDRESS_BYTES;
+    while cursor + HOP_BYTES <= path.len() {
+        let fee_bytes = path.get(cursor..cursor + FEE_BYTES)?;
+        let token_bytes = path.get(cursor + FEE_BYTES..cursor + HOP_BYTES)?;
+
+        let fee = U24::try_from_be_slice(fee_bytes).map(|v| v.to::<u32>())?;
+        if !v3_fee_sane(fee) {
+            return None;
+        }
+
+        tokens.push(Address::from_slice(token_bytes));
+        fees.push(fee);
+
+        cursor += HOP_BYTES;
+
+        if tokens.len() > 4 {
+            return None;
+        }
+    }
+
+    if cursor != path.len() || tokens.len() < 2 {
+        return None;
+    }
+    if !validate_v3_tokens(&tokens) {
+        return None;
+    }
+
+    Some(ParsedV3Path { tokens, fees })
+}
+
+pub fn encode_v3_path(tokens: &[Address], fees: &[u32]) -> Option<Vec<u8>> {
+    if tokens.len() < 2 || fees.len() + 1 != tokens.len() {
+        return None;
+    }
+    let mut out: Vec<u8> = Vec::with_capacity(tokens.len() * 23);
+    out.extend_from_slice(tokens[0].as_slice());
+    for (i, fee) in fees.iter().enumerate() {
+        out.extend_from_slice(&fee.to_be_bytes()[1..]);
+        out.extend_from_slice(tokens[i + 1].as_slice());
+    }
+    Some(out)
+}
+
+pub fn reverse_v3_path(tokens: &[Address], fees: &[u32]) -> Option<Vec<u8>> {
+    if tokens.len() < 2 || fees.len() + 1 != tokens.len() {
+        return None;
+    }
+    let rev_tokens: Vec<Address> = tokens.iter().rev().copied().collect();
+    let rev_fees: Vec<u32> = fees.iter().rev().copied().collect();
+    encode_v3_path(&rev_tokens, &rev_fees)
+}
+
+pub fn v3_fee_sane(fee: u32) -> bool {
+    matches!(fee, 100 | 500 | 3000 | 10_000)
+}
+
+fn validate_v3_tokens(tokens: &[Address]) -> bool {
+    let max_hops = 4;
+    tokens.len() >= 2 && tokens.len() <= max_hops
 }
 
 #[cfg(test)]
@@ -1154,92 +1238,4 @@ mod tests {
         assert_eq!(observed.amount_in, U256::from(1_000_000u64));
         assert_eq!(observed.min_out, U256::from(500_000_000_000_000u64));
     }
-}
-
-pub fn direction(observed: &ObservedSwap, wrapped_native: Address) -> SwapDirection {
-    let starts_with_native = observed.path.first().copied() == Some(wrapped_native);
-    let ends_with_native = observed.path.last().copied() == Some(wrapped_native);
-    if starts_with_native {
-        SwapDirection::BuyWithEth
-    } else if ends_with_native {
-        SwapDirection::SellForEth
-    } else {
-        SwapDirection::Other
-    }
-}
-
-pub fn parse_v3_path(path: &[u8]) -> Option<ParsedV3Path> {
-    const ADDRESS_BYTES: usize = 20;
-    const FEE_BYTES: usize = 3;
-    const HOP_BYTES: usize = ADDRESS_BYTES + FEE_BYTES;
-
-    if path.len() < ADDRESS_BYTES + HOP_BYTES {
-        return None;
-    }
-
-    let mut tokens = Vec::new();
-    let mut fees = Vec::new();
-
-    let first = path.get(..ADDRESS_BYTES)?;
-    tokens.push(Address::from_slice(first));
-
-    let mut cursor = ADDRESS_BYTES;
-    while cursor + HOP_BYTES <= path.len() {
-        let fee_bytes = path.get(cursor..cursor + FEE_BYTES)?;
-        let token_bytes = path.get(cursor + FEE_BYTES..cursor + HOP_BYTES)?;
-
-        let fee = U24::try_from_be_slice(fee_bytes).map(|v| v.to::<u32>())?;
-        if !v3_fee_sane(fee) {
-            return None;
-        }
-
-        tokens.push(Address::from_slice(token_bytes));
-        fees.push(fee);
-
-        cursor += HOP_BYTES;
-
-        if tokens.len() > 4 {
-            return None;
-        }
-    }
-
-    if cursor != path.len() || tokens.len() < 2 {
-        return None;
-    }
-    if !validate_v3_tokens(&tokens) {
-        return None;
-    }
-
-    Some(ParsedV3Path { tokens, fees })
-}
-
-pub fn encode_v3_path(tokens: &[Address], fees: &[u32]) -> Option<Vec<u8>> {
-    if tokens.len() < 2 || fees.len() + 1 != tokens.len() {
-        return None;
-    }
-    let mut out: Vec<u8> = Vec::with_capacity(tokens.len() * 23);
-    out.extend_from_slice(tokens[0].as_slice());
-    for (i, fee) in fees.iter().enumerate() {
-        out.extend_from_slice(&fee.to_be_bytes()[1..]);
-        out.extend_from_slice(tokens[i + 1].as_slice());
-    }
-    Some(out)
-}
-
-pub fn reverse_v3_path(tokens: &[Address], fees: &[u32]) -> Option<Vec<u8>> {
-    if tokens.len() < 2 || fees.len() + 1 != tokens.len() {
-        return None;
-    }
-    let rev_tokens: Vec<Address> = tokens.iter().rev().copied().collect();
-    let rev_fees: Vec<u32> = fees.iter().rev().copied().collect();
-    encode_v3_path(&rev_tokens, &rev_fees)
-}
-
-pub fn v3_fee_sane(fee: u32) -> bool {
-    matches!(fee, 100 | 500 | 3000 | 10_000)
-}
-
-fn validate_v3_tokens(tokens: &[Address]) -> bool {
-    let max_hops = 4;
-    tokens.len() >= 2 && tokens.len() <= max_hops
 }

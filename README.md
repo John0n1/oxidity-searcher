@@ -1,233 +1,257 @@
-## Oxidity Searcher
+<div align="center">
 
-***Low-latency MEV searcher that scans mempools plus Flashbots MEV-Share hints, simulates sandwich/backrun bundles, and submits to builders/relays with safety, observability, and restart resilience.***
+# Oxidity Searcher
 
+<p>
+  <strong>Mainnet-first MEV searcher for Ethereum</strong><br/>
+  Low-latency ingest, deterministic simulation, strict risk controls, and relay-aware execution.
+</p>
 
-![Codecov](https://img.shields.io/codecov/c/github/John0n1/oxidity.searcher)
-[![Rust](https://img.shields.io/badge/rust-1.94.0-orange?logo=rust&color=orange\&style=flat-square)](https://www.rust-lang.org/)
+<p>
+  <img src="https://img.shields.io/badge/Ethereum-Mainnet%20First-0B132B?style=for-the-badge&logo=ethereum&logoColor=white" alt="Mainnet First" />
+  <img src="https://img.shields.io/badge/Runtime-Rust%201.94-CC5500?style=for-the-badge&logo=rust&logoColor=white" alt="Rust" />
+  <img src="https://img.shields.io/badge/Node-Nethermind-0E7490?style=for-the-badge" alt="Nethermind" />
+</p>
 
-## Constraints
+<p>
+  <img src="https://img.shields.io/badge/Simulation-eth__simulateV1%20%7C%20debug__traceCallMany-1D4ED8?style=for-the-badge" alt="Simulation Backends" />
+  <img src="https://img.shields.io/badge/CI-fmt%20%2B%20clippy%20-D%20warnings%20%2B%20tests-14532D?style=for-the-badge" alt="CI Quality" />
+  <img src="https://img.shields.io/codecov/c/github/John0n1/oxidity.searcher?style=for-the-badge" alt="Codecov" />
+</p>
 
-- Single-operator
-- Rust
-- SQLite state
-- Optional flash-loan executor
-- Per-chain configurable
-- Designed for mainnet first
-- Compatible with EVM L2s where RPC supports required methods
+<p>
+  <a href="#quick-start">Quick Start</a> |
+  <a href="#architecture">Architecture</a> |
+  <a href="#mainnet-and-nethermind-requirements">Mainnet + Nethermind</a> |
+  <a href="#configuration">Configuration</a> |
+  <a href="#deployment-checklist">Deployment Checklist</a>
+</p>
 
----
+</div>
 
-## 2. System Architecture
+<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
 
-### Layers
+## Brand Profile
 
-- **App:** config loading, logging bootstrap, CLI overrides.
-- **Common/Domain:** constants (routers, feeds, wrapped assets), error types, retry helpers.
-- **Infrastructure:** RPC/WS/IPC providers (Alloy), gas oracle, price feeds, MEV-Share client, mempool/block ingest, reserve cache (UniV2), ABI registry, DB access.
-- **Services/Strategy:** ingest decoding, risk & safety, planning (front/backrun, flash-loan wrapping), execution engine, simulation, metrics, portfolio tracking.
+- Product: `Oxidity Searcher`
+- Mission: detect and execute profitable MEV opportunities with strict safety boundaries
+- Scope: single-operator runtime, Ethereum mainnet primary, EVM-compatible extension path
+- Stack: Rust + Tokio + Alloy + SQLite
 
-### Runtime composition (per chain)
+<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
 
-- **Providers:** IPC is used only when explicitly configured (no hardcoded fallback path); otherwise WS + HTTP path is used.
-- **Workers:** bounded ingest channel (2048), worker semaphore sized by `STRATEGY_WORKERS`.
-- **Persistence:** SQLite migrations for transactions, profit, market prices, `nonce_state`.
+## At A Glance
 
----
+| Area | Current behavior |
+| --- | --- |
+| Ingest | Pending tx stream + MEV-Share SSE with dedupe and backpressure |
+| Simulation order | `eth_simulateV1 -> debug_traceCallMany -> eth_call` |
+| Strict mainnet gate | requires `eth_simulateV1` or `debug_traceCallMany` |
+| Risk accounting | signed net PnL (`gross - gas - bribe - flashloan_premium`) |
+| Nonce safety | persisted lease model via `nonce_state` |
+| Submission | Flashbots-style multi-relay `eth_sendBundle`, `mev_sendBundle` support |
+| CI bar | format check, strict clippy, compile, tests |
 
-## 3. Data Flow
+<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
 
-- **Ingest:** WS pending tx subscription; MEV-Share SSE (with `Accept` header + `Retry-After` respect); dedup via DashSet with LRU order.
-- **Block stream:** WS `newHeads` with fallback polling; updates nonce baseline.
-- **Strategy path:** decode swap → validate router/amount/native presence → risk checks → build components → lease nonces → simulate bundle with state overrides → profit/gas guards → sign & merge → deferred send.
-- **Persistence:** transactions, profit (ETH + integer wei fields), market price snapshots; `nonce_state` for restart-safe nonces and pool conflicts.
+## Quick Start
 
----
+```bash
+METRICS_TOKEN=<token> cargo run --release
+```
 
-## 4. Key Algorithms & Math
+Health and metrics:
+- `GET /health`
+- `GET /` (bearer token required)
 
-- **UniV2 quoting:** standard 0.3% fee  
-  `amountOut = amountIn*997*Rout / (Rin*1000 + amountIn*997)`
-- **Gas costing:** profit scoring uses effective EIP-1559 paid fee (`base_fee + min(priority_fee, max_fee - base_fee)`) with a 5% drift cushion.
-- **Dynamic backrun size:** derived from victim input & slippage; capped by wallet divisors and gas buffer; minimum `0.0001 ETH`.
-- **Profit floor:** `0.01 ETH + execution costs (gas + bribe + flashloan premium)`; gas ratio guard scales with signed PnL and balance.
-- **Flash-loan path:** Balancer-style callback via `UnifiedHardenedExecutor`; approvals are scoped and zeroed post-loop.
+<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
 
----
+## Architecture
 
-## 5. Safety & Risk Controls
+### Layer map
 
-- Circuit breaker after consecutive failures with auto-reset window.
-- Nonce leasing + persistence prevents reuse across restarts; pool-level conflict detection in bundle merge.
-- Receipt handling is tri-state (`ConfirmedSuccess`, `ConfirmedRevert`, `UnknownTimeout`) with configurable poll/timeout/confirmation depth.
-- Emergency inventory exit is triggered only on confirmed revert (or explicit invariant failures), not on relay/network receipt uncertainty by default.
-- Toxic token detection: simulation probes for V2/V3 sells; marks tokens to skip.
-- Approval hygiene: flash-loan callbacks include approve→reset; non-flash runs keep approvals scoped to router; optional future tightening suggested.
-- Gas cap per chain; runtime hard floor defaults to `500 gwei` to prevent uncapped bidding on volatile blocks.
+| Layer | Responsibility |
+| --- | --- |
+| App | config loading, logging bootstrap, CLI overrides |
+| Common/Domain | constants, errors, retry helpers |
+| Infrastructure | providers, gas oracle, price feed, ingest, reserve cache, DB |
+| Services/Strategy | decode, risk, planning, simulation, execution, metrics, portfolio |
 
----
+### Runtime composition per chain
 
-## 6. Connectivity & Fallbacks
+| Component | Notes |
+| --- | --- |
+| Providers | IPC is used only when explicitly configured; otherwise WS + HTTP |
+| Queue | bounded ingest queue (`2048`) with drop/backpressure accounting |
+| Workers | semaphore controlled by `STRATEGY_WORKERS` |
+| Persistence | SQLite migrations + restart-safe nonce state |
 
-- **GasOracle:** `feeHistory` primary; fallback to Etherscan gasoracle when RPC blocks; last-resort node basefee + `maxPriorityFeePerGas`.
-- **PriceFeed:** Chainlink preferred, then Etherscan ethprice (ETH only), then Binance ticker; stale-cache grace on failures; Chainlink staleness flagged.
-- **RPC capability probing:** startup probes `eth_feeHistory`, `eth_simulateV1`, `debug_traceCall`, `debug_traceCallMany`; on mainnet strict mode requires `eth_simulateV1` or `debug_traceCallMany`.
-- **Providers:** explicit IPC/WS/HTTP configuration with mempool filter polling when pending subscription fails.
-- **MEV-Share:** SSE client with seen-set, history backfill, rate-aware reconnect.
+```mermaid
+flowchart LR
+  A[Pending tx ingest] --> D[Strategy queue]
+  B[MEV-Share SSE ingest] --> D
+  C[newHeads stream] --> E[Block + nonce context]
+  D --> F[Decode + validation]
+  F --> G[Risk guards]
+  G --> H[Bundle planning]
+  H --> I[Nonce lease + overrides]
+  I --> J[Simulation]
+  J --> K[Profit/gas checks]
+  K --> L[Relay submission]
+  K --> M[(SQLite)]
+  L --> M
+```
 
----
+<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
 
-## 7. Strategy Construction
+## Mainnet And Nethermind Requirements
 
-- **Sandwich (optional):** front-run for buy-with-ETH paths; amount sizing uses dynamic backrun value; optional approval.
-- **Backrun:** V2/V3 aware; can wrap in executor or flash-loan; supports unwrap-to-native when profitable and token-denominated settlement when enabled.
-- **Executor wrapper:** bundles approvals + swap + optional unwrap + bribe; bribe bps configurable/recipient override.
-- **Bundle merge:** nonces within lease, touched pools disjoint, debounce send; mempool path can merge multi-leg bundles, while MEV-Share path is constrained to one victim hash + one backrun tx.
+### Strict capability checks
 
----
+| RPC capability | Requirement |
+| --- | --- |
+| `eth_feeHistory` | required |
+| `eth_simulateV1` | required unless `debug_traceCallMany` is available |
+| `debug_traceCallMany` | required unless `eth_simulateV1` is available |
+| `debug_traceCall` | supplementary single-tx diagnostic path |
 
-## 8. Simulation
+### Nethermind operating profile
 
-- Mainnet simulation backend order: `eth_simulateV1 -> debug_traceCallMany -> eth_call` (`debug_traceCall` remains a single-tx fallback probe/path).
-- Unavailable-method detection handles both "method not found" and "namespace disabled" patterns and caches capability state.
-- Uses Alloy simulate bundle with state overrides locking balance/nonce, with deterministic fallback behavior.
-- Decodes executor custom errors for diagnostics.
+- Enable modules: `Eth`, `Subscribe`, `TxPool`, `Trace`, `Debug`, `Net`, `Web3`, `Rpc`, `Admin`
+- Enable traces: `TraceStore.Enabled = true`
+- Prefer local IPC/WS endpoints for latency-sensitive paths
+- Tune burst behavior: `JsonRpc.EthModuleConcurrentInstances`, `JsonRpc.RequestQueueLimit`, `JsonRpc.Timeout`
 
----
+<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
 
-## 9. Persistence & Accounting
+## Safety And Risk Controls
 
-- **Tables:** `transactions`, `profit_records` (float + wei text), `market_prices`, `nonce_state`, `router_discovery`.
-- `profit_records` stores explicit cost components: `bribe_wei`, `flashloan_premium_wei`, `effective_cost_wei` (in addition to existing columns).
-- Net PnL formula is aligned across strategy logs, DB, and portfolio state: `net = gross - gas - bribe - flashloan_premium`.
-- PnL tracked as signed wei in `PortfolioManager` (negative outcomes preserved); token profits map.
+| Control | Purpose |
+| --- | --- |
+| Circuit breaker | halts after failure streak, auto-resets on window |
+| Signed PnL | preserves losses for correct risk gating |
+| Nonce leasing | prevents nonce reuse and restart races |
+| Pool conflict checks | blocks conflicting merged bundles |
+| Toxic token probes | avoids unreliable sell paths |
+| Receipt tri-state | handles unknown relay outcomes safely |
+| Gas cap floors | prevents uncapped bidding behavior |
 
----
+<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
 
-## 10. Metrics & Observability
+## Simulation And Execution
 
-- TCP mini-server with bearer auth; Prometheus-style text metrics endpoint.
-- Counters for ingest, skips, nonce persistence, sim latency (by source), queue backpressure.
-- Per-relay submission outcomes exported (`attempts/successes/failures/timeouts/retries`).
-- Bundle history ring buffer.
+### Core rules
 
----
+- UniV2 quote: `amountOut = amountIn*997*Rout / (Rin*1000 + amountIn*997)`
+- Effective gas fee modeling follows EIP-1559 paid cost semantics
+- Profit floor includes full execution cost components
+- Flash-loan path supports callback-driven execution with approval hygiene
 
-## 11. Configuration
+### Relay behavior
 
-- `config.toml` / `.dev`: wallet/bundle signer, routers per chain, Chainlink feeds, RPC/WS/IPC maps, slippage/gas caps (set to `0` for auto/unbounded behavior where applicable), flash-loan toggle, sandwich toggle, MEV-Share enable/URL/history limit/builders, metrics bind/token, executor address/bribe, and `address_registry_path`.
-- New runtime safety/config fields:
-  - `receipt_poll_ms` (default `500`)
-  - `receipt_timeout_ms` (default `12000`)
-  - `receipt_confirm_blocks` (default `4`)
-  - `emergency_exit_on_unknown_receipt` (default `false`)
-  - `profit_guard_base_floor_multiplier_bps` (default `7000`)
-  - `profit_guard_cost_multiplier_bps` (default `10000`)
-  - `profit_guard_min_margin_bps` (default `700`)
-  - `liquidity_ratio_floor_ppm` (default `700`)
-  - `sell_min_native_out_wei` (default `3000000000000`)
-  - `rpc_capability_strict` (default enabled for chain `1`)
-  - `chainlink_feed_conflict_strict` (default enabled for chain `1`; rejects ambiguous duplicate feeds)
-  - `bundle_use_replacement_uuid` (default enabled for chain `1`)
-  - `bundle_cancel_previous` (default disabled; optional `eth_cancelBundle` before replacement send)
-  - `mevshare_builders` (default `["flashbots","beaverbuild.org","rsync","Titan"]`)
-- Env overrides:
-  - `ETHERSCAN_API_KEY`
-  - `RPC_URL_n` / `WS_URL_n`
-  - `IPC_URL_n` / `IPC_PATH_n`
-  - `CHAINLINK_FEEDS_PATH`
-  - `TOKENLIST_PATH`
-  - `STRATEGY_WORKERS`
-  - `METRICS_*`
+| Path | Behavior |
+| --- | --- |
+| Mainnet | sends to configured relays/builders, per-relay statuses tracked |
+| Replacement | `replacementUuid` supported by default in mainnet mode |
+| Cancellation | optional `eth_cancelBundle` before replacement |
+| MEV-Share | enforces one victim hash + one backrun tx shape |
+| Non-mainnet | falls back to `eth_sendRawTransaction` |
 
----
+<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
 
-## 12. Operational Runbook
+## Persistence And Accounting
 
-- **Start:** `oxidity_builder.db METRICS_TOKEN=… cargo run --release`.
-- **Monitor:** metrics endpoint `/` (bearer); watch `nonce_state` counters and ingest queue depth.
-- **Health:** metrics endpoint `/health` returns liveness + chain id for control-plane integrations.
-- **Restart safety:** `nonce_state` persists `next_nonce`/`touched_pools` per block; engine reloads on boot.
-- **Backpressure:** ingest queue bounded; drops counted; adjust `STRATEGY_WORKERS` and RPC rate limits accordingly.
+### Core tables
 
----
+| Table | Purpose |
+| --- | --- |
+| `transactions` | transaction lifecycle records |
+| `profit_records` | gross/net plus cost components |
+| `market_prices` | sampled price context |
+| `nonce_state` | restart-safe nonce baseline and touched pools |
+| `router_discovery` | discovered/approved router metadata |
 
-## 13. Builder/Relay Submission
+### Net PnL equation
 
-- **Mainnet:** `eth_sendBundle` is attempted against all configured relays/builders; success means at least one relay accepts (per-relay timeout/retry tracked in metrics). `replacementUuid` is attached by default; optional `eth_cancelBundle` can clear previous relay-side replacements before new submission.
-- **MEV-Share:** uses `mev_sendBundle` with exactly one victim hash + one backrun tx, and validates/normalizes builder names against canonical registration.
-- **Non-mainnet:** direct `eth_sendRawTransaction` per tx.
-- **Limits:** Flashbots bundle limits enforced at `<=100` txs and `<=300000` bytes.
+`net = gross - gas - bribe - flashloan_premium`
 
----
+This equation is consistent across strategy logic, DB writes, and portfolio tracking.
+
+<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
+
+## Configuration
+
+### Core config domains
+
+- wallet and bundle signer keys
+- chain router/feed maps
+- RPC/WS/IPC URLs
+- slippage and gas guard controls
+- flash-loan and sandwich toggles
+- MEV-Share relays/builders and history settings
+- metrics bind and token
+
+### Important runtime safety fields
+
+| Field | Default |
+| --- | --- |
+| `receipt_poll_ms` | `500` |
+| `receipt_timeout_ms` | `12000` |
+| `receipt_confirm_blocks` | `4` |
+| `emergency_exit_on_unknown_receipt` | `false` |
+| `rpc_capability_strict` | enabled on chain `1` |
+| `chainlink_feed_conflict_strict` | enabled on chain `1` |
+| `bundle_use_replacement_uuid` | enabled on chain `1` |
+| `bundle_cancel_previous` | `false` |
+
+### Environment overrides
+
+- `ETHERSCAN_API_KEY`
+- `RPC_URL_n`, `WS_URL_n`
+- `IPC_URL_n`, `IPC_PATH_n`
+- `CHAINLINK_FEEDS_PATH`, `TOKENLIST_PATH`
+- `STRATEGY_WORKERS`
+- `METRICS_*`
+
+<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
+
+## Testing And CI
+
+### CI gates
+
+- `cargo fmt --all -- --check`
+- `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
+- `cargo check --workspace --all-targets --locked`
+- `cargo test --workspace --locked`
+
+### Test coverage highlights
+
+- config and strict-gating behavior
+- decode and routing correctness
+- nonce lease behavior
+- signed PnL and risk guard expectations
+- simulation backend and error handling
+- MEV-Share path integrity
+
+<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
+
+## Deployment Checklist
+
+- [ ] Set `WALLET_KEY`, `BUNDLE_SIGNER_KEY`, `METRICS_TOKEN`, and RPC URLs via environment.
+- [ ] Confirm node supports strict simulation gate (`eth_simulateV1` or `debug_traceCallMany`).
+- [ ] Verify router/feed configuration for each chain.
+- [ ] Validate executor/profit receiver settings.
+- [ ] Fund wallet or enable flash-loan path with deployed executor.
+- [ ] Restrict metrics endpoint exposure (loopback/TLS/ACL).
+
+<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
 
 ## Windows Installer (Preview)
 
-- Build installer: `.\scripts\build-installer.ps1`
-- Installer script: `installer/oxidity_installer.iss`
-- Setup wizard writes `{app}\config.prod.toml` with required runtime fields.
+- Build: `./scripts/build-installer.ps1`
+- Installer definition: `installer/oxidity_installer.iss`
+- Setup writes `{app}\\config.prod.toml`
 
----
+<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
 
-## 14. Extensibility
-
-- Add new routers/feeds via constants or config maps.
-- ABI registry supports directory load; future: remote ABI fetch via Etherscan `getabi`.
-- Token metadata via tokenlist; empty defaults allowed.
-
----
-
-## 15. Security Considerations
-
-- Secrets must not live in tracked configs; use env for keys.
-- Keep metrics bind to loopback or front with TLS/ACL.
-- Validate executor address and flash-loan permissions before mainnet.
-- Rate-limit external APIs; honor `Retry-After` (already implemented for MEV-Share).
-
----
-
-## 16. Performance Notes
-
-- IPC yields lowest latency; WS fallback; retry with exponential backoff for `feeHistory` and simulations.
-- V3 quote cache TTL 250 ms to avoid repeated quoter calls; reserve cache for V2 keeps last `Sync` log state and does on-demand pair lookups bounded by semaphore.
-
----
-
-## 17. Testing
-
-- Unit tests cover retry, config parsing, nonce leasing, fee math, decoding, simulation guards, flash-loan encoding, MEV-Share pipeline.
-- Integration-ish:
-  - `flashloan_build`
-  - `mev_share_pipeline`
-  - `pipeline_mev_share_v3` (ignored; requires live dev node)
-
----
-
-## 18. Roadmap (Short)
-
-- Postgres optional backend for HA + shared state across instances.
-- Adaptive MEV-Share builder list and relay health probing.
-- Structured logging to disk + OpenTelemetry export.
-- Sandbox approvals tightening for non-executor paths.
-- Multi-chain orchestration with per-chain gas/price providers and Etherscan-equivalent (Snowtrace, Arbscan) abstraction.
-- Risk module to include slippage/volatility from on-chain TWAPs and per-router reputation.
-
----
-
-## 19. Deployment Checklist
-
-- Set `ETHERSCAN_API_KEY`, `FLASHBOTS_RELAY_URL` (if custom), executor address, profit receiver, metrics token, and router allowlist for each chain.
-- Ensure node supports `eth_feeHistory`, and for strict mainnet mode at least one of `eth_simulateV1` or `debug_traceCallMany`.
-- Fund wallet (~0.1–0.5 ETH recommended) or enable flash-loan path with deployed executor.
-- Verify tokenlist path or accept empty list (decimals default to 18).
-
----
-
-Updated: **February 10, 2026**
-
-### Mainnet operator notes (Nethermind + relays)
-- Enable Nethermind modules: `JsonRpc.EnabledModules = ["Eth","Subscribe","TxPool","Trace","Debug","Net","Web3","Rpc","Admin"]`, `TraceStore.Enabled = true`, and expose IPC/WS locally for low-latency simulate/trace.
-- Tune Nethermind RPC for bursty searcher load: increase `JsonRpc.EthModuleConcurrentInstances`, `JsonRpc.RequestQueueLimit`, and `JsonRpc.Timeout` from defaults to avoid queue drops/timeouts under mempool spikes.
-- Ensure `Trace`/`Debug` are enabled on the exact RPC endpoint used for simulation and diagnostics.
-- For mainnet bundle submission configure builders: Flashbots (`https://relay.flashbots.net`), Beaver, Titan, Ultrasound, Agnostic (builder0x69), bloXroute ethical. All use Flashbots-style signed headers.
-- Always provide `WALLET_KEY`, `BUNDLE_SIGNER_KEY`, `METRICS_TOKEN`, and RPC URLs via environment; repo configs are placeholders only.
+Updated: **February 13, 2026**

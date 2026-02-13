@@ -7,25 +7,25 @@ use alloy::primitives::{Address, B256, Bytes, U256};
 use alloy::signers::local::PrivateKeySigner;
 use alloy_sol_types::SolCall;
 use dashmap::DashSet;
-use oxidity_builder::common::constants::{
+use oxidity_searcher::common::constants::{
     CHAIN_ETHEREUM, default_uniswap_v2_router, wrapped_native_for_chain,
 };
-use oxidity_builder::core::executor::BundleSender;
-use oxidity_builder::core::portfolio::PortfolioManager;
-use oxidity_builder::core::safety::SafetyGuard;
-use oxidity_builder::core::simulation::{SimulationBackend, Simulator};
-use oxidity_builder::core::strategy::{FlashloanProvider, StrategyExecutor, StrategyWork};
-use oxidity_builder::data::db::Database;
-use oxidity_builder::infrastructure::data::token_manager::TokenManager;
-use oxidity_builder::network::gas::GasOracle;
-use oxidity_builder::network::mev_share::MevShareHint;
-use oxidity_builder::network::nonce::NonceManager;
-use oxidity_builder::network::price_feed::{PriceApiKeys, PriceFeed};
-use oxidity_builder::network::provider::HttpProvider;
-use oxidity_builder::network::reserves::ReserveCache;
-use oxidity_builder::services::strategy::execution::work_queue::WorkQueue;
-use oxidity_builder::services::strategy::routers::UniV2Router;
-use oxidity_builder::services::strategy::strategy::StrategyStats as Stats;
+use oxidity_searcher::core::executor::BundleSender;
+use oxidity_searcher::core::portfolio::PortfolioManager;
+use oxidity_searcher::core::safety::SafetyGuard;
+use oxidity_searcher::core::simulation::{SimulationBackend, Simulator};
+use oxidity_searcher::core::strategy::{FlashloanProvider, StrategyExecutor, StrategyWork};
+use oxidity_searcher::data::db::Database;
+use oxidity_searcher::infrastructure::data::token_manager::TokenManager;
+use oxidity_searcher::network::gas::GasOracle;
+use oxidity_searcher::network::mev_share::MevShareHint;
+use oxidity_searcher::network::nonce::NonceManager;
+use oxidity_searcher::network::price_feed::{PriceApiKeys, PriceFeed};
+use oxidity_searcher::network::provider::HttpProvider;
+use oxidity_searcher::network::reserves::ReserveCache;
+use oxidity_searcher::services::strategy::execution::work_queue::WorkQueue;
+use oxidity_searcher::services::strategy::routers::UniV2Router;
+use oxidity_searcher::services::strategy::strategy::StrategyStats as Stats;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use url::Url;
@@ -147,7 +147,7 @@ async fn mev_share_hint_round_trip() {
     // increments processed/skip counters appropriately.
     let exec = Arc::new(exec);
     exec.process_work(StrategyWork::MevShareHint {
-        hint,
+        hint: Box::new(hint),
         received_at: std::time::Instant::now(),
     })
     .await;

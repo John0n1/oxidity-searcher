@@ -314,10 +314,10 @@ impl GlobalSettings {
         let mut settings: GlobalSettings = builder.build()?.try_deserialize()?;
 
         // Allow CHAINS env to be comma/space separated string (e.g. "1,137")
-        if active_config.is_none() {
-            if let Ok(chains_str) = std::env::var("CHAINS") {
-                settings.chains = parse_chain_list(&chains_str)?;
-            }
+        if active_config.is_none()
+            && let Ok(chains_str) = std::env::var("CHAINS")
+        {
+            settings.chains = parse_chain_list(&chains_str)?;
         }
 
         // Basic Validation
@@ -353,10 +353,10 @@ impl GlobalSettings {
     /// Helper to get RPC URL for a specific chain
     pub fn get_rpc_url(&self, chain_id: u64) -> Result<String, AppError> {
         // Try looking for explicit map
-        if let Some(urls) = &self.rpc_urls {
-            if let Some(url) = urls.get(&chain_id.to_string()) {
-                return Ok(url.clone());
-            }
+        if let Some(urls) = &self.rpc_urls
+            && let Some(url) = urls.get(&chain_id.to_string())
+        {
+            return Ok(url.clone());
         }
 
         // Fallback to env var convention: RPC_URL_1, RPC_URL_137, then generic RPC_URL
@@ -378,10 +378,10 @@ impl GlobalSettings {
 
     /// Helper to get WS URL for a specific chain
     pub fn get_ws_url(&self, chain_id: u64) -> Result<String, AppError> {
-        if let Some(urls) = &self.ws_urls {
-            if let Some(url) = urls.get(&chain_id.to_string()) {
-                return Ok(url.clone());
-            }
+        if let Some(urls) = &self.ws_urls
+            && let Some(url) = urls.get(&chain_id.to_string())
+        {
+            return Ok(url.clone());
         }
 
         let candidates = [
@@ -408,10 +408,10 @@ impl GlobalSettings {
 
     /// Optional IPC URL for a specific chain, preferring explicit config and then env.
     pub fn get_ipc_url(&self, chain_id: u64) -> Option<String> {
-        if let Some(urls) = &self.ipc_urls {
-            if let Some(url) = urls.get(&chain_id.to_string()) {
-                return Some(url.clone());
-            }
+        if let Some(urls) = &self.ipc_urls
+            && let Some(url) = urls.get(&chain_id.to_string())
+        {
+            return Some(url.clone());
         }
 
         let candidates = [
@@ -422,10 +422,10 @@ impl GlobalSettings {
         ];
 
         for key in candidates {
-            if let Ok(v) = std::env::var(&key) {
-                if !v.trim().is_empty() {
-                    return Some(v);
-                }
+            if let Ok(v) = std::env::var(&key)
+                && !v.trim().is_empty()
+            {
+                return Some(v);
             }
         }
 
@@ -460,7 +460,7 @@ impl GlobalSettings {
         std::env::var("DATABASE_URL")
             .ok()
             .or_else(|| self.database_url.clone())
-            .unwrap_or_else(|| "sqlite://oxidity_builder.db".to_string())
+            .unwrap_or_else(|| "sqlite://oxidity_searcher.db".to_string())
     }
 
     pub fn flashbots_relay_url(&self) -> String {
@@ -482,37 +482,37 @@ impl GlobalSettings {
     }
 
     pub fn strategy_worker_limit(&self) -> usize {
-        if let Ok(v) = std::env::var("STRATEGY_WORKERS") {
-            if let Ok(parsed) = v.parse::<usize>() {
-                return parsed.max(1);
-            }
+        if let Ok(v) = std::env::var("STRATEGY_WORKERS")
+            && let Ok(parsed) = v.parse::<usize>()
+        {
+            return parsed.max(1);
         }
         self.strategy_workers.unwrap_or(32).max(1)
     }
 
     pub fn metrics_bind_value(&self) -> Option<String> {
-        if let Ok(v) = std::env::var("METRICS_BIND") {
-            if !v.trim().is_empty() {
-                return Some(v);
-            }
+        if let Ok(v) = std::env::var("METRICS_BIND")
+            && !v.trim().is_empty()
+        {
+            return Some(v);
         }
         self.metrics_bind.clone()
     }
 
     pub fn metrics_token_value(&self) -> Option<String> {
-        if let Ok(v) = std::env::var("METRICS_TOKEN") {
-            if !v.trim().is_empty() {
-                return Some(v);
-            }
+        if let Ok(v) = std::env::var("METRICS_TOKEN")
+            && !v.trim().is_empty()
+        {
+            return Some(v);
         }
         self.metrics_token.clone()
     }
 
     pub fn etherscan_api_key_value(&self) -> Option<String> {
-        if let Ok(v) = std::env::var("ETHERSCAN_API_KEY") {
-            if !v.trim().is_empty() {
-                return Some(v);
-            }
+        if let Ok(v) = std::env::var("ETHERSCAN_API_KEY")
+            && !v.trim().is_empty()
+        {
+            return Some(v);
         }
         self.etherscan_api_key.clone()
     }
@@ -604,10 +604,9 @@ impl GlobalSettings {
             .aave_pools_by_chain
             .as_ref()
             .and_then(|m| m.get(&chain_id.to_string()))
+            && let Ok(addr) = Address::from_str(map)
         {
-            if let Ok(addr) = Address::from_str(map) {
-                return Some(addr);
-            }
+            return Some(addr);
         }
         constants::default_aave_pool(chain_id)
     }
@@ -637,22 +636,20 @@ impl GlobalSettings {
             }
         }
 
-        if out.is_empty() {
-            if let Some(map) = &self.chainlink_feeds {
-                out.extend(parse_address_map(map, "chainlink_feeds")?);
-            }
+        if out.is_empty()
+            && let Some(map) = &self.chainlink_feeds
+        {
+            out.extend(parse_address_map(map, "chainlink_feeds")?);
         }
 
-        if out.is_empty() {
-            if let Some(map) =
-                load_chainlink_feeds_from_file(
-                    &self.chainlink_feeds_path(),
-                    chain_id,
-                    self.chainlink_feed_conflict_strict_for_chain(chain_id),
-                )?
-            {
-                out.extend(map);
-            }
+        if out.is_empty()
+            && let Some(map) = load_chainlink_feeds_from_file(
+                &self.chainlink_feeds_path(),
+                chain_id,
+                self.chainlink_feed_conflict_strict_for_chain(chain_id),
+            )?
+        {
+            out.extend(map);
         }
 
         if out.is_empty() {
@@ -670,15 +667,15 @@ impl GlobalSettings {
     }
 
     pub fn mev_share_relay_url(&self) -> String {
-        if let Ok(v) = std::env::var("MEV_SHARE_RELAY_URL") {
-            if !v.trim().is_empty() {
-                return v;
-            }
+        if let Ok(v) = std::env::var("MEV_SHARE_RELAY_URL")
+            && !v.trim().is_empty()
+        {
+            return v;
         }
-        if let Some(v) = &self.mev_share_relay_url {
-            if !v.trim().is_empty() {
-                return v.clone();
-            }
+        if let Some(v) = &self.mev_share_relay_url
+            && !v.trim().is_empty()
+        {
+            return v.clone();
         }
         if let Ok(mut parsed) = Url::parse(&self.mev_share_stream_url) {
             parsed.set_path("");
@@ -789,12 +786,12 @@ fn detect_active_config_file() -> Option<String> {
     if let Ok(entries) = fs::read_dir(".") {
         for entry in entries.flatten() {
             let path = entry.path();
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with("config.") && name.ends_with(".toml") {
-                    if let Some(true) = config_has_active_flag(name) {
-                        return Some(name.to_string());
-                    }
-                }
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && name.starts_with("config.")
+                && name.ends_with(".toml")
+                && let Some(true) = config_has_active_flag(name)
+            {
+                return Some(name.to_string());
             }
         }
     }
@@ -1174,10 +1171,8 @@ mod tests {
 
     #[test]
     fn chainlink_loader_prefers_canonical_on_equal_priority_quotes() {
-        let tmp = std::env::temp_dir().join(format!(
-            "chainlink-feeds-test-{}.json",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("chainlink-feeds-test-{}.json", std::process::id()));
         let body = r#"
 [
   {"base":"ETH","quote":"USD","chainId":1,"address":"0x5147eA642CAEF7BD9c1265AadcA78f997AbB9649"},
@@ -1186,13 +1181,9 @@ mod tests {
 "#;
         std::fs::write(&tmp, body).expect("write temp chainlink file");
 
-        let selected = load_chainlink_feeds_from_file(
-            tmp.to_str().expect("utf8 path"),
-            1,
-            false,
-        )
-        .expect("loader result")
-        .expect("selected feeds");
+        let selected = load_chainlink_feeds_from_file(tmp.to_str().expect("utf8 path"), 1, false)
+            .expect("loader result")
+            .expect("selected feeds");
 
         std::fs::remove_file(&tmp).ok();
 
@@ -1217,17 +1208,11 @@ mod tests {
 "#;
         std::fs::write(&tmp, body).expect("write temp chainlink file");
 
-        let err = load_chainlink_feeds_from_file(
-            tmp.to_str().expect("utf8 path"),
-            1,
-            true,
-        )
-        .expect_err("strict conflict mode should fail");
+        let err = load_chainlink_feeds_from_file(tmp.to_str().expect("utf8 path"), 1, true)
+            .expect_err("strict conflict mode should fail");
 
         std::fs::remove_file(&tmp).ok();
 
-        assert!(
-            matches!(err, AppError::Config(msg) if msg.contains("conflicting duplicate"))
-        );
+        assert!(matches!(err, AppError::Config(msg) if msg.contains("conflicting duplicate")));
     }
 }

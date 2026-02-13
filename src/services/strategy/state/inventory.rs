@@ -168,7 +168,7 @@ impl StrategyExecutor {
                 .await?;
             if let Err(e) = self
                 .bundle_sender
-                .send_bundle(&[approval.raw.clone()], self.chain_id)
+                .send_bundle(std::slice::from_ref(&approval.raw), self.chain_id)
                 .await
             {
                 tracing::warn!(
@@ -213,7 +213,7 @@ impl StrategyExecutor {
         let (raw, _, _) = self.sign_with_access_list(request, access_list).await?;
         if let Err(e) = self
             .bundle_sender
-            .send_bundle(&[raw.clone()], self.chain_id)
+            .send_bundle(std::slice::from_ref(&raw), self.chain_id)
             .await
         {
             tracing::warn!(

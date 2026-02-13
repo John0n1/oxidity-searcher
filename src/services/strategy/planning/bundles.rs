@@ -7,7 +7,7 @@ use alloy::consensus::{SignableTransaction, TxEip1559};
 use alloy::eips::eip2718::Encodable2718;
 use alloy::eips::eip2930::{AccessList, AccessListItem};
 use alloy::network::TxSignerSync;
-use alloy::primitives::{Address, B256, Bytes, TxKind, U256};
+use alloy::primitives::{Address, B256, TxKind, U256};
 use alloy::providers::Provider;
 use alloy::rpc::types::eth::TransactionInput;
 use alloy::rpc::types::eth::TransactionRequest;
@@ -60,74 +60,6 @@ pub struct BundleState {
     pub raw: Vec<Vec<u8>>,
     pub touched_pools: HashSet<Address>,
     pub send_pending: bool,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::services::strategy::execution::strategy::dummy_executor_for_tests;
-    use alloy::primitives::address;
-
-    #[tokio::test]
-    async fn approvals_precede_front_run_and_victim() {
-        let exec = dummy_executor_for_tests().await;
-
-        let lease = NonceLease {
-            block: 1,
-            base: 10,
-            count: 4,
-        };
-        let approval_req = TransactionRequest {
-            to: Some(TxKind::Call(address!(
-                "1111111111111111111111111111111111111111"
-            ))),
-            nonce: Some(10),
-            gas: Some(21_000),
-            max_fee_per_gas: Some(1),
-            max_priority_fee_per_gas: Some(1),
-            ..Default::default()
-        };
-        let front_req = TransactionRequest {
-            to: Some(TxKind::Call(address!(
-                "2222222222222222222222222222222222222222"
-            ))),
-            nonce: Some(11),
-            gas: Some(21_000),
-            max_fee_per_gas: Some(1),
-            max_priority_fee_per_gas: Some(1),
-            ..Default::default()
-        };
-        let victim = vec![0u8; 1];
-        let main_req = TransactionRequest {
-            to: Some(TxKind::Call(address!(
-                "3333333333333333333333333333333333333333"
-            ))),
-            nonce: Some(12),
-            gas: Some(21_000),
-            max_fee_per_gas: Some(1),
-            max_priority_fee_per_gas: Some(1),
-            ..Default::default()
-        };
-
-        let plan = BundlePlan {
-            front_run: Some(front_req),
-            approvals: vec![approval_req],
-            main: main_req,
-            victims: vec![victim],
-        };
-
-        let merge = exec.merge_and_send_bundle(plan, Vec::new(), lease).await;
-        let hashes = match merge {
-            Ok(Some(h)) => h,
-            Ok(None) => return,                     // nothing merged
-            Err(AppError::Connection(_)) => return, // skip when no local RPC
-            Err(e) => panic!("merge failed: {e}"),
-        };
-
-        // Approval hash should be present, and front_run should not be None, proving ordering worked.
-        assert_eq!(hashes.approvals.len(), 1);
-        assert!(hashes.front_run.is_some());
-    }
 }
 
 impl StrategyExecutor {
@@ -214,12 +146,7 @@ impl StrategyExecutor {
             .nonce
             .ok_or_else(|| AppError::Strategy("Missing nonce in tx request".into()))?;
         let chain_id = request.chain_id.unwrap_or(self.chain_id);
-        let input_bytes = request
-            .input
-            .clone()
-            .into_input()
-            .map(Bytes::from)
-            .unwrap_or_default();
+        let input_bytes = request.input.clone().into_input().unwrap_or_default();
 
         let mut tx = TxEip1559 {
             chain_id,
@@ -587,5 +514,73 @@ impl StrategyExecutor {
             base: start,
             count,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::strategy::execution::strategy::dummy_executor_for_tests;
+    use alloy::primitives::address;
+
+    #[tokio::test]
+    async fn approvals_precede_front_run_and_victim() {
+        let exec = dummy_executor_for_tests().await;
+
+        let lease = NonceLease {
+            block: 1,
+            base: 10,
+            count: 4,
+        };
+        let approval_req = TransactionRequest {
+            to: Some(TxKind::Call(address!(
+                "1111111111111111111111111111111111111111"
+            ))),
+            nonce: Some(10),
+            gas: Some(21_000),
+            max_fee_per_gas: Some(1),
+            max_priority_fee_per_gas: Some(1),
+            ..Default::default()
+        };
+        let front_req = TransactionRequest {
+            to: Some(TxKind::Call(address!(
+                "2222222222222222222222222222222222222222"
+            ))),
+            nonce: Some(11),
+            gas: Some(21_000),
+            max_fee_per_gas: Some(1),
+            max_priority_fee_per_gas: Some(1),
+            ..Default::default()
+        };
+        let victim = vec![0u8; 1];
+        let main_req = TransactionRequest {
+            to: Some(TxKind::Call(address!(
+                "3333333333333333333333333333333333333333"
+            ))),
+            nonce: Some(12),
+            gas: Some(21_000),
+            max_fee_per_gas: Some(1),
+            max_priority_fee_per_gas: Some(1),
+            ..Default::default()
+        };
+
+        let plan = BundlePlan {
+            front_run: Some(front_req),
+            approvals: vec![approval_req],
+            main: main_req,
+            victims: vec![victim],
+        };
+
+        let merge = exec.merge_and_send_bundle(plan, Vec::new(), lease).await;
+        let hashes = match merge {
+            Ok(Some(h)) => h,
+            Ok(None) => return,                     // nothing merged
+            Err(AppError::Connection(_)) => return, // skip when no local RPC
+            Err(e) => panic!("merge failed: {e}"),
+        };
+
+        // Approval hash should be present, and front_run should not be None, proving ordering worked.
+        assert_eq!(hashes.approvals.len(), 1);
+        assert!(hashes.front_run.is_some());
     }
 }

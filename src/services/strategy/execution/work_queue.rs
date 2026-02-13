@@ -68,7 +68,7 @@ mod tests {
 
     fn hint_work(marker: u8) -> StrategyWork {
         StrategyWork::MevShareHint {
-            hint: MevShareHint {
+            hint: Box::new(MevShareHint {
                 tx_hash: B256::from([marker; 32]),
                 router: Address::from([marker; 20]),
                 from: None,
@@ -77,7 +77,7 @@ mod tests {
                 gas_limit: None,
                 max_fee_per_gas: None,
                 max_priority_fee_per_gas: None,
-            },
+            }),
             received_at: std::time::Instant::now(),
         }
     }

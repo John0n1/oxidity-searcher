@@ -248,12 +248,12 @@ impl StrategyExecutor {
         let contract = CurvePoolSwap::new(pool, self.http_provider.clone());
         if use_underlying {
             contract
-                .exchange_underlying(i.into(), j.into(), amount_in, min_out)
+                .exchange_underlying(i, j, amount_in, min_out)
                 .calldata()
                 .to_vec()
         } else {
             contract
-                .exchange(i.into(), j.into(), amount_in, min_out)
+                .exchange(i, j, amount_in, min_out)
                 .calldata()
                 .to_vec()
         }
@@ -594,42 +594,40 @@ impl StrategyExecutor {
             if self
                 .flashloan_providers
                 .contains(&FlashloanProvider::Balancer)
+                && let Some(vault) = default_balancer_vault_for_chain(self.chain_id)
             {
-                if let Some(vault) = default_balancer_vault_for_chain(self.chain_id) {
-                    graph.add_edge(QuoteEdge {
-                        venue: RouteVenue::BalancerFlash,
-                        pool: vault,
-                        token_in,
-                        token_out: token_in,
-                        amount_in,
-                        expected_out: amount_in,
-                        min_out: amount_in,
-                        gas_overhead: BALANCER_FLASHLOAN_OVERHEAD_GAS,
-                        fee: None,
-                        params: None,
-                        is_flash: true,
-                    });
-                }
+                graph.add_edge(QuoteEdge {
+                    venue: RouteVenue::BalancerFlash,
+                    pool: vault,
+                    token_in,
+                    token_out: token_in,
+                    amount_in,
+                    expected_out: amount_in,
+                    min_out: amount_in,
+                    gas_overhead: BALANCER_FLASHLOAN_OVERHEAD_GAS,
+                    fee: None,
+                    params: None,
+                    is_flash: true,
+                });
             }
             if self
                 .flashloan_providers
                 .contains(&FlashloanProvider::AaveV3)
+                && let Some(pool) = self.aave_pool
             {
-                if let Some(pool) = self.aave_pool {
-                    graph.add_edge(QuoteEdge {
-                        venue: RouteVenue::AaveV3Flash,
-                        pool,
-                        token_in,
-                        token_out: token_in,
-                        amount_in,
-                        expected_out: amount_in,
-                        min_out: amount_in,
-                        gas_overhead: AAVE_FLASHLOAN_OVERHEAD_GAS,
-                        fee: None,
-                        params: None,
-                        is_flash: true,
-                    });
-                }
+                graph.add_edge(QuoteEdge {
+                    venue: RouteVenue::AaveV3Flash,
+                    pool,
+                    token_in,
+                    token_out: token_in,
+                    amount_in,
+                    expected_out: amount_in,
+                    min_out: amount_in,
+                    gas_overhead: AAVE_FLASHLOAN_OVERHEAD_GAS,
+                    fee: None,
+                    params: None,
+                    is_flash: true,
+                });
             }
         }
 
@@ -1019,9 +1017,7 @@ impl StrategyExecutor {
                     } else {
                         observed.path.clone()
                     };
-                    let recipient = if has_wrapped {
-                        self.executor.unwrap_or(self.signer.address())
-                    } else if use_flashloan {
+                    let recipient = if has_wrapped || use_flashloan {
                         self.executor.unwrap_or(self.signer.address())
                     } else {
                         self.signer.address()
@@ -1170,18 +1166,18 @@ impl StrategyExecutor {
                             route_plan: None,
                         });
                     }
-                    if let Some(addr) = swap.access_list.0.first().map(|a| a.address) {
-                        if addr != exec_router {
-                            calldata = self.reserve_cache.build_v2_swap_payload(
-                                path,
-                                value,
-                                swap.expected_out,
-                                self.signer.address(),
-                                use_flashloan,
-                                self.wrapped_native,
-                            );
-                            gas_limit = gas_limit.max(gas_limit_hint);
-                        }
+                    if let Some(addr) = swap.access_list.0.first().map(|a| a.address)
+                        && addr != exec_router
+                    {
+                        calldata = self.reserve_cache.build_v2_swap_payload(
+                            path,
+                            value,
+                            swap.expected_out,
+                            self.signer.address(),
+                            use_flashloan,
+                            self.wrapped_native,
+                        );
+                        gas_limit = gas_limit.max(gas_limit_hint);
                     }
                     return Ok(BackrunTx {
                         raw: Vec::new(),
@@ -1493,8 +1489,8 @@ impl StrategyExecutor {
                     {
                         return Err(AppError::Strategy("Sell liquidity too low".into()));
                     }
-                    if !self.dry_run {
-                        if !self
+                    if !self.dry_run
+                        && !self
                             .probe_v2_sell_for_toxicity(
                                 target_token,
                                 exec_router,
@@ -1502,11 +1498,8 @@ impl StrategyExecutor {
                                 expected_out,
                             )
                             .await?
-                        {
-                            return Err(AppError::Strategy(
-                                "toxic token detected on backrun".into(),
-                            ));
-                        }
+                    {
+                        return Err(AppError::Strategy("toxic token detected on backrun".into()));
                     }
                     let min_out = expected_out
                         .saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
@@ -1559,8 +1552,8 @@ impl StrategyExecutor {
                     {
                         return Err(AppError::Strategy("Sell liquidity too low".into()));
                     }
-                    if !self.dry_run {
-                        if !self
+                    if !self.dry_run
+                        && !self
                             .probe_v3_sell_for_toxicity(
                                 exec_router,
                                 rev_path.clone(),
@@ -1568,12 +1561,9 @@ impl StrategyExecutor {
                                 expected_out,
                             )
                             .await?
-                        {
-                            self.mark_toxic_token(target_token, "v3_probe_shortfall");
-                            return Err(AppError::Strategy(
-                                "toxic token detected on backrun".into(),
-                            ));
-                        }
+                    {
+                        self.mark_toxic_token(target_token, "v3_probe_shortfall");
+                        return Err(AppError::Strategy("toxic token detected on backrun".into()));
                     }
                     let min_out = expected_out
                         .saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
@@ -1730,10 +1720,10 @@ impl StrategyExecutor {
     }
 
     async fn get_balancer_flashloan_fee(&self) -> Option<U256> {
-        if let Some((fee, ts)) = BALANCER_FEE_CACHE.get(&self.chain_id).map(|v| v.clone()) {
-            if ts.elapsed() <= FEE_TTL {
-                return Some(fee);
-            }
+        if let Some((fee, ts)) = BALANCER_FEE_CACHE.get(&self.chain_id).map(|v| *v)
+            && ts.elapsed() <= FEE_TTL
+        {
+            return Some(fee);
         }
         let vault = default_balancer_vault_for_chain(self.chain_id)?;
         let vault_contract = BalancerVaultFees::new(vault, self.http_provider.clone());
@@ -1758,8 +1748,7 @@ impl StrategyExecutor {
             Some(p) => p,
             None => return Ok(None),
         };
-        let premium_bps: U256 = if let Some((v, ts)) = AAVE_FEE_CACHE.get(&pool).map(|v| v.clone())
-        {
+        let premium_bps: U256 = if let Some((v, ts)) = AAVE_FEE_CACHE.get(&pool).map(|v| *v) {
             if ts.elapsed() <= FEE_TTL {
                 v
             } else {

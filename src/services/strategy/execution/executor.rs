@@ -387,19 +387,19 @@ impl BundleSender {
         let mut accepted = 0usize;
         let mut failures: Vec<String> = Vec::new();
         for (url, with_sig, name) in relays {
-            if with_sig && self.cancel_previous_bundle {
-                if let Some(prev_uuid) = self.relay_last_replacement_uuid(name) {
-                    if let Err(err) = self.cancel_bundle_with_sig(url, name, &prev_uuid).await {
-                        tracing::warn!(
-                            target: "executor",
-                            relay = %url,
-                            name = %name,
-                            replacement_uuid = %prev_uuid,
-                            error = %err,
-                            "Failed to cancel previous bundle before replacement"
-                        );
-                    }
-                }
+            if with_sig
+                && self.cancel_previous_bundle
+                && let Some(prev_uuid) = self.relay_last_replacement_uuid(name)
+                && let Err(err) = self.cancel_bundle_with_sig(url, name, &prev_uuid).await
+            {
+                tracing::warn!(
+                    target: "executor",
+                    relay = %url,
+                    name = %name,
+                    replacement_uuid = %prev_uuid,
+                    error = %err,
+                    "Failed to cancel previous bundle before replacement"
+                );
             }
             let result = self
                 .post_bundle_optional(
@@ -522,12 +522,8 @@ impl BundleSender {
             } else {
                 self.stats
                     .record_relay_attempt(name, false, false, attempts.saturating_sub(1));
-                self.stats.record_relay_bundle_status(
-                    name,
-                    "rejected",
-                    replacement_uuid,
-                    None,
-                );
+                self.stats
+                    .record_relay_bundle_status(name, "rejected", replacement_uuid, None);
                 return Err(AppError::Connection(format!(
                     "Relay {} rejected bundle: {} body={}",
                     name, status, body_text
@@ -548,14 +544,7 @@ impl BundleSender {
     ) -> Result<(), AppError> {
         if with_sig {
             return self
-                .post_bundle_with_sig(
-                    url,
-                    body_bytes,
-                    name,
-                    target_block,
-                    txs,
-                    replacement_uuid,
-                )
+                .post_bundle_with_sig(url, body_bytes, name, target_block, txs, replacement_uuid)
                 .await;
         }
 
@@ -631,12 +620,8 @@ impl BundleSender {
             }
             self.stats
                 .record_relay_attempt(name, false, false, attempts.saturating_sub(1));
-            self.stats.record_relay_bundle_status(
-                name,
-                "rejected",
-                replacement_uuid,
-                None,
-            );
+            self.stats
+                .record_relay_bundle_status(name, "rejected", replacement_uuid, None);
             return Err(AppError::Connection(format!(
                 "Relay {} rejected bundle: {} body={}",
                 name, status, body_text
@@ -668,8 +653,9 @@ impl BundleSender {
             .header("Content-Type", "application/json")
             .header(
                 "X-Flashbots-Signature",
-                HeaderValue::from_str(&sig_header)
-                    .map_err(|e| AppError::Connection(format!("Signature header invalid: {}", e)))?,
+                HeaderValue::from_str(&sig_header).map_err(|e| {
+                    AppError::Connection(format!("Signature header invalid: {}", e))
+                })?,
             )
             .body(body_bytes)
             .timeout(Duration::from_millis(RELAY_TIMEOUT_MS))

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
+#![allow(clippy::too_many_arguments)]
 
 pub mod app;
 pub mod common;

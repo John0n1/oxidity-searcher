@@ -54,10 +54,10 @@ impl GasOracle {
                 Ok(fees)
             }
             Err(_) => {
-                if let Ok(guard) = self.last_good.lock() {
-                    if let Some(fees) = guard.clone() {
-                        return Ok(fees);
-                    }
+                if let Ok(guard) = self.last_good.lock()
+                    && let Some(fees) = guard.clone()
+                {
+                    return Ok(fees);
                 }
                 self.fallback_estimate().await
             }
@@ -106,7 +106,7 @@ impl GasOracle {
         let mut p90_count = 0u128;
         if let Some(rewards) = &history.reward {
             for block_reward in rewards {
-                if let Some(r) = block_reward.get(0) {
+                if let Some(r) = block_reward.first() {
                     p50_sum = p50_sum.saturating_add(*r);
                     p50_count = p50_count.saturating_add(1);
                 }
@@ -164,14 +164,12 @@ impl GasOracle {
 
     async fn fallback_estimate(&self) -> Result<GasFees, AppError> {
         // 1) Try Etherscan gas oracle if API key present (mainnet only)
-        if self.chain_id == 1 {
-            if let Ok(key) = env::var("ETHERSCAN_API_KEY") {
-                if !key.is_empty() {
-                    if let Ok(fees) = self.etherscan_gas_oracle(&key).await {
-                        return Ok(fees);
-                    }
-                }
-            }
+        if self.chain_id == 1
+            && let Ok(key) = env::var("ETHERSCAN_API_KEY")
+            && !key.is_empty()
+            && let Ok(fees) = self.etherscan_gas_oracle(&key).await
+        {
+            return Ok(fees);
         }
 
         // 2) Fallback path for nodes that disable feeHistory (common on some public RPCs).

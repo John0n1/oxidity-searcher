@@ -76,7 +76,7 @@ impl MempoolScanner {
                                     Some(tx) => {
                                         if tx.input().len() > 4 && self.mark_seen(tx.tx_hash()).await {
                                             self.enqueue(StrategyWork::Mempool {
-                                                tx,
+                                                tx: Box::new(tx),
                                                 received_at: std::time::Instant::now(),
                                             }).await;
                                         }
@@ -114,7 +114,7 @@ impl MempoolScanner {
                                                     Ok(Some(tx)) => {
                                                         if tx.input().len() > 4 {
                                                             self.enqueue(StrategyWork::Mempool {
-                                                                tx,
+                                                                tx: Box::new(tx),
                                                                 received_at: std::time::Instant::now(),
                                                             }).await;
                                                         }
@@ -196,7 +196,7 @@ impl MempoolScanner {
                         for tx in txs {
                             if tx.input().len() > 4 && self.mark_seen(tx.tx_hash()).await {
                                 self.enqueue(StrategyWork::Mempool {
-                                    tx,
+                                    tx: Box::new(tx),
                                     received_at: std::time::Instant::now(),
                                 })
                                 .await;
@@ -223,7 +223,7 @@ impl MempoolScanner {
                                 Ok(Some(tx)) => {
                                     if tx.input().len() > 4 {
                                         self.enqueue(StrategyWork::Mempool {
-                                            tx,
+                                            tx: Box::new(tx),
                                             received_at: std::time::Instant::now(),
                                         })
                                         .await;
@@ -268,10 +268,10 @@ impl MempoolScanner {
         }
         let mut order = self.seen_order.lock().await;
         order.push_back(hash);
-        if order.len() > SEEN_MAX {
-            if let Some(oldest) = order.pop_front() {
-                self.seen.remove(&oldest);
-            }
+        if order.len() > SEEN_MAX
+            && let Some(oldest) = order.pop_front()
+        {
+            self.seen.remove(&oldest);
         }
         true
     }

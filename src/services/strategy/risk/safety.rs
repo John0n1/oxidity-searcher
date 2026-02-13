@@ -12,6 +12,12 @@ pub struct SafetyGuard {
     reset_interval_sec: u64,
 }
 
+impl Default for SafetyGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SafetyGuard {
     pub fn new() -> Self {
         Self {

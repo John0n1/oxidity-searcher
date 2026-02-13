@@ -425,16 +425,16 @@ impl Engine {
                 for addr in chain_reg.curve_crypto_registries {
                     reserve_cache.add_curve_crypto_registry(addr);
                 }
-                if let Some(aave_pool_reg) = chain_reg.aave_pool {
-                    if aave_pool.is_none() {
-                        tracing::info!(
-                            target: "registry",
-                            chain_id = self.chain_id,
-                            pool = %format!("{:#x}", aave_pool_reg),
-                            "Using Aave pool from registry"
-                        );
-                        aave_pool = Some(aave_pool_reg);
-                    }
+                if let Some(aave_pool_reg) = chain_reg.aave_pool
+                    && aave_pool.is_none()
+                {
+                    tracing::info!(
+                        target: "registry",
+                        chain_id = self.chain_id,
+                        pool = %format!("{:#x}", aave_pool_reg),
+                        "Using Aave pool from registry"
+                    );
+                    aave_pool = Some(aave_pool_reg);
                 }
             }
         } else {

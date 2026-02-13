@@ -139,7 +139,7 @@ impl StrategyExecutor {
                     .skipped
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                     + 1;
-                if skipped % self.skip_log_every == 0 {
+                if skipped.is_multiple_of(self.skip_log_every) {
                     tracing::debug!(
                         target: "strategy",
                         from=?from,
@@ -180,7 +180,7 @@ impl StrategyExecutor {
             .processed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        if processed % 500 == 0 {
+        if processed.is_multiple_of(500) {
             tracing::info!(
             target: "strategy",
             processed,
@@ -188,7 +188,7 @@ impl StrategyExecutor {
             );
         }
 
-        if processed % 5000 == 0 {
+        if processed.is_multiple_of(5000) {
             tracing::info!(
             target: "strategy_summary",
             processed,
@@ -313,7 +313,12 @@ impl StrategyExecutor {
             approvals.clear();
         }
 
-        Self::apply_nonce_plan(&lease, &mut front_run, &mut approvals, &mut main_request)?;
+        Self::apply_nonce_plan(
+            &lease,
+            &mut front_run,
+            approvals.as_mut_slice(),
+            &mut main_request,
+        )?;
         if let Some(exec) = executor_request.as_mut() {
             exec.nonce = main_request.nonce;
         }
@@ -406,12 +411,11 @@ impl StrategyExecutor {
             victims: vec![tx.inner.encoded_2718()],
         };
         let mut touched_pools = self.reserve_cache.pairs_for_v2_path(&observed_swap.path);
-        if observed_swap.router_kind == crate::services::strategy::decode::RouterKind::V3Like {
-            if let Some(v3_id) =
+        if observed_swap.router_kind == crate::services::strategy::decode::RouterKind::V3Like
+            && let Some(v3_id) =
                 StrategyExecutor::v3_pool_identifier(&observed_swap.path, &observed_swap.v3_fees)
-            {
-                touched_pools.push(v3_id);
-            }
+        {
+            touched_pools.push(v3_id);
         }
         let plan_hashes = match self.merge_and_send_bundle(plan, touched_pools, lease).await {
             Ok(Some(h)) => h,
@@ -435,10 +439,7 @@ impl StrategyExecutor {
             )
             .await?;
         let recorded_hash = plan_hashes.main;
-        let recorded_to = main_request
-            .to
-            .clone()
-            .or_else(|| Some(TxKind::Call(backrun.to)));
+        let recorded_to = main_request.to.or(Some(TxKind::Call(backrun.to)));
         let recorded_value = main_request.value.unwrap_or(backrun.value);
         self.db
             .save_transaction(
@@ -459,7 +460,7 @@ impl StrategyExecutor {
         if let Some(f) = &front_run {
             self.db
                 .save_transaction(
-                    &format!("{:#x}", plan_hashes.front_run.unwrap_or_else(|| f.hash)),
+                    &format!("{:#x}", plan_hashes.front_run.unwrap_or(f.hash)),
                     self.chain_id,
                     &format!("{:#x}", self.signer.address()),
                     Some(format!("{:#x}", f.to)).as_deref(),
@@ -606,7 +607,12 @@ impl StrategyExecutor {
             .clone()
             .unwrap_or_else(|| backrun.request.clone());
 
-        Self::apply_nonce_plan(&lease, &mut front_run, &mut approvals, &mut main_request)?;
+        Self::apply_nonce_plan(
+            &lease,
+            &mut front_run,
+            approvals.as_mut_slice(),
+            &mut main_request,
+        )?;
         if let Some(exec) = executor_request.as_mut() {
             exec.nonce = main_request.nonce;
         }
@@ -738,9 +744,9 @@ impl StrategyExecutor {
 
         let _ = self.db.update_status(&tx_hash, None, Some(false)).await;
 
-        if let Err(e) = self.bundle_sender.send_mev_share_bundle(&bundle_body).await {
-            return Err(e);
-        }
+        self.bundle_sender
+            .send_mev_share_bundle(&bundle_body)
+            .await?;
 
         let from_addr = hint.from.unwrap_or(Address::ZERO);
         self.db
@@ -881,25 +887,24 @@ impl StrategyExecutor {
             self.log_skip(SkipReason::LiquidityDepth, "price impact too high");
             return Ok(None);
         }
-        if observed_swap.router_kind == RouterKind::V2Like {
-            if let Some(expected_out) = self
+        if observed_swap.router_kind == RouterKind::V2Like
+            && let Some(expected_out) = self
                 .reserve_cache
                 .quote_v2_path(&observed_swap.path, observed_swap.amount_in)
+            && !expected_out.is_zero()
+            && !observed_swap.min_out.is_zero()
+        {
+            let min_ratio =
+                observed_swap.min_out.saturating_mul(U256::from(10_000u64)) / expected_out;
+            let slippage_room_bps = 10_000u64.saturating_sub(min_ratio.to::<u64>());
+            if slippage_room_bps > 1_500
+                && wallet_chain_balance < U256::from(100_000_000_000_000_000u128)
             {
-                if !expected_out.is_zero() && !observed_swap.min_out.is_zero() {
-                    let min_ratio =
-                        observed_swap.min_out.saturating_mul(U256::from(10_000u64)) / expected_out;
-                    let slippage_room_bps = 10_000u64.saturating_sub(min_ratio.to::<u64>());
-                    if slippage_room_bps > 1_500
-                        && wallet_chain_balance < U256::from(100_000_000_000_000_000u128)
-                    {
-                        self.log_skip(
-                            SkipReason::SandwichRisk,
-                            "victim slippage too loose for small wallet",
-                        );
-                        return Ok(None);
-                    }
-                }
+                self.log_skip(
+                    SkipReason::SandwichRisk,
+                    "victim slippage too loose for small wallet",
+                );
+                return Ok(None);
             }
         }
 
@@ -1119,10 +1124,10 @@ impl StrategyExecutor {
             .load(std::sync::atomic::Ordering::Relaxed);
         {
             let cache = self.per_block_inputs.lock().await;
-            if let Some(entry) = cache.as_ref() {
-                if entry.block_number == block_number {
-                    return Ok((entry.gas_fees.clone(), entry.wallet_balance));
-                }
+            if let Some(entry) = cache.as_ref()
+                && entry.block_number == block_number
+            {
+                return Ok((entry.gas_fees.clone(), entry.wallet_balance));
             }
         }
 
@@ -1142,7 +1147,7 @@ impl StrategyExecutor {
     fn apply_nonce_plan(
         lease: &NonceLease,
         front_run: &mut Option<FrontRunTx>,
-        approvals: &mut Vec<ApproveTx>,
+        approvals: &mut [ApproveTx],
         main: &mut TransactionRequest,
     ) -> Result<(), AppError> {
         let needed = 1 + front_run.is_some() as u64 + approvals.len() as u64;
@@ -1400,7 +1405,8 @@ mod tests {
         }];
         let mut main = TransactionRequest::default();
 
-        StrategyExecutor::apply_nonce_plan(&lease, &mut front, &mut approvals, &mut main).unwrap();
+        StrategyExecutor::apply_nonce_plan(&lease, &mut front, approvals.as_mut_slice(), &mut main)
+            .unwrap();
 
         assert_eq!(approvals[0].request.nonce, Some(7));
         assert_eq!(front.unwrap().request.nonce, Some(8));
@@ -1415,7 +1421,9 @@ mod tests {
             count: 1,
         };
         let mut main = TransactionRequest::default();
-        StrategyExecutor::apply_nonce_plan(&lease, &mut None, &mut Vec::new(), &mut main).unwrap();
+        let mut approvals = Vec::new();
+        StrategyExecutor::apply_nonce_plan(&lease, &mut None, approvals.as_mut_slice(), &mut main)
+            .unwrap();
         assert_eq!(main.nonce, Some(42));
     }
 }

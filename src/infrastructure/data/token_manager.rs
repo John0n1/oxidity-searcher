@@ -53,17 +53,17 @@ impl TokenManager {
 
         for entry in entries {
             for (chain_str, addr_str) in entry.addresses {
-                if let Ok(chain_id) = chain_str.parse::<u64>() {
-                    if let Ok(addr) = addr_str.parse::<Address>() {
-                        tokens_by_chain.entry(chain_id).or_default().insert(
-                            addr,
-                            TokenInfo {
-                                symbol: entry.symbol.clone(),
-                                decimals: entry.decimals,
-                                tags: entry.tags.clone(),
-                            },
-                        );
-                    }
+                if let Ok(chain_id) = chain_str.parse::<u64>()
+                    && let Ok(addr) = addr_str.parse::<Address>()
+                {
+                    tokens_by_chain.entry(chain_id).or_default().insert(
+                        addr,
+                        TokenInfo {
+                            symbol: entry.symbol.clone(),
+                            decimals: entry.decimals,
+                            tags: entry.tags.clone(),
+                        },
+                    );
                 }
             }
         }
@@ -131,6 +131,15 @@ impl TokenManager {
     }
 }
 
+impl Default for TokenManager {
+    fn default() -> Self {
+        Self {
+            tokens_by_chain: HashMap::new(),
+            invalid_tokens: DashSet::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::TokenInfo;
@@ -154,14 +163,5 @@ mod tests {
             tags: vec!["tier1".to_string(), "stablecoin".to_string()],
         };
         assert!(!TokenManager::is_native_token(&info));
-    }
-}
-
-impl Default for TokenManager {
-    fn default() -> Self {
-        Self {
-            tokens_by_chain: HashMap::new(),
-            invalid_tokens: DashSet::new(),
-        }
     }
 }

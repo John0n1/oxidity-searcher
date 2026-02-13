@@ -6,25 +6,25 @@ use alloy::signers::local::PrivateKeySigner;
 use clap::Parser;
 use dashmap::DashSet;
 use futures::future::try_join_all;
-use oxidity_builder::app::config::GlobalSettings;
-use oxidity_builder::app::logging::setup_logging;
-use oxidity_builder::domain::error::AppError;
-use oxidity_builder::infrastructure::data::address_registry::validate_address_map;
-use oxidity_builder::infrastructure::data::db::Database;
-use oxidity_builder::infrastructure::data::token_manager::TokenManager;
-use oxidity_builder::infrastructure::network::gas::GasOracle;
-use oxidity_builder::infrastructure::network::nonce::NonceManager;
-use oxidity_builder::infrastructure::network::price_feed::PriceFeed;
-use oxidity_builder::infrastructure::network::provider::ConnectionFactory;
-use oxidity_builder::services::strategy::engine::Engine;
-use oxidity_builder::services::strategy::portfolio::PortfolioManager;
-use oxidity_builder::services::strategy::safety::SafetyGuard;
-use oxidity_builder::services::strategy::simulation::{SimulationBackend, Simulator};
+use oxidity_searcher::app::config::GlobalSettings;
+use oxidity_searcher::app::logging::setup_logging;
+use oxidity_searcher::domain::error::AppError;
+use oxidity_searcher::infrastructure::data::address_registry::validate_address_map;
+use oxidity_searcher::infrastructure::data::db::Database;
+use oxidity_searcher::infrastructure::data::token_manager::TokenManager;
+use oxidity_searcher::infrastructure::network::gas::GasOracle;
+use oxidity_searcher::infrastructure::network::nonce::NonceManager;
+use oxidity_searcher::infrastructure::network::price_feed::PriceFeed;
+use oxidity_searcher::infrastructure::network::provider::ConnectionFactory;
+use oxidity_searcher::services::strategy::engine::Engine;
+use oxidity_searcher::services::strategy::portfolio::PortfolioManager;
+use oxidity_searcher::services::strategy::safety::SafetyGuard;
+use oxidity_searcher::services::strategy::simulation::{SimulationBackend, Simulator};
 use std::str::FromStr;
 use std::sync::Arc;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Oxidity Builder")]
+#[command(author, version, about = "Oxidity Searcher")]
 struct Cli {
     /// Path to config file (default: config.{toml,yaml,...})
     #[arg(long)]
@@ -64,10 +64,10 @@ async fn main() -> Result<(), AppError> {
     if let Some(token) = settings.metrics_token_value() {
         unsafe { std::env::set_var("METRICS_TOKEN", token) };
     }
-    if let Some(key) = settings.etherscan_api_key_value() {
-        if std::env::var("ETHERSCAN_API_KEY").is_err() {
-            unsafe { std::env::set_var("ETHERSCAN_API_KEY", key) };
-        }
+    if let Some(key) = settings.etherscan_api_key_value()
+        && std::env::var("ETHERSCAN_API_KEY").is_err()
+    {
+        unsafe { std::env::set_var("ETHERSCAN_API_KEY", key) };
     }
 
     let database_url = settings.database_url();
@@ -174,7 +174,8 @@ async fn main() -> Result<(), AppError> {
         if chainlink_feeds.is_empty() {
             tracing::warn!("No Chainlink feeds configured for chain {}", chain_id);
         }
-        let wrapped_native = oxidity_builder::common::constants::wrapped_native_for_chain(chain_id);
+        let wrapped_native =
+            oxidity_searcher::common::constants::wrapped_native_for_chain(chain_id);
         let price_feed = PriceFeed::new(
             http_provider.clone(),
             chainlink_feeds,
@@ -203,7 +204,7 @@ async fn main() -> Result<(), AppError> {
 
         let router_discovery = if settings.router_discovery_enabled {
             let discovery = Arc::new(
-                oxidity_builder::services::strategy::router_discovery::RouterDiscovery::new(
+                oxidity_searcher::services::strategy::router_discovery::RouterDiscovery::new(
                     chain_id,
                     router_allowlist.clone(),
                     db.clone(),

@@ -166,9 +166,7 @@ async fn validate_optional(
     addr: Option<Address>,
     label: &str,
 ) -> Option<Address> {
-    let Some(a) = addr else {
-        return None;
-    };
+    let a = addr?;
     if has_code(provider, a).await {
         Some(a)
     } else {
