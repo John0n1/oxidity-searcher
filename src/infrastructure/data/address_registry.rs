@@ -43,18 +43,18 @@ impl ChainRegistry {
         self.chainlink_feeds =
             validate_address_map(provider, self.chainlink_feeds, "registry.chainlink_feeds").await;
 
-        self.balancer_vault = validate_optional(provider, self.balancer_vault, "balancer_vault").await;
+        self.balancer_vault =
+            validate_optional(provider, self.balancer_vault, "balancer_vault").await;
         self.aave_pool = validate_optional(provider, self.aave_pool, "aave_pool").await;
-        self.aave_addresses_provider =
-            validate_optional(provider, self.aave_addresses_provider, "aave_addresses_provider")
-                .await;
-
-        self.curve_registries = validate_address_list(
+        self.aave_addresses_provider = validate_optional(
             provider,
-            self.curve_registries,
-            "curve_registries",
+            self.aave_addresses_provider,
+            "aave_addresses_provider",
         )
         .await;
+
+        self.curve_registries =
+            validate_address_list(provider, self.curve_registries, "curve_registries").await;
         self.curve_meta_registries = validate_address_list(
             provider,
             self.curve_meta_registries,
@@ -113,9 +113,8 @@ impl AddressRegistry {
         }
         let raw = fs::read_to_string(p)
             .map_err(|e| AppError::Config(format!("Failed to read registry {}: {e}", path)))?;
-        let file: AddressRegistryFile = serde_json::from_str(&raw).map_err(|e| {
-            AppError::Config(format!("Failed to parse registry {}: {e}", path))
-        })?;
+        let file: AddressRegistryFile = serde_json::from_str(&raw)
+            .map_err(|e| AppError::Config(format!("Failed to parse registry {}: {e}", path)))?;
 
         let mut chains: HashMap<u64, ChainRegistry> = HashMap::new();
         for (chain_str, c) in file.chains {
@@ -167,7 +166,9 @@ async fn validate_optional(
     addr: Option<Address>,
     label: &str,
 ) -> Option<Address> {
-    let Some(a) = addr else { return None; };
+    let Some(a) = addr else {
+        return None;
+    };
     if has_code(provider, a).await {
         Some(a)
     } else {

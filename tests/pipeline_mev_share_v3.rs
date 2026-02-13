@@ -5,7 +5,7 @@ use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolCall;
 use dashmap::DashSet;
-use oxidity_builder::common::constants::{wrapped_native_for_chain, CHAIN_ETHEREUM};
+use oxidity_builder::common::constants::{CHAIN_ETHEREUM, wrapped_native_for_chain};
 use oxidity_builder::core::executor::BundleSender;
 use oxidity_builder::core::portfolio::PortfolioManager;
 use oxidity_builder::core::safety::SafetyGuard;
@@ -21,10 +21,11 @@ use oxidity_builder::network::nonce::NonceManager;
 use oxidity_builder::network::price_feed::{PriceApiKeys, PriceFeed};
 use oxidity_builder::network::provider::HttpProvider;
 use oxidity_builder::network::reserves::ReserveCache;
+use oxidity_builder::services::strategy::execution::work_queue::WorkQueue;
 use oxidity_builder::services::strategy::routers::UniV3Router;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 use url::Url;
 
 #[tokio::test]
@@ -70,6 +71,8 @@ async fn mev_share_v3_pipeline_manual() {
         ],
         bundle_signer.clone(),
         stats.clone(),
+        true,
+        false,
     ));
     let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), signer.address()));
@@ -84,7 +87,7 @@ async fn mev_share_v3_pipeline_manual() {
     let nonce_manager = NonceManager::new(http.clone(), signer.address());
     let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
 
-    let (_tx, rx) = mpsc::channel::<StrategyWork>(4);
+    let work_queue = Arc::new(WorkQueue::new(4));
     let (_block_tx, block_rx) = broadcast::channel(4);
     let router_allowlist = Arc::new(DashSet::new());
     let uni_v3_router =
@@ -92,7 +95,7 @@ async fn mev_share_v3_pipeline_manual() {
     router_allowlist.insert(uni_v3_router);
 
     let exec = StrategyExecutor::new(
-        rx,
+        work_queue,
         block_rx,
         safety_guard,
         bundle_sender,
@@ -109,6 +112,11 @@ async fn mev_share_v3_pipeline_manual() {
         signer.clone(),
         nonce_manager,
         50,
+        10_000,
+        10_000,
+        1_200,
+        1_000,
+        5_000_000_000_000,
         http.clone(),
         true,
         router_allowlist,

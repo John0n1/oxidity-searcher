@@ -352,7 +352,9 @@ impl Database {
         .bind(limit_i64)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| AppError::Initialization(format!("Router discovery top load failed: {}", e)))?;
+        .map_err(|e| {
+            AppError::Initialization(format!("Router discovery top load failed: {}", e))
+        })?;
 
         let mut out = Vec::new();
         for row in rows {

@@ -97,6 +97,89 @@ impl StrategyExecutor {
             is_flash_leg: matches!(venue, RouteVenue::AaveV3Flash | RouteVenue::BalancerFlash),
         }])
     }
+
+    async fn build_atomic_executor_roundtrip_tx(
+        &self,
+        exec_router: Address,
+        forward_payload: Bytes,
+        reverse_payload: Bytes,
+        value_in: U256,
+        approvals: Vec<(Address, U256)>,
+        gas_fees: &GasFees,
+        gas_limit_hint: u64,
+        nonce: u64,
+    ) -> Result<(Address, Vec<u8>, TransactionRequest, B256), AppError> {
+        let executor = self
+            .executor
+            .ok_or_else(|| AppError::Strategy("strict atomic mode requires executor".into()))?;
+
+        let mut targets = Vec::new();
+        let mut payloads = Vec::new();
+        let mut values = Vec::new();
+
+        for (token, amount) in approvals.iter().copied() {
+            if amount.is_zero() {
+                continue;
+            }
+            let approve = UnifiedHardenedExecutor::safeApproveCall {
+                token,
+                spender: exec_router,
+                amount,
+            }
+            .abi_encode();
+            targets.push(executor);
+            payloads.push(Bytes::from(approve));
+            values.push(U256::ZERO);
+        }
+
+        targets.push(exec_router);
+        payloads.push(forward_payload);
+        values.push(value_in);
+
+        targets.push(exec_router);
+        payloads.push(reverse_payload);
+        values.push(U256::ZERO);
+
+        for (token, _) in approvals.iter().copied() {
+            let reset = UnifiedHardenedExecutor::safeApproveCall {
+                token,
+                spender: exec_router,
+                amount: U256::ZERO,
+            }
+            .abi_encode();
+            targets.push(executor);
+            payloads.push(Bytes::from(reset));
+            values.push(U256::ZERO);
+        }
+
+        let exec_call = UnifiedHardenedExecutor::executeBundleCall {
+            targets,
+            payloads,
+            values,
+            bribeRecipient: Address::ZERO,
+            bribeAmount: U256::ZERO,
+            allowPartial: false,
+            balanceCheckToken: self.wrapped_native,
+        };
+        let calldata = exec_call.abi_encode();
+        let gas_limit = gas_limit_hint
+            .saturating_add(260_000)
+            .saturating_add((approvals.len() as u64).saturating_mul(40_000))
+            .max(320_000);
+        let (raw, request, hash) = self
+            .sign_swap_request(
+                executor,
+                gas_limit,
+                value_in,
+                gas_fees.max_fee_per_gas,
+                gas_fees.max_priority_fee_per_gas,
+                nonce,
+                calldata,
+                AccessList::default(),
+            )
+            .await?;
+        Ok((executor, raw, request, hash))
+    }
     pub(crate) async fn needs_approval(
         &self,
         token: Address,
@@ -784,6 +867,7 @@ impl StrategyExecutor {
                             false,
                             self.signer.address(),
                             false,
+                            gas_fees,
                         )
                         .await?;
                     let Some(swap) = swap else {
@@ -811,7 +895,7 @@ impl StrategyExecutor {
                     };
                     let expected_tokens = self.quote_v3_path(&path_bytes, amount_in).await?;
                     let ratio_ppm = StrategyExecutor::price_ratio_ppm(expected_tokens, amount_in);
-                    if ratio_ppm < U256::from(1_000u64) {
+                    if ratio_ppm < U256::from(self.adaptive_liquidity_ratio_floor_ppm(gas_fees)) {
                         return Ok(None);
                     }
                     let min_out = expected_tokens
@@ -926,7 +1010,7 @@ impl StrategyExecutor {
                         )?,
                     };
                     expected_out_token = if has_wrapped {
-                        target_token
+                        self.wrapped_native
                     } else {
                         observed.path.last().copied().unwrap_or(target_token)
                     };
@@ -935,7 +1019,9 @@ impl StrategyExecutor {
                     } else {
                         observed.path.clone()
                     };
-                    let recipient = if use_flashloan {
+                    let recipient = if has_wrapped {
+                        self.executor.unwrap_or(self.signer.address())
+                    } else if use_flashloan {
                         self.executor.unwrap_or(self.signer.address())
                     } else {
                         self.signer.address()
@@ -953,6 +1039,7 @@ impl StrategyExecutor {
                             use_flashloan,
                             recipient,
                             true,
+                            gas_fees,
                         )
                         .await?
                         .ok_or_else(|| AppError::Strategy("V2 swap build failed".into()))?;
@@ -960,96 +1047,125 @@ impl StrategyExecutor {
                     let access_list = swap.access_list.clone();
                     let mut calldata = swap.calldata.clone();
                     let mut gas_limit = swap.gas_limit;
-                    if use_flashloan && has_wrapped {
+                    if has_wrapped {
                         let executor = self.executor.ok_or_else(|| {
-                            AppError::Strategy("Missing flashloan executor".into())
+                            AppError::Strategy("strict atomic mode requires executor".into())
                         })?;
-                        // Build forward swap (WETH -> target) and reverse (target -> WETH) to repay the loan.
-                        let forward_payload = Bytes::from(calldata);
-                        let rev_path = vec![target_token, self.wrapped_native];
-                        let rev_min_out = tokens_out
-                            .saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
+                        let slippage_bps = self.effective_slippage_bps();
+                        let forward_min_out = tokens_out
+                            .saturating_mul(U256::from(10_000u64 - slippage_bps))
                             / U256::from(10_000u64);
-                        let rev_calldata = self.reserve_cache.build_v2_swap_payload(
+                        let forward_calldata = self.reserve_cache.build_v2_swap_payload(
+                            path.clone(),
+                            value,
+                            forward_min_out,
+                            executor,
+                            false,
+                            self.wrapped_native,
+                        );
+                        let forward_payload = Bytes::from(forward_calldata);
+                        let rev_path = vec![target_token, self.wrapped_native];
+                        let reverse_amount_in = forward_min_out;
+                        let reverse_expected_out = self
+                            .reserve_cache
+                            .quote_v2_path(&rev_path, reverse_amount_in)
+                            .ok_or_else(|| {
+                                AppError::Strategy(
+                                    "V2 reverse quote missing for atomic path".into(),
+                                )
+                            })?;
+                        let reverse_min_out = reverse_expected_out
+                            .saturating_mul(U256::from(10_000u64 - slippage_bps))
+                            / U256::from(10_000u64);
+                        let reverse_calldata = self.reserve_cache.build_v2_swap_payload(
                             rev_path.clone(),
-                            tokens_out,
-                            rev_min_out,
+                            reverse_amount_in,
+                            reverse_min_out,
                             executor,
                             true,
                             self.wrapped_native,
                         );
-                        let rev_payload = Bytes::from(rev_calldata);
-                        // Keep allowances tight to reduce long-lived exposure.
-                        let approve_weth = UnifiedHardenedExecutor::safeApproveCall {
-                            token: self.wrapped_native,
-                            spender: exec_router,
-                            amount: value,
+                        let reverse_payload = Bytes::from(reverse_calldata);
+                        if use_flashloan {
+                            // Build forward+reverse callbacks inside flashloan to guarantee round-trip.
+                            let approve_target = UnifiedHardenedExecutor::safeApproveCall {
+                                token: target_token,
+                                spender: exec_router,
+                                amount: reverse_amount_in,
+                            }
+                            .abi_encode();
+                            let reset_target = UnifiedHardenedExecutor::safeApproveCall {
+                                token: target_token,
+                                spender: exec_router,
+                                amount: U256::ZERO,
+                            }
+                            .abi_encode();
+                            let callbacks = vec![
+                                (executor, Bytes::from(approve_target), U256::ZERO),
+                                (exec_router, forward_payload, U256::ZERO),
+                                (exec_router, reverse_payload, U256::ZERO),
+                                (executor, Bytes::from(reset_target), U256::ZERO),
+                            ];
+                            let (raw, req, hash, premium, overhead_gas) = self
+                                .build_flashloan_transaction(
+                                    executor,
+                                    path[0],
+                                    value,
+                                    callbacks,
+                                    gas_limit_hint,
+                                    &crate::network::gas::GasFees {
+                                        max_fee_per_gas: gas_fees.max_fee_per_gas,
+                                        max_priority_fee_per_gas: gas_fees.max_priority_fee_per_gas,
+                                        next_base_fee_per_gas: 0,
+                                        base_fee_per_gas: 0,
+                                        p50_priority_fee_per_gas: None,
+                                        p90_priority_fee_per_gas: None,
+                                        gas_used_ratio: None,
+                                        suggested_max_fee_per_gas: None,
+                                    },
+                                    nonce,
+                                )
+                                .await?;
+                            return Ok(BackrunTx {
+                                raw,
+                                hash,
+                                to: executor,
+                                value: U256::ZERO,
+                                request: req,
+                                expected_out: reverse_expected_out,
+                                expected_out_token: self.wrapped_native,
+                                unwrap_to_native: false,
+                                uses_flashloan: true,
+                                flashloan_premium: premium,
+                                flashloan_overhead_gas: overhead_gas,
+                                router_kind: observed.router_kind,
+                                route_plan: None,
+                            });
                         }
-                        .abi_encode();
-                        let approve_target = UnifiedHardenedExecutor::safeApproveCall {
-                            token: target_token,
-                            spender: exec_router,
-                            amount: tokens_out,
-                        }
-                        .abi_encode();
-                        // Zero approvals after the round-trip completes.
-                        let reset_weth = UnifiedHardenedExecutor::safeApproveCall {
-                            token: self.wrapped_native,
-                            spender: exec_router,
-                            amount: U256::ZERO,
-                        }
-                        .abi_encode();
-                        let reset_target = UnifiedHardenedExecutor::safeApproveCall {
-                            token: target_token,
-                            spender: exec_router,
-                            amount: U256::ZERO,
-                        }
-                        .abi_encode();
-                        let exec_target = self.executor.unwrap_or(executor);
-                        let callbacks = vec![
-                            (exec_target, Bytes::from(approve_weth), U256::ZERO),
-                            (exec_target, Bytes::from(approve_target), U256::ZERO),
-                            (exec_router, forward_payload, U256::ZERO),
-                            (exec_router, rev_payload, U256::ZERO),
-                            (exec_target, Bytes::from(reset_weth), U256::ZERO),
-                            (exec_target, Bytes::from(reset_target), U256::ZERO),
-                        ];
-                        let (raw, req, hash, premium, overhead_gas) = self
-                            .build_flashloan_transaction(
-                                executor,
-                                path[0],
+                        let (_executor, raw, request, hash) = self
+                            .build_atomic_executor_roundtrip_tx(
+                                exec_router,
+                                forward_payload,
+                                reverse_payload,
                                 value,
-                                callbacks,
+                                vec![(target_token, reverse_amount_in)],
+                                gas_fees,
                                 gas_limit_hint,
-                                &crate::network::gas::GasFees {
-                                    max_fee_per_gas: gas_fees.max_fee_per_gas,
-                                    max_priority_fee_per_gas: gas_fees.max_priority_fee_per_gas,
-                                    next_base_fee_per_gas: 0,
-                                    base_fee_per_gas: 0,
-                                    p50_priority_fee_per_gas: None,
-                                    p90_priority_fee_per_gas: None,
-                                    gas_used_ratio: None,
-                                    suggested_max_fee_per_gas: None,
-                                },
                                 nonce,
                             )
                             .await?;
-                        let expected_out = self
-                            .reserve_cache
-                            .quote_v2_path(&rev_path, tokens_out)
-                            .unwrap_or(rev_min_out);
                         return Ok(BackrunTx {
                             raw,
                             hash,
                             to: executor,
-                            value: U256::ZERO,
-                            request: req,
-                            expected_out,
+                            value,
+                            request,
+                            expected_out: reverse_expected_out,
                             expected_out_token: self.wrapped_native,
                             unwrap_to_native: false,
-                            uses_flashloan: true,
-                            flashloan_premium: premium,
-                            flashloan_overhead_gas: overhead_gas,
+                            uses_flashloan: false,
+                            flashloan_premium: U256::ZERO,
+                            flashloan_overhead_gas: 0,
                             router_kind: observed.router_kind,
                             route_plan: None,
                         });
@@ -1150,26 +1266,95 @@ impl StrategyExecutor {
                             gas_fees.max_fee_per_gas,
                         )?,
                     };
-                    expected_out_token = observed
-                        .path
-                        .last()
-                        .copied()
-                        .ok_or_else(|| AppError::Strategy("Missing V3 target token".into()))?;
+                    expected_out_token =
+                        if has_wrapped {
+                            self.wrapped_native
+                        } else {
+                            observed.path.last().copied().ok_or_else(|| {
+                                AppError::Strategy("Missing V3 target token".into())
+                            })?
+                        };
                     let path_bytes = if let Some(p) = observed.v3_path.clone() {
                         p
                     } else {
                         encode_v3_path(&observed.path, &observed.v3_fees)
                             .ok_or_else(|| AppError::Strategy("Encode V3 path failed".into()))?
                     };
-                    let expected_out = self.quote_v3_path(&path_bytes, value).await?;
-                    let ratio_ppm = StrategyExecutor::price_ratio_ppm(expected_out, value);
-                    if ratio_ppm < U256::from(1_000u64) {
+                    let expected_mid_out = self.quote_v3_path(&path_bytes, value).await?;
+                    let ratio_ppm = StrategyExecutor::price_ratio_ppm(expected_mid_out, value);
+                    if ratio_ppm < U256::from(self.adaptive_liquidity_ratio_floor_ppm(gas_fees)) {
                         return Err(AppError::Strategy("V3 liquidity too low".into()));
                     }
-                    let min_out = expected_out
+                    let min_mid_out = expected_mid_out
                         .saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
                         / U256::from(10_000u64);
                     let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 300);
+                    if has_wrapped {
+                        if use_flashloan {
+                            return Err(AppError::Strategy(
+                                "V3 strict atomic path does not support flashloan yet".into(),
+                            ));
+                        }
+                        let executor = self.executor.ok_or_else(|| {
+                            AppError::Strategy("strict atomic mode requires executor".into())
+                        })?;
+                        let reverse_path = reverse_v3_path(&observed.path, &observed.v3_fees)
+                            .ok_or_else(|| AppError::Strategy("Reverse V3 path failed".into()))?;
+                        let reverse_expected_out =
+                            self.quote_v3_path(&reverse_path, min_mid_out).await?;
+                        let reverse_min_out = reverse_expected_out
+                            .saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
+                            / U256::from(10_000u64);
+                        let forward_payload =
+                            UniV3Router::new(exec_router, self.http_provider.clone())
+                                .exactInput(UniV3Router::ExactInputParams {
+                                    path: path_bytes.clone().into(),
+                                    recipient: executor,
+                                    deadline,
+                                    amountIn: value,
+                                    amountOutMinimum: min_mid_out,
+                                })
+                                .calldata()
+                                .to_vec();
+                        let reverse_payload =
+                            UniV3Router::new(exec_router, self.http_provider.clone())
+                                .exactInput(UniV3Router::ExactInputParams {
+                                    path: reverse_path.clone().into(),
+                                    recipient: executor,
+                                    deadline,
+                                    amountIn: min_mid_out,
+                                    amountOutMinimum: reverse_min_out,
+                                })
+                                .calldata()
+                                .to_vec();
+                        let (_executor, raw, request, hash) = self
+                            .build_atomic_executor_roundtrip_tx(
+                                exec_router,
+                                Bytes::from(forward_payload),
+                                Bytes::from(reverse_payload),
+                                value,
+                                vec![(target_token, min_mid_out)],
+                                gas_fees,
+                                gas_limit_hint,
+                                nonce,
+                            )
+                            .await?;
+                        return Ok(BackrunTx {
+                            raw,
+                            hash,
+                            to: executor,
+                            value,
+                            request,
+                            expected_out: reverse_expected_out,
+                            expected_out_token: self.wrapped_native,
+                            unwrap_to_native: false,
+                            uses_flashloan: false,
+                            flashloan_premium: U256::ZERO,
+                            flashloan_overhead_gas: 0,
+                            router_kind: observed.router_kind,
+                            route_plan: None,
+                        });
+                    }
                     let tx_value = if !use_flashloan
                         && observed.path.first().copied() == Some(self.wrapped_native)
                     {
@@ -1183,7 +1368,7 @@ impl StrategyExecutor {
                             recipient: self.signer.address(),
                             deadline,
                             amountIn: value,
-                            amountOutMinimum: min_out,
+                            amountOutMinimum: min_mid_out,
                         })
                         .calldata()
                         .to_vec();
@@ -1207,7 +1392,7 @@ impl StrategyExecutor {
                             access_list: Some(access_list),
                             ..Default::default()
                         },
-                        expected_out,
+                        expected_out: expected_mid_out,
                         expected_out_token,
                         unwrap_to_native,
                         uses_flashloan: false,
@@ -1245,7 +1430,7 @@ impl StrategyExecutor {
                                     },
                                     expected_out_token,
                                     value,
-                                    expected_out,
+                                    expected_mid_out,
                                     observed.v3_fees.first().copied(),
                                     Some(Bytes::from(path_bytes.clone())),
                                 )
@@ -1302,7 +1487,7 @@ impl StrategyExecutor {
                     let ratio_ppm = StrategyExecutor::price_ratio_ppm(expected_out, sell_amount);
                     // Ratio-only checks are pathological for ultra-low unit-price tokens.
                     // Keep a dust floor for native-out paths and a very loose ratio guard otherwise.
-                    let min_native_out_wei = U256::from(5_000_000_000_000u64); // 0.000005 ETH
+                    let min_native_out_wei = self.adaptive_sell_min_native_out_wei(gas_fees);
                     if (has_wrapped && expected_out < min_native_out_wei)
                         || (!has_wrapped && ratio_ppm < U256::from(10u64))
                     {
@@ -1368,7 +1553,7 @@ impl StrategyExecutor {
                         .ok_or_else(|| AppError::Strategy("Reverse V3 path failed".into()))?;
                     let expected_out = self.quote_v3_path(&rev_path, tokens_in).await?;
                     let ratio_ppm = StrategyExecutor::price_ratio_ppm(expected_out, tokens_in);
-                    let min_native_out_wei = U256::from(5_000_000_000_000u64); // 0.000005 ETH
+                    let min_native_out_wei = self.adaptive_sell_min_native_out_wei(gas_fees);
                     if (has_wrapped && expected_out < min_native_out_wei)
                         || (!has_wrapped && ratio_ppm < U256::from(10u64))
                     {

@@ -16,7 +16,8 @@ use crate::network::price_feed::PriceFeed;
 use crate::network::provider::HttpProvider;
 use crate::network::reserves::ReserveCache;
 use crate::services::strategy::bundles::BundleState;
-use crate::services::strategy::decode::{ObservedSwap, parse_v3_path};
+use crate::services::strategy::decode::{ObservedSwap, encode_v3_path, parse_v3_path};
+use crate::services::strategy::execution::work_queue::SharedWorkQueue;
 use crate::services::strategy::routers::{ERC20, UniV3Router};
 use crate::services::strategy::swaps::V3QuoteCacheEntry;
 use alloy::primitives::{Address, B256, Bytes, TxKind, U256, keccak256};
@@ -33,7 +34,7 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
-use tokio::sync::{Mutex, Semaphore, broadcast::Receiver as BroadcastReceiver, mpsc::Receiver};
+use tokio::sync::{Mutex, Semaphore, broadcast::Receiver as BroadcastReceiver};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
@@ -114,12 +115,21 @@ pub struct RelayOutcomeStats {
     pub retries: u64,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct RelayBundleStatus {
+    pub replacement_uuid: Option<String>,
+    pub bundle_id: Option<String>,
+    pub status: String,
+    pub updated_at_ms: i64,
+}
+
 pub(crate) const VICTIM_FEE_BUMP_BPS: u64 = 11_000;
 pub(crate) const TAX_TOLERANCE_BPS: u64 = 500;
 pub(crate) const PROBE_GAS_LIMIT: u64 = 220_000;
 pub(crate) const V3_QUOTE_CACHE_TTL_MS: u64 = 250;
 pub(crate) const TOXIC_PROBE_FAILURE_THRESHOLD: u32 = 3;
 pub(crate) const TOXIC_PROBE_FAILURE_WINDOW_SECS: u64 = 1_800;
+const DEFAULT_FALLBACK_GAS_CAP_GWEI: u64 = 500;
 
 #[derive(Clone, Copy, Debug)]
 pub struct DynamicGasCap {
@@ -175,6 +185,7 @@ pub struct StrategyStats {
     pub sim_latency_ms_sum_mevshare: AtomicU64,
     pub sim_latency_ms_count_mevshare: AtomicU64,
     pub relay_outcomes: StdMutex<HashMap<String, RelayOutcomeStats>>,
+    pub relay_bundle_status: StdMutex<HashMap<String, RelayBundleStatus>>,
 }
 
 #[derive(Clone, Debug)]
@@ -185,6 +196,13 @@ pub struct BundleTelemetry {
     pub gas_cost_eth: f64,
     pub net_eth: f64,
     pub timestamp_ms: i64,
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::services::strategy) struct PerBlockInputs {
+    pub block_number: u64,
+    pub gas_fees: GasFees,
+    pub wallet_balance: U256,
 }
 
 impl StrategyStats {
@@ -239,10 +257,28 @@ impl StrategyStats {
             }
         }
     }
+
+    pub fn record_relay_bundle_status(
+        &self,
+        relay_name: &str,
+        status: &str,
+        replacement_uuid: Option<&str>,
+        bundle_id: Option<&str>,
+    ) {
+        let mut guard = self
+            .relay_bundle_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let entry = guard.entry(relay_name.to_string()).or_default();
+        entry.status = status.to_string();
+        entry.replacement_uuid = replacement_uuid.map(ToString::to_string);
+        entry.bundle_id = bundle_id.map(ToString::to_string);
+        entry.updated_at_ms = chrono::Utc::now().timestamp_millis();
+    }
 }
 
 pub struct StrategyExecutor {
-    pub(in crate::services::strategy) tx_rx: Mutex<Receiver<StrategyWork>>,
+    pub(in crate::services::strategy) work_queue: SharedWorkQueue,
     pub(in crate::services::strategy) mut_block_rx: Mutex<BroadcastReceiver<Header>>,
     pub(in crate::services::strategy) safety_guard: Arc<SafetyGuard>,
     pub(in crate::services::strategy) bundle_sender: SharedBundleSender,
@@ -259,6 +295,11 @@ pub struct StrategyExecutor {
     pub(in crate::services::strategy) signer: PrivateKeySigner,
     pub(in crate::services::strategy) nonce_manager: NonceManager,
     pub(in crate::services::strategy) slippage_bps: u64,
+    pub(in crate::services::strategy) profit_guard_base_floor_multiplier_bps: u64,
+    pub(in crate::services::strategy) profit_guard_cost_multiplier_bps: u64,
+    pub(in crate::services::strategy) profit_guard_min_margin_bps: u64,
+    pub(in crate::services::strategy) liquidity_ratio_floor_ppm: u64,
+    pub(in crate::services::strategy) sell_min_native_out_wei: u64,
     pub(in crate::services::strategy) http_provider: HttpProvider,
     pub(in crate::services::strategy) dry_run: bool,
     pub(in crate::services::strategy) router_allowlist: Arc<DashSet<Address>>,
@@ -272,7 +313,6 @@ pub struct StrategyExecutor {
     pub(in crate::services::strategy) exec_router_v2: Option<Address>,
     pub(in crate::services::strategy) exec_router_v3: Option<Address>,
     pub(in crate::services::strategy) inventory_tokens: DashSet<Address>,
-    pub(in crate::services::strategy) last_rebalance: Mutex<Instant>,
     pub(in crate::services::strategy) toxic_tokens: DashSet<Address>,
     pub(in crate::services::strategy) toxic_probe_failures: DashMap<Address, (u32, Instant)>,
     pub(in crate::services::strategy) executor: Option<Address>,
@@ -283,6 +323,7 @@ pub struct StrategyExecutor {
     pub(in crate::services::strategy) aave_pool: Option<Address>,
     pub(in crate::services::strategy) reserve_cache: Arc<ReserveCache>,
     pub(in crate::services::strategy) bundle_state: Arc<Mutex<Option<BundleState>>>,
+    pub(in crate::services::strategy) per_block_inputs: Arc<Mutex<Option<PerBlockInputs>>>,
     pub(in crate::services::strategy) v3_quote_cache: DashMap<B256, V3QuoteCacheEntry>,
     pub(in crate::services::strategy) probe_gas_stats: DashMap<Address, (u64, u64)>,
     pub(in crate::services::strategy) router_sim_stats: DashMap<Address, (u64, u64)>,
@@ -339,8 +380,8 @@ impl StrategyExecutor {
         let eth_balance = wei_to_eth_f64(balance).max(0.0001);
         let sqrt = eth_balance.sqrt();
         let scale = sqrt / (sqrt + 0.8);
-        let min_bps = 6_000.0;
-        let max_bps = 13_000.0;
+        let min_bps = 8_000.0;
+        let max_bps = 14_000.0;
         let bps = min_bps + (max_bps - min_bps) * scale;
         bps.round().clamp(min_bps, max_bps) as u64
     }
@@ -361,19 +402,18 @@ impl StrategyExecutor {
     pub(in crate::services::strategy) fn max_price_impact_bps(&self) -> u64 {
         let wallet_balance = self.portfolio.get_eth_balance_cached(self.chain_id);
         let eth_balance = wei_to_eth_f64(wallet_balance).max(0.0001);
-        let base = 170.0 - 40.0 * (eth_balance * 100.0 + 1.0).log10();
+        // Keep this adaptive but less brittle for small balances so we don't
+        // discard nearly all candidates before simulation.
+        let base = 230.0 - 30.0 * (eth_balance * 100.0 + 1.0).log10();
         let volatility = self.price_feed.volatility_bps_cached("ETH").unwrap_or(0) as f64;
         let vol_adjust = volatility * 0.15;
         let impact = base - vol_adjust;
-        impact.round().clamp(30.0, 200.0) as u64
+        impact.round().clamp(50.0, 300.0) as u64
     }
 
     pub(in crate::services::strategy) fn hard_gas_cap_wei(&self) -> U256 {
-        if self.max_gas_price_gwei == 0 {
-            U256::MAX
-        } else {
-            U256::from(self.max_gas_price_gwei) * U256::from(1_000_000_000u64)
-        }
+        let cap_gwei = self.max_gas_price_gwei.max(DEFAULT_FALLBACK_GAS_CAP_GWEI);
+        U256::from(cap_gwei) * U256::from(1_000_000_000u64)
     }
 
     pub(in crate::services::strategy) fn dynamic_gas_cap(
@@ -395,7 +435,9 @@ impl StrategyExecutor {
             base_dynamic_wei.saturating_mul(balance_factor_bps as u128) / 10_000u128;
 
         // Avoid impossible caps below current base fee on tiny balances.
-        let floor_wei = gas_fees.base_fee_per_gas.max(gas_fees.next_base_fee_per_gas);
+        let floor_wei = gas_fees
+            .base_fee_per_gas
+            .max(gas_fees.next_base_fee_per_gas);
         let cap_wei = U256::from(adjusted_dynamic_wei.max(floor_wei)).min(hard_cap);
 
         DynamicGasCap {
@@ -421,7 +463,9 @@ impl StrategyExecutor {
         } else {
             cap_wei.to::<u128>()
         };
-        let base_anchor = gas_fees.next_base_fee_per_gas.max(gas_fees.base_fee_per_gas);
+        let base_anchor = gas_fees
+            .next_base_fee_per_gas
+            .max(gas_fees.base_fee_per_gas);
         if cap_u128 < base_anchor {
             return true;
         }
@@ -607,7 +651,9 @@ impl StrategyExecutor {
                     + 1
             }
             SkipReason::TokenCall => self.stats.skip_token_call.fetch_add(1, Ordering::Relaxed) + 1,
-            SkipReason::ToxicToken => self.stats.skip_toxic_token.fetch_add(1, Ordering::Relaxed) + 1,
+            SkipReason::ToxicToken => {
+                self.stats.skip_toxic_token.fetch_add(1, Ordering::Relaxed) + 1
+            }
             SkipReason::InsufficientBalance => {
                 self.stats
                     .skip_insufficient_balance
@@ -627,7 +673,10 @@ impl StrategyExecutor {
                     + 1
             }
             SkipReason::SandwichRisk => {
-                self.stats.skip_sandwich_risk.fetch_add(1, Ordering::Relaxed) + 1
+                self.stats
+                    .skip_sandwich_risk
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1
             }
             SkipReason::FrontRunBuildFailed => {
                 self.stats
@@ -676,6 +725,9 @@ impl StrategyExecutor {
     ) -> Option<U256> {
         if token == self.wrapped_native {
             Some(amount)
+        } else if self.allow_non_wrapped_swaps {
+            // Non-wrapped mode permits token-denominated settlement.
+            Some(amount)
         } else {
             None
         }
@@ -711,33 +763,73 @@ impl StrategyExecutor {
         if token == self.wrapped_native {
             return Some(amount);
         }
+        if let Some(out) = self
+            .reserve_cache
+            .quote_v2_path(&[token, self.wrapped_native], amount)
+        {
+            if !out.is_zero() {
+                return Some(out);
+            }
+        }
+        for fee in [500u32, 3_000u32, 10_000u32] {
+            if let Some(path) = encode_v3_path(&[token, self.wrapped_native], &[fee]) {
+                if let Ok(out) = self.quote_v3_path(&path, amount).await {
+                    if !out.is_zero() {
+                        return Some(out);
+                    }
+                }
+            }
+        }
+        if let Some(plan) = self
+            .best_route_plan(token, self.wrapped_native, amount, 0)
+            .await
+        {
+            if !plan.expected_out.is_zero() {
+                return Some(plan.expected_out);
+            }
+        }
+        None
+    }
+
+    pub(in crate::services::strategy) async fn estimate_settlement_native_out(
+        &self,
+        amount: U256,
+        token: Address,
+    ) -> Option<U256> {
+        if token == self.wrapped_native {
+            return Some(amount);
+        }
+        if let Some(native_out) = self.estimate_native_out(amount, token).await {
+            return Some(native_out);
+        }
         if !self.allow_non_wrapped_swaps {
             return None;
         }
-        let info = self.token_manager.info(self.chain_id, token)?;
-        let symbol = info.symbol.clone();
-        let token_quote = self
+
+        // Fallback valuation path for non-wrapped settlement tokens:
+        // estimate token USD value and convert to native USD with a haircut.
+        let token_info = self.token_manager.info(self.chain_id, token)?;
+        let token_units = units_to_float(amount, token_info.decimals);
+        if !token_units.is_finite() || token_units <= 0.0 {
+            return None;
+        }
+        let token_symbol = token_info.symbol.to_uppercase();
+        let native_symbol = constants::native_symbol_for_chain(self.chain_id);
+        let token_price = self
             .price_feed
-            .get_price(&format!("{symbol}USD"))
+            .get_price(&format!("{token_symbol}USD"))
             .await
             .ok()?;
-        let native_symbol = crate::common::constants::native_symbol_for_chain(self.chain_id);
-        let native_quote = self
+        let native_price = self
             .price_feed
             .get_price(&format!("{native_symbol}USD"))
             .await
             .ok()?;
-        if token_quote.price <= 0.0 || native_quote.price <= 0.0 {
+        if token_price.price <= 0.0 || native_price.price <= 0.0 {
             return None;
         }
-        let amount_float = self.amount_to_display(amount, token);
-        let usd_value = amount_float * token_quote.price;
-        let native_value = usd_value / native_quote.price;
-        if !native_value.is_finite() || native_value <= 0.0 {
-            return None;
-        }
-        let wei_estimate = native_value * 1_000_000_000_000_000_000.0;
-        Some(U256::from(wei_estimate as u128))
+        let native_units = (token_units * token_price.price / native_price.price) * 0.97f64;
+        f64_native_to_wei(native_units)
     }
 
     /// Deterministic pseudo-identifier for a V3 pool based on token path and fee tiers.
@@ -757,7 +849,7 @@ impl StrategyExecutor {
     }
 
     pub fn new(
-        tx_rx: Receiver<StrategyWork>,
+        work_queue: SharedWorkQueue,
         block_rx: BroadcastReceiver<Header>,
         safety_guard: Arc<SafetyGuard>,
         bundle_sender: SharedBundleSender,
@@ -774,6 +866,11 @@ impl StrategyExecutor {
         signer: PrivateKeySigner,
         nonce_manager: NonceManager,
         slippage_bps: u64,
+        profit_guard_base_floor_multiplier_bps: u64,
+        profit_guard_cost_multiplier_bps: u64,
+        profit_guard_min_margin_bps: u64,
+        liquidity_ratio_floor_ppm: u64,
+        sell_min_native_out_wei: u64,
         http_provider: HttpProvider,
         dry_run: bool,
         router_allowlist: Arc<DashSet<Address>>,
@@ -799,21 +896,33 @@ impl StrategyExecutor {
     ) -> Self {
         let semaphore_size = worker_limit.max(1);
         let universal_router = constants::default_uniswap_universal_router(chain_id);
-        let mut universal_routers: HashSet<Address> = constants::default_uniswap_universal_routers(
-            chain_id,
-        )
-        .into_iter()
-        .collect();
+        let mut universal_routers: HashSet<Address> =
+            constants::default_uniswap_universal_routers(chain_id)
+                .into_iter()
+                .collect();
         if let Some(primary) = universal_router {
             universal_routers.insert(primary);
         }
-        let oneinch_routers: HashSet<Address> = constants::default_oneinch_routers(chain_id)
+        let mut oneinch_routers: HashSet<Address> = constants::default_oneinch_routers(chain_id)
             .into_iter()
             .collect();
+        // Routers whose intent can be decoded but should execute via canonical v2/v3 routers.
+        for (name, addr) in constants::default_routers_for_chain(chain_id) {
+            if name.starts_with("oneinch_aggregation_router")
+                || name.starts_with("paraswap_")
+                || name.starts_with("kyberswap_")
+                || name.starts_with("zerox_")
+                || name == "dex_router"
+                || name == "transit_swap_router_v5"
+                || name.starts_with("balancer_")
+            {
+                oneinch_routers.insert(addr);
+            }
+        }
         let exec_router_v2 = constants::default_uniswap_v2_router(chain_id);
         let exec_router_v3 = constants::default_uniswap_v3_router(chain_id);
         Self {
-            tx_rx: Mutex::new(tx_rx),
+            work_queue,
             mut_block_rx: Mutex::new(block_rx),
             safety_guard,
             bundle_sender,
@@ -830,6 +939,13 @@ impl StrategyExecutor {
             signer,
             nonce_manager,
             slippage_bps,
+            profit_guard_base_floor_multiplier_bps: profit_guard_base_floor_multiplier_bps
+                .clamp(1_000, 20_000),
+            profit_guard_cost_multiplier_bps: profit_guard_cost_multiplier_bps
+                .clamp(10_000, 20_000),
+            profit_guard_min_margin_bps: profit_guard_min_margin_bps.clamp(200, 5_000),
+            liquidity_ratio_floor_ppm: liquidity_ratio_floor_ppm.clamp(50, 10_000),
+            sell_min_native_out_wei: sell_min_native_out_wei.max(1_000_000_000_000),
             http_provider,
             dry_run,
             router_allowlist,
@@ -842,7 +958,6 @@ impl StrategyExecutor {
             exec_router_v2,
             exec_router_v3,
             inventory_tokens: DashSet::new(),
-            last_rebalance: Mutex::new(Instant::now()),
             toxic_tokens: DashSet::new(),
             toxic_probe_failures: DashMap::new(),
             executor,
@@ -853,6 +968,7 @@ impl StrategyExecutor {
             aave_pool,
             reserve_cache,
             bundle_state: Arc::new(Mutex::new(None)),
+            per_block_inputs: Arc::new(Mutex::new(None)),
             v3_quote_cache: DashMap::new(),
             probe_gas_stats: DashMap::new(),
             router_sim_stats: DashMap::new(),
@@ -875,6 +991,12 @@ impl StrategyExecutor {
             chain = self.chain_id,
             backend = %self.simulation_backend,
             sandwiches_enabled = self.sandwich_attacks_enabled,
+            strict_atomic_mode = !self.allow_non_wrapped_swaps,
+            profit_base_floor_bps = self.profit_guard_base_floor_multiplier_bps,
+            profit_cost_bps = self.profit_guard_cost_multiplier_bps,
+            profit_min_margin_bps = self.profit_guard_min_margin_bps,
+            liquidity_ratio_floor_ppm = self.liquidity_ratio_floor_ppm,
+            sell_min_native_out_wei = self.sell_min_native_out_wei,
             "Strategy configured"
         );
 
@@ -890,40 +1012,29 @@ impl StrategyExecutor {
         });
 
         loop {
-            let work_opt = tokio::select! {
-                _ = executor.shutdown.cancelled() => {
-                    tracing::info!(target: "strategy", "Shutdown requested; stopping strategy work loop");
-                    None
-                }
-                work = async {
-                    let mut rx = executor.tx_rx.lock().await;
-                    rx.recv().await
-                } => work
+            let work_opt = executor.work_queue.pop_latest(&executor.shutdown).await;
+            let Some(work) = work_opt else {
+                tracing::info!(target: "strategy", "Shutdown requested; stopping strategy work loop");
+                break;
             };
-
-            match work_opt {
-                Some(work) => {
-                    executor
-                        .stats
-                        .ingest_queue_depth
-                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                            Some(v.saturating_sub(1))
-                        })
-                        .ok();
-                    let permit = executor
-                        .worker_semaphore
-                        .clone()
-                        .acquire_owned()
-                        .await
-                        .expect("semaphore closed");
-                    let exec = executor.clone();
-                    tokio::spawn(async move {
-                        let _permit = permit;
-                        exec.process_work(work).await;
-                    });
-                }
-                None => break,
-            }
+            executor
+                .stats
+                .ingest_queue_depth
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                    Some(v.saturating_sub(1))
+                })
+                .ok();
+            let permit = executor
+                .worker_semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("semaphore closed");
+            let exec = executor.clone();
+            tokio::spawn(async move {
+                let _permit = permit;
+                exec.process_work(work).await;
+            });
         }
 
         Ok(())
@@ -950,13 +1061,16 @@ impl StrategyExecutor {
                     if prev != number as u64 {
                         let mut guard = self.bundle_state.lock().await;
                         *guard = None;
+                        drop(guard);
+                        let mut inputs = self.per_block_inputs.lock().await;
+                        *inputs = None;
                         // Persist fresh state baseline for the new block.
                         if let Ok(base) = self.nonce_manager.get_base_nonce(number as u64).await {
                             self.persist_nonce_state(number as u64, base, &HashSet::new())
                                 .await;
                         }
                     }
-                    let _ = self.maybe_rebalance_inventory().await;
+                    // Strict atomic mode: do not run periodic inventory rebalancing.
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -1086,11 +1200,7 @@ impl StrategyExecutor {
         if head > 0 { head } else { fallback }
     }
 
-    fn receipt_is_confirmed(
-        current_head: u64,
-        receipt_block: u64,
-        confirm_blocks: u64,
-    ) -> bool {
+    fn receipt_is_confirmed(current_head: u64, receipt_block: u64, confirm_blocks: u64) -> bool {
         let needed_head = receipt_block.saturating_add(confirm_blocks.saturating_sub(1));
         current_head >= needed_head
     }
@@ -1176,6 +1286,18 @@ fn units_to_float(value: U256, decimals: u8) -> f64 {
     let scale = 10f64.powi(decimals as i32);
     let num = value.to_string().parse::<f64>().unwrap_or(0.0);
     num / scale
+}
+
+fn f64_native_to_wei(value_native: f64) -> Option<U256> {
+    if !value_native.is_finite() || value_native <= 0.0 {
+        return None;
+    }
+    let wei = (value_native * 1e18f64).floor();
+    if !wei.is_finite() || wei <= 0.0 {
+        return None;
+    }
+    let as_u128 = wei.min(u128::MAX as f64) as u128;
+    Some(U256::from(as_u128))
 }
 
 #[cfg(test)]
@@ -1446,13 +1568,13 @@ mod tests {
             10_000_000_000_000_000u128,
         ));
         let floor_large = StrategyExecutor::test_dynamic_profit_floor_public(U256::from(
-            20_000_000_000_000_000_000u128,
+            2_000_000_000_000_000_000_000u128,
         ));
         assert!(
             floor_large > floor_small,
             "profit floor should scale with balance"
         );
-        assert!(floor_small >= U256::from(20_000_000_000_000u64));
+        assert!(floor_small >= U256::from(10_000_000_000_000_000u64));
     }
 
     #[test]
@@ -1490,10 +1612,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_native_out_only_allows_wrapped_native() {
-        let exec = dummy_executor_for_tests().await;
+    async fn ensure_native_out_respects_non_wrapped_setting() {
+        let mut exec = dummy_executor_for_tests().await;
         let other = Address::from([9u8; 20]);
         assert!(exec.ensure_native_out(U256::from(10u64), other).is_none());
+        exec.allow_non_wrapped_swaps = true;
+        assert_eq!(
+            exec.ensure_native_out(U256::from(10u64), other),
+            Some(U256::from(10u64))
+        );
         assert_eq!(
             exec.ensure_native_out(U256::from(5u64), weth_mainnet()),
             Some(U256::from(5u64))
@@ -1594,11 +1721,22 @@ mod tests {
     #[tokio::test]
     async fn gas_ratio_rejects_thin_margin() {
         let exec = dummy_executor_for_tests().await;
+        let fees = GasFees {
+            max_fee_per_gas: 55_000_000,
+            max_priority_fee_per_gas: 1_000_000,
+            next_base_fee_per_gas: 50_000_000,
+            base_fee_per_gas: 48_000_000,
+            p50_priority_fee_per_gas: Some(900_000),
+            p90_priority_fee_per_gas: Some(1_800_000),
+            gas_used_ratio: Some(0.85),
+            suggested_max_fee_per_gas: Some(70_000_000),
+        };
         assert!(
-            !exec.gas_ratio_ok(
+            !exec.gas_ratio_ok_with_fees(
                 U256::from(1_000u64),
                 U256::from(1_050u64),
-                U256::from(1_000_000u64)
+                U256::from(1_000_000u64),
+                &fees,
             ),
             "margin below 12% should be rejected"
         );
@@ -1607,10 +1745,21 @@ mod tests {
     #[tokio::test]
     async fn gas_ratio_accepts_healthy_margin() {
         let exec = dummy_executor_for_tests().await;
-        assert!(exec.gas_ratio_ok(
+        let fees = GasFees {
+            max_fee_per_gas: 55_000_000,
+            max_priority_fee_per_gas: 1_000_000,
+            next_base_fee_per_gas: 50_000_000,
+            base_fee_per_gas: 48_000_000,
+            p50_priority_fee_per_gas: Some(900_000),
+            p90_priority_fee_per_gas: Some(1_800_000),
+            gas_used_ratio: Some(0.85),
+            suggested_max_fee_per_gas: Some(70_000_000),
+        };
+        assert!(exec.gas_ratio_ok_with_fees(
             U256::from(1_000u64),
             U256::from(3_000u64),
-            U256::from(1_000_000u64)
+            U256::from(1_000_000u64),
+            &fees,
         ));
     }
 
@@ -1645,15 +1794,18 @@ mod tests {
         let mut exec = dummy_executor_for_tests().await;
         exec.receipt_poll_ms = 100;
         exec.receipt_timeout_ms = 100;
-        let status = exec.await_receipt(&B256::ZERO).await.expect("receipt status");
+        let status = exec
+            .await_receipt(&B256::ZERO)
+            .await
+            .expect("receipt status");
         assert_eq!(status, ReceiptStatus::UnknownTimeout);
     }
 
     #[tokio::test]
-    async fn zero_gas_cap_is_unbounded() {
+    async fn zero_gas_cap_falls_back_to_safe_default() {
         let mut exec = dummy_executor_for_tests().await;
         exec.max_gas_price_gwei = 0;
-        assert_eq!(exec.hard_gas_cap_wei(), U256::MAX);
+        assert_eq!(exec.hard_gas_cap_wei(), U256::from(500_000_000_000u64));
     }
 
     #[tokio::test]
@@ -1671,7 +1823,8 @@ mod tests {
         };
         let cap = exec.dynamic_gas_cap(U256::from(1u64), &fees, U256::MAX);
         assert_eq!(cap.floor_wei, 120);
-        assert_eq!(cap.cap_wei, U256::from(120u64));
+        assert!(cap.cap_wei >= U256::from(120u64));
+        assert!(cap.cap_wei <= U256::from(150u64));
     }
 
     #[tokio::test]
@@ -1750,7 +1903,8 @@ mod tests {
     }
 
     pub(crate) async fn dummy_executor_for_tests() -> StrategyExecutor {
-        let (_tx, rx) = tokio::sync::mpsc::channel(8);
+        let work_queue =
+            Arc::new(crate::services::strategy::execution::work_queue::WorkQueue::new(8));
         let (_block_tx, block_rx) = tokio::sync::broadcast::channel::<Header>(1);
         let http = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
         let safety_guard = Arc::new(SafetyGuard::new());
@@ -1768,6 +1922,8 @@ mod tests {
             ],
             PrivateKeySigner::random(),
             stats.clone(),
+            true,
+            false,
         ));
         let db = Database::new("sqlite::memory:").await.expect("db");
         let portfolio = Arc::new(PortfolioManager::new(http.clone(), Address::ZERO));
@@ -1780,7 +1936,7 @@ mod tests {
         let router_allowlist = Arc::new(DashSet::new());
 
         StrategyExecutor::new(
-            rx,
+            work_queue,
             block_rx,
             safety_guard,
             bundle_sender,
@@ -1797,6 +1953,11 @@ mod tests {
             PrivateKeySigner::random(),
             nonce_manager,
             50,
+            10_000,
+            10_000,
+            1_200,
+            1_000,
+            5_000_000_000_000,
             http.clone(),
             true,
             router_allowlist,

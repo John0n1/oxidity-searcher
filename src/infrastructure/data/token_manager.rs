@@ -97,11 +97,7 @@ impl TokenManager {
         self.tokens_by_chain.is_empty()
     }
 
-    pub async fn validate_chain_addresses(
-        &self,
-        provider: &HttpProvider,
-        chain_id: u64,
-    ) -> usize {
+    pub async fn validate_chain_addresses(&self, provider: &HttpProvider, chain_id: u64) -> usize {
         let Some(tokens) = self.tokens_by_chain.get(&chain_id) else {
             return 0;
         };

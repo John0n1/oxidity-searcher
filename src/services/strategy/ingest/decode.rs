@@ -7,7 +7,10 @@ use alloy::rpc::types::eth::Transaction;
 use alloy_sol_types::{SolCall, SolType};
 
 use crate::services::strategy::routers::{
-    OneInchAggregationRouter, UniV2Router, UniV3Router, UniversalRouter, UniversalRouterDeadline,
+    BalancerVault, DexRouter, KyberAggregationRouterV2, OneInchAggregationRouter,
+    OneInchAggregationRouterV5, ParaSwapAugustusV6, RelayApprovalProxyV3, RelayRouterV3,
+    TransitSwapRouterV5, UniV2Router, UniV3Multicall, UniV3MulticallDeadline, UniV3Router,
+    UniversalRouter, UniversalRouterDeadline, ZeroXExchangeProxy,
 };
 
 use alloy::sol;
@@ -86,6 +89,20 @@ pub fn decode_swap(tx: &Transaction) -> Option<ObservedSwap> {
 }
 
 pub fn decode_swap_input(router: Address, input: &[u8], eth_value: U256) -> Option<ObservedSwap> {
+    decode_swap_input_inner(router, input, eth_value, 0)
+}
+
+const MAX_DECODE_RECURSION: usize = 4;
+
+fn decode_swap_input_inner(
+    router: Address,
+    input: &[u8],
+    eth_value: U256,
+    depth: usize,
+) -> Option<ObservedSwap> {
+    if depth > MAX_DECODE_RECURSION {
+        return None;
+    }
     if input.len() < 4 {
         return None;
     }
@@ -94,31 +111,215 @@ pub fn decode_swap_input(router: Address, input: &[u8], eth_value: U256) -> Opti
     match selector {
         OneInchAggregationRouter::swapCall::SELECTOR => {
             let decoded = OneInchAggregationRouter::swapCall::abi_decode(input).ok()?;
-            let mut token_in = decoded.desc.srcToken;
-            let mut token_out = decoded.desc.dstToken;
-            let native_sentinel =
-                crate::common::constants::native_sentinel_for_chain(crate::common::constants::CHAIN_ETHEREUM);
-            let mainnet_wrapped_native =
-                crate::common::constants::wrapped_native_for_chain(crate::common::constants::CHAIN_ETHEREUM);
-            if token_in == native_sentinel {
-                token_in = mainnet_wrapped_native;
-            }
-            if token_out == native_sentinel {
-                token_out = mainnet_wrapped_native;
-            }
-            if token_in == Address::ZERO || token_out == Address::ZERO || token_in == token_out {
-                return None;
-            }
-            Some(ObservedSwap {
+            observed_aggregator_swap(
                 router,
-                path: vec![token_in, token_out],
-                v3_fees: Vec::new(),
-                v3_path: None,
-                amount_in: decoded.desc.amount,
-                min_out: decoded.desc.minReturnAmount,
-                recipient: decoded.desc.dstReceiver,
-                router_kind: RouterKind::V2Like,
-            })
+                decoded.desc.srcToken,
+                decoded.desc.dstToken,
+                decoded.desc.amount,
+                decoded.desc.minReturnAmount,
+                decoded.desc.dstReceiver,
+            )
+        }
+        OneInchAggregationRouterV5::swapCall::SELECTOR => {
+            let decoded = OneInchAggregationRouterV5::swapCall::abi_decode(input).ok()?;
+            observed_aggregator_swap(
+                router,
+                decoded.desc.srcToken,
+                decoded.desc.dstToken,
+                decoded.desc.amount,
+                decoded.desc.minReturnAmount,
+                decoded.desc.dstReceiver,
+            )
+        }
+        ParaSwapAugustusV6::swapExactAmountInCall::SELECTOR => {
+            let decoded = ParaSwapAugustusV6::swapExactAmountInCall::abi_decode(input).ok()?;
+            observed_aggregator_swap(
+                router,
+                decoded.swapData.srcToken,
+                decoded.swapData.destToken,
+                decoded.swapData.fromAmount,
+                decoded.swapData.toAmount,
+                decoded.swapData.beneficiary,
+            )
+        }
+        ParaSwapAugustusV6::swapExactAmountOutCall::SELECTOR => {
+            let decoded = ParaSwapAugustusV6::swapExactAmountOutCall::abi_decode(input).ok()?;
+            observed_aggregator_swap(
+                router,
+                decoded.swapData.srcToken,
+                decoded.swapData.destToken,
+                decoded.swapData.fromAmount,
+                decoded.swapData.toAmount,
+                decoded.swapData.beneficiary,
+            )
+        }
+        KyberAggregationRouterV2::swapCall::SELECTOR => {
+            let decoded = KyberAggregationRouterV2::swapCall::abi_decode(input).ok()?;
+            observed_aggregator_swap(
+                router,
+                decoded.execution.desc.srcToken,
+                decoded.execution.desc.dstToken,
+                decoded.execution.desc.amount,
+                decoded.execution.desc.minReturnAmount,
+                decoded.execution.desc.dstReceiver,
+            )
+        }
+        KyberAggregationRouterV2::swapGenericCall::SELECTOR => {
+            let decoded = KyberAggregationRouterV2::swapGenericCall::abi_decode(input).ok()?;
+            observed_aggregator_swap(
+                router,
+                decoded.execution.desc.srcToken,
+                decoded.execution.desc.dstToken,
+                decoded.execution.desc.amount,
+                decoded.execution.desc.minReturnAmount,
+                decoded.execution.desc.dstReceiver,
+            )
+        }
+        KyberAggregationRouterV2::swapSimpleModeCall::SELECTOR => {
+            let decoded = KyberAggregationRouterV2::swapSimpleModeCall::abi_decode(input).ok()?;
+            observed_aggregator_swap(
+                router,
+                decoded.desc.srcToken,
+                decoded.desc.dstToken,
+                decoded.desc.amount,
+                decoded.desc.minReturnAmount,
+                decoded.desc.dstReceiver,
+            )
+        }
+        ZeroXExchangeProxy::transformERC20Call::SELECTOR => {
+            let decoded = ZeroXExchangeProxy::transformERC20Call::abi_decode(input).ok()?;
+            observed_aggregator_swap(
+                router,
+                decoded.inputToken,
+                decoded.outputToken,
+                decoded.inputTokenAmount,
+                decoded.minOutputTokenAmount,
+                Address::ZERO,
+            )
+        }
+        DexRouter::dagSwapByOrderIdCall::SELECTOR => {
+            let decoded = DexRouter::dagSwapByOrderIdCall::abi_decode(input).ok()?;
+            observed_from_dex_base_request(router, decoded.baseRequest, Address::ZERO)
+        }
+        DexRouter::dagSwapToCall::SELECTOR => {
+            let decoded = DexRouter::dagSwapToCall::abi_decode(input).ok()?;
+            observed_from_dex_base_request(router, decoded.baseRequest, decoded.receiver)
+        }
+        DexRouter::smartSwapByOrderIdCall::SELECTOR => {
+            let decoded = DexRouter::smartSwapByOrderIdCall::abi_decode(input).ok()?;
+            observed_from_dex_base_request(router, decoded.baseRequest, Address::ZERO)
+        }
+        DexRouter::smartSwapToCall::SELECTOR => {
+            let decoded = DexRouter::smartSwapToCall::abi_decode(input).ok()?;
+            observed_from_dex_base_request(router, decoded.baseRequest, decoded.receiver)
+        }
+        DexRouter::smartSwapByInvestCall::SELECTOR => {
+            let decoded = DexRouter::smartSwapByInvestCall::abi_decode(input).ok()?;
+            observed_from_dex_base_request(router, decoded.baseRequest, decoded.to)
+        }
+        DexRouter::smartSwapByInvestWithRefundCall::SELECTOR => {
+            let decoded = DexRouter::smartSwapByInvestWithRefundCall::abi_decode(input).ok()?;
+            observed_from_dex_base_request(router, decoded.baseRequest, decoded.to)
+        }
+        DexRouter::swapWrapToWithBaseRequestCall::SELECTOR => {
+            let decoded = DexRouter::swapWrapToWithBaseRequestCall::abi_decode(input).ok()?;
+            observed_from_dex_base_request(router, decoded.baseRequest, decoded.receiver)
+        }
+        DexRouter::uniswapV3SwapToWithBaseRequestCall::SELECTOR => {
+            let decoded = DexRouter::uniswapV3SwapToWithBaseRequestCall::abi_decode(input).ok()?;
+            observed_from_dex_base_request(router, decoded.baseRequest, decoded.receiver)
+        }
+        DexRouter::unxswapToWithBaseRequestCall::SELECTOR => {
+            let decoded = DexRouter::unxswapToWithBaseRequestCall::abi_decode(input).ok()?;
+            observed_from_dex_base_request(router, decoded.baseRequest, decoded.receiver)
+        }
+        TransitSwapRouterV5::exactInputV2SwapCall::SELECTOR => {
+            let decoded = TransitSwapRouterV5::exactInputV2SwapCall::abi_decode(input).ok()?;
+            observed_transit_v2(router, decoded.exactInput)
+        }
+        TransitSwapRouterV5::exactInputV2SwapAndGasUsedCall::SELECTOR => {
+            let decoded =
+                TransitSwapRouterV5::exactInputV2SwapAndGasUsedCall::abi_decode(input).ok()?;
+            observed_transit_v2(router, decoded.exactInput)
+        }
+        TransitSwapRouterV5::exactInputV3SwapCall::SELECTOR => {
+            let decoded = TransitSwapRouterV5::exactInputV3SwapCall::abi_decode(input).ok()?;
+            observed_aggregator_swap(
+                router,
+                decoded.params.srcToken,
+                decoded.params.dstToken,
+                decoded.params.amount,
+                decoded.params.minReturnAmount,
+                decoded.params.dstReceiver,
+            )
+        }
+        TransitSwapRouterV5::exactInputV3SwapAndGasUsedCall::SELECTOR => {
+            let decoded =
+                TransitSwapRouterV5::exactInputV3SwapAndGasUsedCall::abi_decode(input).ok()?;
+            observed_aggregator_swap(
+                router,
+                decoded.params.srcToken,
+                decoded.params.dstToken,
+                decoded.params.amount,
+                decoded.params.minReturnAmount,
+                decoded.params.dstReceiver,
+            )
+        }
+        RelayRouterV3::multicallCall::SELECTOR => {
+            let decoded = RelayRouterV3::multicallCall::abi_decode(input).ok()?;
+            decode_relay_calls(router, decoded.calls, depth, eth_value)
+        }
+        RelayApprovalProxyV3::transferAndMulticallCall::SELECTOR => {
+            let decoded = RelayApprovalProxyV3::transferAndMulticallCall::abi_decode(input).ok()?;
+            decode_relay_approval_calls(router, decoded.calls, depth, eth_value)
+        }
+        RelayApprovalProxyV3::permitTransferAndMulticallCall::SELECTOR => {
+            let decoded =
+                RelayApprovalProxyV3::permitTransferAndMulticallCall::abi_decode(input).ok()?;
+            decode_relay_approval_calls(router, decoded.calls, depth, eth_value)
+        }
+        RelayApprovalProxyV3::permit3009TransferAndMulticallCall::SELECTOR => {
+            let decoded =
+                RelayApprovalProxyV3::permit3009TransferAndMulticallCall::abi_decode(input).ok()?;
+            decode_relay_approval_calls(router, decoded.calls, depth, eth_value)
+        }
+        RelayApprovalProxyV3::permit2TransferAndMulticallCall::SELECTOR => {
+            let decoded =
+                RelayApprovalProxyV3::permit2TransferAndMulticallCall::abi_decode(input).ok()?;
+            decode_relay_approval_calls(router, decoded.calls, depth, eth_value)
+        }
+        BalancerVault::swapCall::SELECTOR => {
+            let decoded = BalancerVault::swapCall::abi_decode(input).ok()?;
+            observed_aggregator_swap(
+                router,
+                normalize_balancer_asset(decoded.singleSwap.assetIn),
+                normalize_balancer_asset(decoded.singleSwap.assetOut),
+                decoded.singleSwap.amount,
+                U256::ZERO,
+                decoded.funds.recipient,
+            )
+        }
+        BalancerVault::batchSwapCall::SELECTOR => {
+            let decoded = BalancerVault::batchSwapCall::abi_decode(input).ok()?;
+            let first = decoded.swaps.first()?;
+            let last = decoded.swaps.last()?;
+            let idx_in = usize::try_from(first.assetInIndex).ok()?;
+            let idx_out = usize::try_from(last.assetOutIndex).ok()?;
+            let token_in = normalize_balancer_asset(*decoded.assets.get(idx_in)?);
+            let token_out = normalize_balancer_asset(*decoded.assets.get(idx_out)?);
+            let amount_in = if first.amount > U256::ZERO {
+                first.amount
+            } else {
+                U256::ZERO
+            };
+            observed_aggregator_swap(
+                router,
+                token_in,
+                token_out,
+                amount_in,
+                U256::ZERO,
+                decoded.funds.recipient,
+            )
         }
         UniV2Router::swapExactETHForTokensCall::SELECTOR => {
             let decoded = UniV2Router::swapExactETHForTokensCall::abi_decode(input).ok()?;
@@ -330,6 +531,28 @@ pub fn decode_swap_input(router: Address, input: &[u8], eth_value: U256) -> Opti
                 router_kind: RouterKind::V3Like,
             })
         }
+        UniV3Multicall::multicallCall::SELECTOR => {
+            let decoded = UniV3Multicall::multicallCall::abi_decode(input).ok()?;
+            for nested in decoded.data {
+                if let Some(observed) =
+                    decode_swap_input_inner(router, nested.as_ref(), eth_value, depth + 1)
+                {
+                    return Some(observed);
+                }
+            }
+            None
+        }
+        UniV3MulticallDeadline::multicallCall::SELECTOR => {
+            let decoded = UniV3MulticallDeadline::multicallCall::abi_decode(input).ok()?;
+            for nested in decoded.data {
+                if let Some(observed) =
+                    decode_swap_input_inner(router, nested.as_ref(), eth_value, depth + 1)
+                {
+                    return Some(observed);
+                }
+            }
+            None
+        }
         UniversalRouter::executeCall::SELECTOR => {
             let decoded = UniversalRouter::executeCall::abi_decode(input).ok()?;
             decode_universal_router(router, decoded.commands, decoded.inputs)
@@ -340,6 +563,163 @@ pub fn decode_swap_input(router: Address, input: &[u8], eth_value: U256) -> Opti
         }
         _ => None,
     }
+}
+
+fn normalize_aggregator_token(token: Address) -> Option<Address> {
+    if token == Address::ZERO {
+        return None;
+    }
+    let native_sentinel = crate::common::constants::native_sentinel_for_chain(
+        crate::common::constants::CHAIN_ETHEREUM,
+    );
+    if token == native_sentinel {
+        return Some(crate::common::constants::wrapped_native_for_chain(
+            crate::common::constants::CHAIN_ETHEREUM,
+        ));
+    }
+    Some(token)
+}
+
+fn normalize_balancer_asset(asset: Address) -> Address {
+    if asset == Address::ZERO {
+        return crate::common::constants::wrapped_native_for_chain(
+            crate::common::constants::CHAIN_ETHEREUM,
+        );
+    }
+    asset
+}
+
+fn observed_aggregator_swap(
+    router: Address,
+    token_in_raw: Address,
+    token_out_raw: Address,
+    amount_in: U256,
+    min_out: U256,
+    recipient: Address,
+) -> Option<ObservedSwap> {
+    let token_in = normalize_aggregator_token(token_in_raw)?;
+    let token_out = normalize_aggregator_token(token_out_raw)?;
+    if token_in == token_out || amount_in.is_zero() {
+        return None;
+    }
+    Some(ObservedSwap {
+        router,
+        path: vec![token_in, token_out],
+        v3_fees: Vec::new(),
+        v3_path: None,
+        amount_in,
+        min_out,
+        recipient,
+        router_kind: RouterKind::V2Like,
+    })
+}
+
+fn u256_word_to_address(raw: U256) -> Option<Address> {
+    let bytes = raw.to_be_bytes::<32>();
+    let addr = Address::from_slice(&bytes[12..]);
+    if addr == Address::ZERO {
+        None
+    } else {
+        Some(addr)
+    }
+}
+
+fn observed_from_dex_base_request(
+    router: Address,
+    base_request: DexRouter::DexBaseRequest,
+    recipient: Address,
+) -> Option<ObservedSwap> {
+    let token_in = u256_word_to_address(base_request.fromToken)?;
+    observed_aggregator_swap(
+        router,
+        token_in,
+        base_request.toToken,
+        base_request.fromTokenAmount,
+        base_request.minReturnAmount,
+        recipient,
+    )
+}
+
+fn observed_transit_v2(
+    router: Address,
+    params: TransitSwapRouterV5::TransitExactInputV2,
+) -> Option<ObservedSwap> {
+    if params.path.len() < 2 {
+        return None;
+    }
+    let mut path: Vec<Address> = params
+        .path
+        .iter()
+        .copied()
+        .filter_map(normalize_aggregator_token)
+        .collect();
+    if path.len() < 2 {
+        return None;
+    }
+    // Path can contain duplicates in malformed payloads; keep at least endpoints sane.
+    if path.first() == path.last() {
+        return None;
+    }
+    let recipient = if params.dstReceiver == Address::ZERO {
+        router
+    } else {
+        params.dstReceiver
+    };
+    let min_out = params.minReturnAmount;
+    let amount_in = params.amount;
+    Some(ObservedSwap {
+        router,
+        path: std::mem::take(&mut path),
+        v3_fees: Vec::new(),
+        v3_path: None,
+        amount_in,
+        min_out,
+        recipient,
+        router_kind: RouterKind::V2Like,
+    })
+}
+
+fn decode_relay_calls(
+    router: Address,
+    calls: Vec<RelayRouterV3::RelayCall>,
+    depth: usize,
+    eth_value: U256,
+) -> Option<ObservedSwap> {
+    let _ = router;
+    for call in calls.iter() {
+        if let Some(observed) =
+            decode_swap_input_inner(call.target, call.callData.as_ref(), call.value, depth + 1)
+        {
+            return Some(observed);
+        }
+    }
+    // Fallback: some relays do not forward per-call value cleanly.
+    for call in calls.iter() {
+        if let Some(observed) =
+            decode_swap_input_inner(call.target, call.callData.as_ref(), eth_value, depth + 1)
+        {
+            return Some(observed);
+        }
+    }
+    None
+}
+
+fn decode_relay_approval_calls(
+    router: Address,
+    calls: Vec<RelayApprovalProxyV3::RelayApprovalCall>,
+    depth: usize,
+    eth_value: U256,
+) -> Option<ObservedSwap> {
+    let relay_calls: Vec<RelayRouterV3::RelayCall> = calls
+        .into_iter()
+        .map(|c| RelayRouterV3::RelayCall {
+            target: c.target,
+            allowFailure: c.allowFailure,
+            value: c.value,
+            callData: c.callData,
+        })
+        .collect();
+    decode_relay_calls(router, relay_calls, depth, eth_value)
 }
 
 const UR_CMD_V3_SWAP_EXACT_IN: u8 = 0x00;
@@ -449,8 +829,13 @@ pub fn target_token(path: &[Address], wrapped_native: Address) -> Option<Address
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::strategy::routers::OneInchAggregationRouter;
+    use crate::services::strategy::routers::{
+        DexRouter, KyberAggregationRouterV2, OneInchAggregationRouter, OneInchAggregationRouterV5,
+        ParaSwapAugustusV6, RelayRouterV3, TransitSwapRouterV5, UniV2Router, UniV3Multicall,
+        UniV3Router, ZeroXExchangeProxy,
+    };
     use alloy::primitives::Bytes;
+    use alloy::primitives::{U160, aliases::U24};
     use alloy::sol_types::SolCall;
 
     #[test]
@@ -481,8 +866,7 @@ mod tests {
             data: Bytes::new(),
         };
         let input = call.abi_encode();
-        let observed =
-            decode_swap_input(router, &input, U256::ZERO).expect("decode oneinch swap");
+        let observed = decode_swap_input(router, &input, U256::ZERO).expect("decode oneinch swap");
         assert_eq!(observed.path, vec![usdc, weth]);
         assert_eq!(observed.amount_in, U256::from(1_000_000u64));
         assert_eq!(observed.min_out, U256::from(1_000_000_000_000u64));
@@ -526,6 +910,249 @@ mod tests {
             )
         );
         assert_eq!(observed.path[1], dai);
+    }
+
+    #[test]
+    fn decodes_oneinch_v5_swap_description() {
+        let router = Address::from([0x55; 20]);
+        let usdc = Address::from([0x22; 20]);
+        let weth = crate::common::constants::wrapped_native_for_chain(
+            crate::common::constants::CHAIN_ETHEREUM,
+        );
+        let recipient = Address::from([0x33; 20]);
+
+        let call = OneInchAggregationRouterV5::swapCall {
+            executor: Address::ZERO,
+            desc: OneInchAggregationRouterV5::SwapDescriptionV5 {
+                srcToken: usdc,
+                dstToken: weth,
+                srcReceiver: Address::ZERO,
+                dstReceiver: recipient,
+                amount: U256::from(12_345u64),
+                minReturnAmount: U256::from(6_789u64),
+                flags: U256::ZERO,
+            },
+            permit: Bytes::new(),
+            data: Bytes::new(),
+        };
+        let input = call.abi_encode();
+        let observed = decode_swap_input(router, &input, U256::ZERO).expect("decode oneinch v5");
+        assert_eq!(observed.path, vec![usdc, weth]);
+        assert_eq!(observed.amount_in, U256::from(12_345u64));
+        assert_eq!(observed.min_out, U256::from(6_789u64));
+        assert_eq!(observed.recipient, recipient);
+    }
+
+    #[test]
+    fn decodes_paraswap_v6_exact_amount_in() {
+        let router = Address::from([0x66; 20]);
+        let usdc = Address::from([0x22; 20]);
+        let weth = crate::common::constants::wrapped_native_for_chain(
+            crate::common::constants::CHAIN_ETHEREUM,
+        );
+        let recipient = Address::from([0x77; 20]);
+        let call = ParaSwapAugustusV6::swapExactAmountInCall {
+            executor: Address::ZERO,
+            swapData: ParaSwapAugustusV6::SwapData {
+                srcToken: usdc,
+                destToken: weth,
+                fromAmount: U256::from(1_000_000u64),
+                toAmount: U256::from(500_000_000_000_000u64),
+                quotedAmount: U256::from(0u64),
+                metadata: [0u8; 32].into(),
+                beneficiary: recipient,
+            },
+            partnerAndFee: U256::ZERO,
+            permit: Bytes::new(),
+            executorData: Bytes::new(),
+        };
+        let input = call.abi_encode();
+        let observed = decode_swap_input(router, &input, U256::ZERO).expect("decode paraswap");
+        assert_eq!(observed.path, vec![usdc, weth]);
+        assert_eq!(observed.amount_in, U256::from(1_000_000u64));
+        assert_eq!(observed.min_out, U256::from(500_000_000_000_000u64));
+        assert_eq!(observed.recipient, recipient);
+    }
+
+    #[test]
+    fn decodes_kyber_swap_simple_mode() {
+        let router = Address::from([0x88; 20]);
+        let usdc = Address::from([0x22; 20]);
+        let weth = crate::common::constants::wrapped_native_for_chain(
+            crate::common::constants::CHAIN_ETHEREUM,
+        );
+        let recipient = Address::from([0x99; 20]);
+        let call = KyberAggregationRouterV2::swapSimpleModeCall {
+            caller: Address::from([0x11; 20]),
+            desc: KyberAggregationRouterV2::KyberSwapDescription {
+                srcToken: usdc,
+                dstToken: weth,
+                srcReceivers: vec![Address::from([0x12; 20])],
+                srcAmounts: vec![U256::from(1_000_000u64)],
+                feeReceivers: vec![],
+                feeAmounts: vec![],
+                dstReceiver: recipient,
+                amount: U256::from(1_000_000u64),
+                minReturnAmount: U256::from(499_000_000_000_000u64),
+                flags: U256::ZERO,
+                permit: Bytes::new(),
+            },
+            executorData: Bytes::new(),
+            clientData: Bytes::new(),
+        };
+        let input = call.abi_encode();
+        let observed = decode_swap_input(router, &input, U256::ZERO).expect("decode kyber");
+        assert_eq!(observed.path, vec![usdc, weth]);
+        assert_eq!(observed.amount_in, U256::from(1_000_000u64));
+        assert_eq!(observed.min_out, U256::from(499_000_000_000_000u64));
+        assert_eq!(observed.recipient, recipient);
+    }
+
+    #[test]
+    fn decodes_zerox_transform_erc20() {
+        let router = Address::from([0xaa; 20]);
+        let usdc = Address::from([0x22; 20]);
+        let weth = crate::common::constants::wrapped_native_for_chain(
+            crate::common::constants::CHAIN_ETHEREUM,
+        );
+        let call = ZeroXExchangeProxy::transformERC20Call {
+            inputToken: usdc,
+            outputToken: weth,
+            inputTokenAmount: U256::from(1_000_000u64),
+            minOutputTokenAmount: U256::from(499_000_000_000_000u64),
+            transformations: vec![ZeroXExchangeProxy::ZeroXTransformation {
+                deploymentNonce: 1u32,
+                data: Bytes::new(),
+            }],
+        };
+        let input = call.abi_encode();
+        let observed = decode_swap_input(router, &input, U256::ZERO).expect("decode 0x transform");
+        assert_eq!(observed.path, vec![usdc, weth]);
+        assert_eq!(observed.amount_in, U256::from(1_000_000u64));
+        assert_eq!(observed.min_out, U256::from(499_000_000_000_000u64));
+    }
+
+    #[test]
+    fn decodes_v3_multicall_nested_exact_input_single() {
+        let router = Address::from([0xbb; 20]);
+        let weth = crate::common::constants::wrapped_native_for_chain(
+            crate::common::constants::CHAIN_ETHEREUM,
+        );
+        let usdc = Address::from([0x22; 20]);
+        let inner = UniV3Router::exactInputSingleCall {
+            params: UniV3Router::ExactInputSingleParams {
+                tokenIn: weth,
+                tokenOut: usdc,
+                fee: U24::from(500u32),
+                recipient: Address::from([0x33; 20]),
+                deadline: U256::from(100u64),
+                amountIn: U256::from(1_000_000_000_000_000_000u128),
+                amountOutMinimum: U256::from(1u64),
+                sqrtPriceLimitX96: U160::ZERO,
+            },
+        };
+        let wrapped = UniV3Multicall::multicallCall {
+            data: vec![Bytes::from(inner.abi_encode())],
+        };
+        let input = wrapped.abi_encode();
+        let observed =
+            decode_swap_input(router, &input, U256::ZERO).expect("decode nested multicall");
+        assert_eq!(observed.path, vec![weth, usdc]);
+        assert_eq!(observed.v3_fees, vec![500u32]);
+        assert_eq!(observed.router_kind, RouterKind::V3Like);
+    }
+
+    #[test]
+    fn decodes_dex_router_base_request_shape() {
+        let router = Address::from([0xdd; 20]);
+        let usdc = Address::from([0x22; 20]);
+        let weth = crate::common::constants::wrapped_native_for_chain(
+            crate::common::constants::CHAIN_ETHEREUM,
+        );
+        let mut from_token_word = [0u8; 32];
+        from_token_word[12..].copy_from_slice(usdc.as_slice());
+        let call = DexRouter::swapWrapToWithBaseRequestCall {
+            orderId: U256::from(1u64),
+            receiver: Address::from([0xee; 20]),
+            baseRequest: DexRouter::DexBaseRequest {
+                fromToken: U256::from_be_bytes(from_token_word),
+                toToken: weth,
+                fromTokenAmount: U256::from(1_000_000u64),
+                minReturnAmount: U256::from(400_000_000_000_000u64),
+                deadLine: U256::from(1_000u64),
+            },
+        };
+        let observed = decode_swap_input(router, &call.abi_encode(), U256::ZERO)
+            .expect("decode dex base request");
+        assert_eq!(observed.path, vec![usdc, weth]);
+        assert_eq!(observed.amount_in, U256::from(1_000_000u64));
+        assert_eq!(observed.min_out, U256::from(400_000_000_000_000u64));
+        assert_eq!(observed.router_kind, RouterKind::V2Like);
+    }
+
+    #[test]
+    fn decodes_transit_v2_path_shape() {
+        let router = Address::from([0xaa; 20]);
+        let usdc = Address::from([0x22; 20]);
+        let weth = crate::common::constants::wrapped_native_for_chain(
+            crate::common::constants::CHAIN_ETHEREUM,
+        );
+        let dai = Address::from([0x44; 20]);
+        let call = TransitSwapRouterV5::exactInputV2SwapCall {
+            exactInput: TransitSwapRouterV5::TransitExactInputV2 {
+                dstReceiver: Address::from([0xbb; 20]),
+                wrappedToken: weth,
+                router: U256::from(1u64),
+                amount: U256::from(1_000_000u64),
+                minReturnAmount: U256::from(990_000u64),
+                fee: U256::ZERO,
+                path: vec![usdc, weth, dai],
+                pool: vec![],
+                signature: Bytes::new(),
+                channel: "test".to_string(),
+            },
+            deadline: U256::from(100u64),
+        };
+        let observed =
+            decode_swap_input(router, &call.abi_encode(), U256::ZERO).expect("decode transit v2");
+        assert_eq!(observed.path, vec![usdc, weth, dai]);
+        assert_eq!(observed.amount_in, U256::from(1_000_000u64));
+        assert_eq!(observed.min_out, U256::from(990_000u64));
+        assert_eq!(observed.router_kind, RouterKind::V2Like);
+    }
+
+    #[test]
+    fn decodes_relay_multicall_nested_swap() {
+        let relay = Address::from([0xcc; 20]);
+        let nested_router = Address::from([0xdd; 20]);
+        let usdc = Address::from([0x22; 20]);
+        let weth = crate::common::constants::wrapped_native_for_chain(
+            crate::common::constants::CHAIN_ETHEREUM,
+        );
+        let nested_call = UniV2Router::swapExactTokensForTokensCall {
+            amountIn: U256::from(1_000_000u64),
+            amountOutMin: U256::from(500_000_000_000_000u64),
+            path: vec![usdc, weth],
+            to: Address::from([0x33; 20]),
+            deadline: U256::from(123u64),
+        };
+        let relay_call = RelayRouterV3::multicallCall {
+            calls: vec![RelayRouterV3::RelayCall {
+                target: nested_router,
+                allowFailure: false,
+                value: U256::ZERO,
+                callData: Bytes::from(nested_call.abi_encode()),
+            }],
+            refundTo: Address::from([0x44; 20]),
+            nftRecipient: Address::from([0x55; 20]),
+            metadata: Bytes::new(),
+        };
+        let observed = decode_swap_input(relay, &relay_call.abi_encode(), U256::ZERO)
+            .expect("decode relay nested");
+        assert_eq!(observed.router, nested_router);
+        assert_eq!(observed.path, vec![usdc, weth]);
+        assert_eq!(observed.amount_in, U256::from(1_000_000u64));
+        assert_eq!(observed.min_out, U256::from(500_000_000_000_000u64));
     }
 }
 

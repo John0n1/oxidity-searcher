@@ -4,3 +4,4 @@
 pub mod engine;
 pub mod executor;
 pub mod strategy;
+pub mod work_queue;

@@ -11,11 +11,11 @@ use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::sync::mpsc::{Sender, error::TrySendError};
 use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::strategy::{StrategyStats, StrategyWork};
+use crate::services::strategy::execution::work_queue::SharedWorkQueue;
 
 #[derive(Debug, Clone)]
 pub struct MevShareHint {
@@ -67,7 +67,7 @@ pub struct MevShareClient {
     chain_id: u64,
     seen: Arc<DashSet<B256>>,
     seen_order: Arc<Mutex<VecDeque<B256>>>,
-    tx_sender: Sender<StrategyWork>,
+    work_queue: SharedWorkQueue,
     stats: Arc<StrategyStats>,
     capacity: usize,
     history_limit: u32,
@@ -80,7 +80,7 @@ impl MevShareClient {
     pub fn new(
         base_url: String,
         chain_id: u64,
-        tx_sender: Sender<StrategyWork>,
+        work_queue: SharedWorkQueue,
         stats: Arc<StrategyStats>,
         capacity: usize,
         history_limit: u32,
@@ -98,7 +98,7 @@ impl MevShareClient {
             chain_id,
             seen: Arc::new(DashSet::new()),
             seen_order: Arc::new(Mutex::new(VecDeque::new())),
-            tx_sender,
+            work_queue,
             stats,
             capacity,
             history_limit,
@@ -278,38 +278,34 @@ impl MevShareClient {
                     self.enqueue(StrategyWork::MevShareHint {
                         hint,
                         received_at: std::time::Instant::now(),
-                    });
+                    })
+                    .await;
                 }
             }
         }
     }
 
-    fn enqueue(&self, work: StrategyWork) {
-        match self.tx_sender.try_send(work) {
-            Ok(()) => {
-                self.stats
-                    .ingest_queue_depth
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            Err(TrySendError::Full(_)) => {
-                self.stats
-                    .ingest_queue_full
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.stats
-                    .ingest_queue_dropped
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.stats
-                    .ingest_backpressure
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                tracing::warn!(
-                    target: "mev_share",
-                    capacity = self.capacity,
-                    "ingest channel full; dropped hint"
-                );
-            }
-            Err(TrySendError::Closed(_)) => {
-                tracing::warn!(target: "mev_share", "ingest channel closed; dropping hint");
-            }
+    async fn enqueue(&self, work: StrategyWork) {
+        let pushed = self.work_queue.push(work).await;
+        if pushed.dropped_oldest {
+            self.stats
+                .ingest_queue_full
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.stats
+                .ingest_queue_dropped
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.stats
+                .ingest_backpressure
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                target: "mev_share",
+                capacity = self.capacity,
+                "ingest queue full; dropped oldest hint"
+            );
+        } else {
+            self.stats
+                .ingest_queue_depth
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 

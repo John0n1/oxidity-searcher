@@ -44,6 +44,7 @@ impl StrategyExecutor {
     /// Minimum profit that accounts for current gas/bribe costs plus a small safety margin.
     /// Uses fee history–derived gas_cost_wei supplied by the caller; extra_costs can include
     /// executor bribes and flash‑loan premiums.
+    #[cfg(test)]
     pub(crate) fn dynamic_profit_floor_with_costs(
         wallet_balance: U256,
         gas_cost_wei: U256,
@@ -51,13 +52,126 @@ impl StrategyExecutor {
     ) -> U256 {
         let base_floor = Self::dynamic_profit_floor(wallet_balance);
         let cost_basis = gas_cost_wei.saturating_add(extra_costs);
-        // Net profit already excludes effective costs, so only require a small drift buffer
-        // above the base floor instead of re-adding full execution costs.
-        let drift_buffer = cost_basis
-            .saturating_mul(U256::from(5u64))
+        // Mainnet-first safety floor: require recovery of direct execution costs
+        // (gas + bribe/premium) in addition to baseline profit.
+        base_floor.saturating_add(cost_basis)
+    }
+
+    pub(crate) fn tuned_profit_floor_with_costs(
+        &self,
+        wallet_balance: U256,
+        gas_cost_wei: U256,
+        extra_costs: U256,
+        gas_fees: &GasFees,
+    ) -> U256 {
+        let base_bps = self.adaptive_base_floor_bps(gas_fees);
+        let cost_bps = self.adaptive_cost_floor_bps(gas_fees);
+        let base_floor = Self::dynamic_profit_floor(wallet_balance);
+        let scaled_base = base_floor
+            .saturating_mul(U256::from(base_bps))
+            .checked_div(U256::from(10_000u64))
+            .unwrap_or(base_floor);
+
+        let cost_basis = gas_cost_wei.saturating_add(extra_costs);
+        let scaled_cost = cost_basis
+            .saturating_mul(U256::from(cost_bps))
+            .checked_div(U256::from(10_000u64))
+            .unwrap_or(cost_basis);
+
+        scaled_base.saturating_add(scaled_cost)
+    }
+
+    fn congestion_factor_bps(&self, gas_fees: &GasFees) -> u64 {
+        let util = gas_fees.gas_used_ratio.unwrap_or(0.7);
+        let tip_p50 = gas_fees
+            .p50_priority_fee_per_gas
+            .unwrap_or(gas_fees.max_priority_fee_per_gas)
+            .max(1);
+        let tip_p90 = gas_fees
+            .p90_priority_fee_per_gas
+            .unwrap_or(gas_fees.max_priority_fee_per_gas)
+            .max(tip_p50);
+        let tip_spread_x100 = tip_p90.saturating_mul(100) / tip_p50.max(1);
+        let mut bps: i64 = 10_000;
+        if util > 1.05 {
+            bps += 1_200;
+        } else if util > 0.95 {
+            bps += 700;
+        } else if util < 0.55 {
+            bps -= 900;
+        } else if util < 0.70 {
+            bps -= 500;
+        }
+        if tip_spread_x100 > 5_000 {
+            bps += 900;
+        } else if tip_spread_x100 > 2_500 {
+            bps += 500;
+        } else if tip_spread_x100 < 800 {
+            bps -= 400;
+        }
+        let base = gas_fees.base_fee_per_gas.max(1);
+        if gas_fees.next_base_fee_per_gas > base.saturating_mul(112) / 100 {
+            bps += 400;
+        } else if gas_fees.next_base_fee_per_gas < base.saturating_mul(95) / 100 {
+            bps -= 250;
+        }
+        bps.clamp(7_500, 14_000) as u64
+    }
+
+    pub(crate) fn adaptive_base_floor_bps(&self, gas_fees: &GasFees) -> u64 {
+        let bps = self
+            .profit_guard_base_floor_multiplier_bps
+            .saturating_mul(self.congestion_factor_bps(gas_fees))
+            / 10_000u64;
+        bps.clamp(3_500, 12_000)
+    }
+
+    pub(crate) fn adaptive_cost_floor_bps(&self, gas_fees: &GasFees) -> u64 {
+        let congestion = self.congestion_factor_bps(gas_fees);
+        let extra = if congestion >= 11_500 { 10_500 } else { 10_000 };
+        let bps = self
+            .profit_guard_cost_multiplier_bps
+            .max(10_000)
+            .saturating_mul(extra)
+            / 10_000u64;
+        bps.clamp(10_000, 15_000)
+    }
+
+    pub(crate) fn adaptive_min_margin_bps(&self, gas_fees: &GasFees) -> u64 {
+        let bps = self
+            .profit_guard_min_margin_bps
+            .saturating_mul(self.congestion_factor_bps(gas_fees))
+            / 10_000u64;
+        bps.clamp(250, 2_500)
+    }
+
+    pub(crate) fn adaptive_liquidity_ratio_floor_ppm(&self, gas_fees: &GasFees) -> u64 {
+        let ppm = self
+            .liquidity_ratio_floor_ppm
+            .saturating_mul(self.congestion_factor_bps(gas_fees))
+            / 10_000u64;
+        ppm.clamp(300, 1_600)
+    }
+
+    pub(crate) fn adaptive_sell_min_native_out_wei(&self, gas_fees: &GasFees) -> U256 {
+        let scaled_base = U256::from(self.sell_min_native_out_wei)
+            .saturating_mul(U256::from(self.congestion_factor_bps(gas_fees)))
+            .checked_div(U256::from(10_000u64))
+            .unwrap_or_else(|| U256::from(self.sell_min_native_out_wei));
+        let fee = gas_fees
+            .next_base_fee_per_gas
+            .max(gas_fees.base_fee_per_gas)
+            .saturating_add(
+                gas_fees
+                    .p50_priority_fee_per_gas
+                    .unwrap_or(gas_fees.max_priority_fee_per_gas),
+            );
+        let gas_ref = U256::from(170_000u64).saturating_mul(U256::from(fee));
+        let dynamic_floor = gas_ref
+            .saturating_mul(U256::from(30u64))
             .checked_div(U256::from(100u64))
-            .unwrap_or(U256::ZERO);
-        base_floor.saturating_add(drift_buffer)
+            .unwrap_or(gas_ref);
+        scaled_base.max(dynamic_floor)
     }
 
     #[cfg(test)]
@@ -142,11 +256,12 @@ impl StrategyExecutor {
         fees.max_fee_per_gas = max_fee;
     }
 
-    pub(crate) fn gas_ratio_ok(
+    pub(crate) fn gas_ratio_ok_with_fees(
         &self,
         gas_cost_wei: U256,
         gross_profit_wei: U256,
         wallet_balance: U256,
+        gas_fees: &GasFees,
     ) -> bool {
         if gas_cost_wei.is_zero() {
             return !gross_profit_wei.is_zero();
@@ -155,7 +270,9 @@ impl StrategyExecutor {
             return false;
         }
         let margin = gross_profit_wei.saturating_sub(gas_cost_wei);
-        let min_margin = gas_cost_wei.saturating_mul(U256::from(1_200u64)) / U256::from(10_000u64);
+        let min_margin = gas_cost_wei
+            .saturating_mul(U256::from(self.adaptive_min_margin_bps(gas_fees)))
+            / U256::from(10_000u64);
         if margin < min_margin {
             return false;
         }
@@ -409,14 +526,13 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_profit_floor_with_costs_adds_small_drift_buffer() {
+    fn dynamic_profit_floor_with_costs_adds_full_execution_costs() {
         let wallet_balance = U256::from(1_000_000_000_000_000_000u128); // 1 ETH
         let gas = U256::from(2_000_000_000_000_000u128); // 0.002 ETH
         let extra = U256::from(1_000_000_000_000_000u128); // 0.001 ETH
         let floor = StrategyExecutor::dynamic_profit_floor_with_costs(wallet_balance, gas, extra);
         let base = StrategyExecutor::dynamic_profit_floor(wallet_balance);
-        let expected_buffer =
-            gas.saturating_add(extra).saturating_mul(U256::from(5u64)) / U256::from(100u64);
+        let expected_buffer = gas.saturating_add(extra);
         assert_eq!(floor, base.saturating_add(expected_buffer));
     }
 }

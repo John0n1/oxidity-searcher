@@ -378,6 +378,16 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
             .map(|(name, outcome)| (name.clone(), outcome.clone()))
             .collect()
     };
+    let relay_bundle_status: Vec<(String, crate::core::strategy::RelayBundleStatus)> = {
+        let guard = stats
+            .relay_bundle_status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard
+            .iter()
+            .map(|(name, status)| (name.clone(), status.clone()))
+            .collect()
+    };
     for (relay, outcome) in relay_outcomes {
         let relay = relay.replace('"', "_");
         body.push_str(&format!(
@@ -399,6 +409,28 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
         body.push_str(&format!(
             "# TYPE relay_retries_total counter\nrelay_retries_total{{relay=\"{}\"}} {}\n",
             relay, outcome.retries
+        ));
+    }
+    for (relay, status) in relay_bundle_status {
+        let relay = relay.replace('"', "_");
+        let state = status.status.replace('"', "_");
+        body.push_str(&format!(
+            "# TYPE relay_last_submission_status gauge\nrelay_last_submission_status{{relay=\"{}\",status=\"{}\"}} 1\n",
+            relay, state
+        ));
+        body.push_str(&format!(
+            "# TYPE relay_last_submission_timestamp_ms gauge\nrelay_last_submission_timestamp_ms{{relay=\"{}\"}} {}\n",
+            relay, status.updated_at_ms
+        ));
+        let replacement_uuid = status
+            .replacement_uuid
+            .as_deref()
+            .unwrap_or("")
+            .replace('"', "_");
+        let bundle_id = status.bundle_id.as_deref().unwrap_or("").replace('"', "_");
+        body.push_str(&format!(
+            "# TYPE relay_last_submission_info gauge\nrelay_last_submission_info{{relay=\"{}\",replacement_uuid=\"{}\",bundle_id=\"{}\"}} 1\n",
+            relay, replacement_uuid, bundle_id
         ));
     }
 

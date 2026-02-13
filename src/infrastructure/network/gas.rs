@@ -9,8 +9,8 @@ use alloy::rpc::types::BlockNumberOrTag;
 use alloy::rpc::types::eth::FeeHistory;
 use serde::Deserialize;
 use std::env;
-use std::time::Duration;
 use std::sync::Mutex;
+use std::time::Duration;
 
 #[derive(Clone)]
 pub struct GasOracle {
@@ -37,7 +37,11 @@ pub struct GasFees {
 
 impl GasOracle {
     pub fn new(provider: HttpProvider, chain_id: u64) -> Self {
-        Self { provider, chain_id, last_good: std::sync::Arc::new(Mutex::new(None)) }
+        Self {
+            provider,
+            chain_id,
+            last_good: std::sync::Arc::new(Mutex::new(None)),
+        }
     }
 
     pub async fn estimate_eip1559_fees(&self) -> Result<GasFees, AppError> {
@@ -131,17 +135,20 @@ impl GasOracle {
             Some(util_sum / history.gas_used_ratio.len() as f64)
         };
 
-        // Use a rough p95 base fee (max over sample) with a 20% headroom for a dynamic cap.
+        // Suggested cap should include both base-fee tail risk and priority-fee headroom.
         let p95_base = history
             .base_fee_per_gas
             .iter()
             .copied()
             .max()
             .unwrap_or(next_base_fee);
+        let tip_anchor = avg_p90.max(avg_p50.saturating_mul(2));
         let suggested_cap = p95_base
-            .saturating_mul(12)
-            .checked_div(10)
-            .unwrap_or(p95_base);
+            .saturating_add(tip_anchor)
+            .saturating_mul(105)
+            .checked_div(100)
+            .unwrap_or_else(|| p95_base.saturating_add(tip_anchor))
+            .max(next_base_fee.saturating_add(avg_p50));
 
         Ok(GasFees {
             max_fee_per_gas: next_base_fee.saturating_add(avg_p50),

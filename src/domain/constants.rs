@@ -42,8 +42,8 @@ pub const DEFAULT_PRIORITY_FEE_GWEI: u64 = 2;
 // =============================================================================
 
 lazy_static! {
-    // 0.00001 ETH (accept small edges by default)
-    pub static ref MIN_PROFIT_THRESHOLD_WEI: U256 = U256::from(10_000_000_000_000u64);
+    // 0.01 ETH baseline net profit floor for mainnet-safe execution.
+    pub static ref MIN_PROFIT_THRESHOLD_WEI: U256 = U256::from(10_000_000_000_000_000u64);
 
     // 0.00002 ETH
     pub static ref LOW_BALANCE_THRESHOLD_WEI: U256 = U256::from(20_000_000_000_000u64);
@@ -140,7 +140,9 @@ fn load_address_registry_defaults(path: &str) -> AddressRegistryDefaults {
 
         if let Some(vault) = chain.balancer_vault.as_deref().and_then(parse_address) {
             out.balancer_vault_by_chain.insert(chain_id, vault);
-            routers.entry("balancer_v2_vault".to_string()).or_insert(vault);
+            routers
+                .entry("balancer_v2_vault".to_string())
+                .or_insert(vault);
         }
 
         if let Some(pool) = chain.aave_pool.as_deref().and_then(parse_address) {
@@ -152,7 +154,8 @@ fn load_address_registry_defaults(path: &str) -> AddressRegistryDefaults {
             .as_deref()
             .and_then(parse_address)
         {
-            out.aave_addresses_provider_by_chain.insert(chain_id, provider);
+            out.aave_addresses_provider_by_chain
+                .insert(chain_id, provider);
         }
 
         if !routers.is_empty() {

@@ -6,8 +6,8 @@ use crate::common::error::AppError;
 use crate::core::executor::{BundleSender, SharedBundleSender};
 use crate::core::portfolio::PortfolioManager;
 use crate::core::safety::SafetyGuard;
-use crate::core::simulation::Simulator;
-use crate::core::strategy::{StrategyExecutor, StrategyStats, StrategyWork};
+use crate::core::simulation::{RpcCapabilities, Simulator};
+use crate::core::strategy::{StrategyExecutor, StrategyStats};
 use crate::data::db::Database;
 use crate::infrastructure::data::address_registry::AddressRegistry;
 use crate::infrastructure::data::token_manager::TokenManager;
@@ -19,6 +19,7 @@ use crate::network::nonce::NonceManager;
 use crate::network::price_feed::PriceFeed;
 use crate::network::provider::{HttpProvider, WsProvider};
 use crate::network::reserves::ReserveCache;
+use crate::services::strategy::execution::work_queue::WorkQueue;
 use crate::services::strategy::router_discovery::RouterDiscovery;
 use alloy::primitives::Address;
 use alloy::providers::Provider;
@@ -28,7 +29,7 @@ use dashmap::DashSet;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 const INGEST_QUEUE_BOUND: usize = 2048;
@@ -61,6 +62,11 @@ pub struct Engine {
     metrics_port: u16,
     strategy_enabled: bool,
     slippage_bps: u64,
+    profit_guard_base_floor_multiplier_bps: u64,
+    profit_guard_cost_multiplier_bps: u64,
+    profit_guard_min_margin_bps: u64,
+    liquidity_ratio_floor_ppm: u64,
+    sell_min_native_out_wei: u64,
     router_allowlist: Arc<DashSet<Address>>,
     router_discovery: Option<Arc<RouterDiscovery>>,
     skip_log_every: u64,
@@ -72,6 +78,9 @@ pub struct Engine {
     mevshare_builders: Vec<String>,
     sandwich_attacks_enabled: bool,
     simulation_backend: String,
+    chainlink_feed_strict: bool,
+    bundle_use_replacement_uuid: bool,
+    bundle_cancel_previous: bool,
     worker_limit: usize,
     address_registry_path: String,
     receipt_poll_ms: u64,
@@ -111,6 +120,11 @@ impl Engine {
         metrics_port: u16,
         strategy_enabled: bool,
         slippage_bps: u64,
+        profit_guard_base_floor_multiplier_bps: u64,
+        profit_guard_cost_multiplier_bps: u64,
+        profit_guard_min_margin_bps: u64,
+        liquidity_ratio_floor_ppm: u64,
+        sell_min_native_out_wei: u64,
         router_allowlist: Arc<DashSet<Address>>,
         router_discovery: Option<Arc<RouterDiscovery>>,
         skip_log_every: u64,
@@ -122,6 +136,9 @@ impl Engine {
         mevshare_builders: Vec<String>,
         sandwich_attacks_enabled: bool,
         simulation_backend: String,
+        chainlink_feed_strict: bool,
+        bundle_use_replacement_uuid: bool,
+        bundle_cancel_previous: bool,
         worker_limit: usize,
         address_registry_path: String,
         receipt_poll_ms: u64,
@@ -158,6 +175,11 @@ impl Engine {
             metrics_port,
             strategy_enabled,
             slippage_bps,
+            profit_guard_base_floor_multiplier_bps,
+            profit_guard_cost_multiplier_bps,
+            profit_guard_min_margin_bps,
+            liquidity_ratio_floor_ppm,
+            sell_min_native_out_wei,
             router_allowlist,
             router_discovery,
             skip_log_every,
@@ -169,6 +191,9 @@ impl Engine {
             mevshare_builders,
             sandwich_attacks_enabled,
             simulation_backend,
+            chainlink_feed_strict,
+            bundle_use_replacement_uuid,
+            bundle_cancel_previous,
             worker_limit,
             address_registry_path,
             receipt_poll_ms,
@@ -227,9 +252,11 @@ impl Engine {
         }
     }
 
-    async fn log_rpc_capabilities(&self) {
+    async fn log_rpc_capabilities(&self) -> Option<String> {
+        let mut client_version: Option<String> = None;
         match self.http_provider.get_client_version().await {
             Ok(version) => {
+                client_version = Some(version.clone());
                 tracing::info!(target: "rpc", client = %version, "RPC client version");
             }
             Err(e) => {
@@ -243,6 +270,38 @@ impl Engine {
         self.log_rpc_modules("http", &self.http_provider, false)
             .await;
         self.log_rpc_modules("ws", &self.ws_provider, true).await;
+        client_version
+    }
+
+    fn log_nethermind_tuning_hint(
+        &self,
+        client_version: Option<&str>,
+        capabilities: &RpcCapabilities,
+    ) {
+        let Some(version) = client_version else {
+            return;
+        };
+        if !version.to_ascii_lowercase().contains("nethermind") {
+            return;
+        }
+
+        tracing::info!(
+            target: "rpc",
+            chain_id = self.chain_id,
+            "Nethermind tuning guidance: JsonRpc.EnabledModules should include Eth,Subscribe,Debug,Trace,TxPool; raise JsonRpc.EthModuleConcurrentInstances for concurrent eth_* load; tune JsonRpc.RequestQueueLimit and JsonRpc.Timeout for burst traffic."
+        );
+        if !capabilities.eth_simulate {
+            tracing::warn!(
+                target: "rpc",
+                "Nethermind eth_simulateV1 unavailable. Ensure Eth namespace is enabled and node version supports eth_simulateV1."
+            );
+        }
+        if !capabilities.debug_trace_call_many {
+            tracing::warn!(
+                target: "rpc",
+                "Nethermind debug_traceCallMany unavailable. Ensure Debug/Trace namespaces are enabled for bundle-level tracing fallback."
+            );
+        }
     }
 
     pub async fn run(self) -> Result<(), AppError> {
@@ -263,20 +322,31 @@ impl Engine {
             }
         }
 
-        self.log_rpc_capabilities().await;
+        let client_version = self.log_rpc_capabilities().await;
         let capabilities = self.simulator.probe_capabilities().await;
+        self.log_nethermind_tuning_hint(client_version.as_deref(), &capabilities);
         if !capabilities.fee_history {
             tracing::warn!(
                 target: "rpc",
                 "eth_feeHistory probe failed; GasOracle will use fallback strategy"
             );
         }
-        if self.rpc_capability_strict && !(capabilities.eth_simulate || capabilities.debug_trace_call)
+        self.price_feed
+            .audit_chainlink_feeds(self.chainlink_feed_strict)
+            .await?;
+        if self.rpc_capability_strict
+            && !(capabilities.eth_simulate || capabilities.debug_trace_call_many)
         {
             return Err(AppError::Config(
-                "rpc_capability_strict=true but neither eth_simulateV1 nor debug_traceCall is available"
+                "rpc_capability_strict=true but neither eth_simulateV1 nor debug_traceCallMany is available"
                     .into(),
             ));
+        }
+        if capabilities.debug_trace_call && !capabilities.debug_trace_call_many {
+            tracing::warn!(
+                target: "rpc",
+                "debug_traceCall is available but debug_traceCallMany is not; bundle simulation will fall back to per-transaction execution when eth_simulateV1 is unavailable"
+            );
         }
 
         let shutdown = CancellationToken::new();
@@ -290,14 +360,14 @@ impl Engine {
             });
         }
         let stats = Arc::new(StrategyStats::default());
-        let (tx_sender, tx_receiver) = mpsc::channel::<StrategyWork>(INGEST_QUEUE_BOUND);
+        let work_queue = Arc::new(WorkQueue::new(INGEST_QUEUE_BOUND));
         let (block_sender, block_receiver) = broadcast::channel(32);
         let mevshare_builders =
             BundleSender::canonicalize_mevshare_builders(self.mevshare_builders.clone()).await;
 
         let mempool = MempoolScanner::new(
             self.ws_provider.clone(),
-            tx_sender.clone(),
+            work_queue.clone(),
             stats.clone(),
             INGEST_QUEUE_BOUND,
             shutdown.clone(),
@@ -316,6 +386,8 @@ impl Engine {
             mevshare_builders,
             self.bundle_signer.clone(),
             stats.clone(),
+            self.bundle_use_replacement_uuid,
+            self.bundle_cancel_previous,
         ));
         let reserve_cache = Arc::new(ReserveCache::new(self.http_provider.clone()));
         if Path::new("data/pairs.json").exists() {
@@ -324,6 +396,12 @@ impl Engine {
                 .await
             {
                 tracing::warn!(target: "reserves", error=%e, "Failed to preload pairs.json");
+            } else if let Err(e) = reserve_cache.warmup_v2_reserves(1_000).await {
+                tracing::warn!(
+                    target: "reserves",
+                    error = %e,
+                    "Failed to warm V2 reserves from preloaded pairs"
+                );
             }
         }
 
@@ -456,7 +534,7 @@ impl Engine {
             }
 
             let strategy = StrategyExecutor::new(
-                tx_receiver,
+                work_queue.clone(),
                 block_receiver,
                 self.safety_guard.clone(),
                 bundle_sender.clone(),
@@ -473,6 +551,11 @@ impl Engine {
                 self.wallet_signer.clone(),
                 self.nonce_manager.clone(),
                 self.slippage_bps,
+                self.profit_guard_base_floor_multiplier_bps,
+                self.profit_guard_cost_multiplier_bps,
+                self.profit_guard_min_margin_bps,
+                self.liquidity_ratio_floor_ppm,
+                self.sell_min_native_out_wei,
                 self.http_provider.clone(),
                 self.dry_run,
                 self.router_allowlist.clone(),
@@ -501,13 +584,12 @@ impl Engine {
                 let mev_share = MevShareClient::new(
                     self.mev_share_stream_url.clone(),
                     self.chain_id,
-                    tx_sender.clone(),
+                    work_queue.clone(),
                     stats.clone(),
                     INGEST_QUEUE_BOUND,
                     self.mev_share_history_limit,
                     shutdown.clone(),
                 );
-                drop(tx_sender);
                 drop(block_sender);
                 tokio::try_join!(
                     mempool.run(),
@@ -518,14 +600,12 @@ impl Engine {
                 .map(|_| ())
                 .map_err(|e| AppError::Unknown(e.into()))
             } else {
-                drop(tx_sender);
                 drop(block_sender);
                 tokio::try_join!(mempool.run(), block_listener.run(), strategy.run())
                     .map(|_| ())
                     .map_err(|e| AppError::Unknown(e.into()))
             }
         } else {
-            drop(tx_sender);
             drop(block_sender);
             tokio::try_join!(mempool.run(), block_listener.run())
                 .map(|_| ())

@@ -15,6 +15,7 @@ use serde::Serialize;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 #[derive(Clone, Debug, Serialize)]
@@ -39,6 +40,9 @@ pub struct BundleSender {
     mevshare_builders: Vec<String>,
     signer: PrivateKeySigner,
     stats: Arc<StrategyStats>,
+    use_replacement_uuid: bool,
+    cancel_previous_bundle: bool,
+    relay_replacement_uuids: StdMutex<HashMap<String, String>>,
 }
 
 const FLASHBOTS_MAX_TXS: usize = 100;
@@ -56,6 +60,8 @@ impl BundleSender {
         mevshare_builders: Vec<String>,
         signer: PrivateKeySigner,
         stats: Arc<StrategyStats>,
+        use_replacement_uuid: bool,
+        cancel_previous_bundle: bool,
     ) -> Self {
         let mut builders: Vec<String> = mevshare_builders
             .into_iter()
@@ -76,6 +82,9 @@ impl BundleSender {
             mevshare_builders: builders,
             signer,
             stats,
+            use_replacement_uuid,
+            cancel_previous_bundle,
+            relay_replacement_uuids: StdMutex::new(HashMap::new()),
         }
     }
 
@@ -266,17 +275,96 @@ impl BundleSender {
         Ok(())
     }
 
+    fn relay_last_replacement_uuid(&self, relay_name: &str) -> Option<String> {
+        let guard = self
+            .relay_replacement_uuids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.get(relay_name).cloned()
+    }
+
+    fn relay_set_replacement_uuid(&self, relay_name: &str, replacement_uuid: &str) {
+        let mut guard = self
+            .relay_replacement_uuids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.insert(relay_name.to_string(), replacement_uuid.to_string());
+    }
+
+    fn generate_replacement_uuid(raw_txs: &[Vec<u8>], target_block: u64) -> String {
+        let now_nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let mut material = Vec::new();
+        material.extend_from_slice(&target_block.to_be_bytes());
+        material.extend_from_slice(&now_nanos.to_be_bytes());
+        for tx in raw_txs {
+            material.extend_from_slice(tx);
+        }
+        let hash = keccak256(material);
+        let mut bytes = [0u8; 16];
+        bytes.copy_from_slice(&hash.as_slice()[..16]);
+        // UUIDv4 bit layout.
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            bytes[0],
+            bytes[1],
+            bytes[2],
+            bytes[3],
+            bytes[4],
+            bytes[5],
+            bytes[6],
+            bytes[7],
+            bytes[8],
+            bytes[9],
+            bytes[10],
+            bytes[11],
+            bytes[12],
+            bytes[13],
+            bytes[14],
+            bytes[15]
+        )
+    }
+
+    fn extract_bundle_id(body_text: &str) -> Option<String> {
+        let parsed: serde_json::Value = serde_json::from_str(body_text).ok()?;
+        let result = parsed.get("result")?;
+        if let Some(s) = result.as_str() {
+            return Some(s.to_string());
+        }
+        if let Some(obj) = result.as_object() {
+            for key in ["bundleHash", "bundle_hash", "hash", "bundleId", "uuid"] {
+                if let Some(v) = obj.get(key).and_then(|v| v.as_str()) {
+                    return Some(v.to_string());
+                }
+            }
+        }
+        None
+    }
+
     async fn send_mainnet_builders(&self, raw_txs: &[Vec<u8>]) -> Result<(), AppError> {
         let block_number =
             self.provider.get_block_number().await.map_err(|e| {
                 AppError::Connection(format!("Failed to fetch block number: {}", e))
             })?;
         let target_block = block_number + 1;
-        let params = json!({
+        let replacement_uuid = if self.use_replacement_uuid {
+            Some(Self::generate_replacement_uuid(raw_txs, target_block))
+        } else {
+            None
+        };
+
+        let mut params = json!({
             "txs": raw_txs.iter().map(|r| format!("0x{}", hex::encode(r))).collect::<Vec<_>>(),
             "blockNumber": format!("0x{:x}", target_block),
             "minTimestamp": current_unix(),
         });
+        if let Some(uuid) = replacement_uuid.as_ref() {
+            params["replacementUuid"] = json!(uuid);
+        }
 
         let body = json!({
             "jsonrpc": "2.0",
@@ -299,12 +387,37 @@ impl BundleSender {
         let mut accepted = 0usize;
         let mut failures: Vec<String> = Vec::new();
         for (url, with_sig, name) in relays {
+            if with_sig && self.cancel_previous_bundle {
+                if let Some(prev_uuid) = self.relay_last_replacement_uuid(name) {
+                    if let Err(err) = self.cancel_bundle_with_sig(url, name, &prev_uuid).await {
+                        tracing::warn!(
+                            target: "executor",
+                            relay = %url,
+                            name = %name,
+                            replacement_uuid = %prev_uuid,
+                            error = %err,
+                            "Failed to cancel previous bundle before replacement"
+                        );
+                    }
+                }
+            }
             let result = self
-                .post_bundle_optional(url, &body_bytes, with_sig, name, target_block, raw_txs.len())
+                .post_bundle_optional(
+                    url,
+                    &body_bytes,
+                    with_sig,
+                    name,
+                    target_block,
+                    raw_txs.len(),
+                    replacement_uuid.as_deref(),
+                )
                 .await;
             match result {
                 Ok(()) => {
                     accepted = accepted.saturating_add(1);
+                    if let Some(uuid) = replacement_uuid.as_deref() {
+                        self.relay_set_replacement_uuid(name, uuid);
+                    }
                 }
                 Err(e) => {
                     failures.push(format!("{name}@{url}: {e}"));
@@ -336,6 +449,7 @@ impl BundleSender {
         name: &str,
         target_block: u64,
         txs: usize,
+        replacement_uuid: Option<&str>,
     ) -> Result<(), AppError> {
         let sig_header = self.sign_request(body_bytes)?;
         let client = reqwest::Client::new();
@@ -378,6 +492,12 @@ impl BundleSender {
                         saw_timeout,
                         attempts.saturating_sub(1),
                     );
+                    self.stats.record_relay_bundle_status(
+                        name,
+                        "post_error",
+                        replacement_uuid,
+                        None,
+                    );
                     return Err(AppError::Connection(format!("Relay POST failed: {}", e)));
                 }
             };
@@ -385,23 +505,28 @@ impl BundleSender {
             let status = resp.status();
             let body_text = resp.text().await.unwrap_or_default();
             if status.is_success() {
+                let bundle_id = Self::extract_bundle_id(&body_text);
                 tracing::info!(target: "executor", relay=%url, name=%name, block=target_block, txs=txs, body=%body_text, "Bundle submitted");
-                self.stats.record_relay_attempt(
+                self.stats
+                    .record_relay_attempt(name, true, false, attempts.saturating_sub(1));
+                self.stats.record_relay_bundle_status(
                     name,
-                    true,
-                    false,
-                    attempts.saturating_sub(1),
+                    "accepted",
+                    replacement_uuid,
+                    bundle_id.as_deref(),
                 );
                 return Ok(());
             } else if attempts < RELAY_MAX_ATTEMPTS {
                 tracing::warn!(target: "executor", relay=%url, status=%status, body=%body_text, attempt=attempts, "Relay rejected bundle, retrying");
                 continue;
             } else {
-                self.stats.record_relay_attempt(
+                self.stats
+                    .record_relay_attempt(name, false, false, attempts.saturating_sub(1));
+                self.stats.record_relay_bundle_status(
                     name,
-                    false,
-                    false,
-                    attempts.saturating_sub(1),
+                    "rejected",
+                    replacement_uuid,
+                    None,
                 );
                 return Err(AppError::Connection(format!(
                     "Relay {} rejected bundle: {} body={}",
@@ -419,10 +544,18 @@ impl BundleSender {
         name: &str,
         target_block: u64,
         txs: usize,
+        replacement_uuid: Option<&str>,
     ) -> Result<(), AppError> {
         if with_sig {
             return self
-                .post_bundle_with_sig(url, body_bytes, name, target_block, txs)
+                .post_bundle_with_sig(
+                    url,
+                    body_bytes,
+                    name,
+                    target_block,
+                    txs,
+                    replacement_uuid,
+                )
                 .await;
         }
 
@@ -459,6 +592,12 @@ impl BundleSender {
                         saw_timeout,
                         attempts.saturating_sub(1),
                     );
+                    self.stats.record_relay_bundle_status(
+                        name,
+                        "post_error",
+                        replacement_uuid,
+                        None,
+                    );
                     return Err(AppError::Connection(format!("Relay POST failed: {}", e)));
                 }
             };
@@ -466,12 +605,15 @@ impl BundleSender {
             let status = resp.status();
             let body_text = resp.text().await.unwrap_or_default();
             if status.is_success() {
+                let bundle_id = Self::extract_bundle_id(&body_text);
                 tracing::info!(target: "executor", relay=%url, name=%name, block=target_block, txs=txs, body=%body_text, "Bundle submitted (best-effort)");
-                self.stats.record_relay_attempt(
+                self.stats
+                    .record_relay_attempt(name, true, false, attempts.saturating_sub(1));
+                self.stats.record_relay_bundle_status(
                     name,
-                    true,
-                    false,
-                    attempts.saturating_sub(1),
+                    "accepted",
+                    replacement_uuid,
+                    bundle_id.as_deref(),
                 );
                 return Ok(());
             }
@@ -487,17 +629,83 @@ impl BundleSender {
                 );
                 continue;
             }
-            self.stats.record_relay_attempt(
+            self.stats
+                .record_relay_attempt(name, false, false, attempts.saturating_sub(1));
+            self.stats.record_relay_bundle_status(
                 name,
-                false,
-                false,
-                attempts.saturating_sub(1),
+                "rejected",
+                replacement_uuid,
+                None,
             );
             return Err(AppError::Connection(format!(
                 "Relay {} rejected bundle: {} body={}",
                 name, status, body_text
             )));
         }
+    }
+
+    async fn cancel_bundle_with_sig(
+        &self,
+        url: &str,
+        relay_name: &str,
+        replacement_uuid: &str,
+    ) -> Result<(), AppError> {
+        let payload = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "eth_cancelBundle",
+            "params": [{
+                "replacementUuid": replacement_uuid
+            }]
+        });
+        let body_bytes =
+            serde_json::to_vec(&payload).map_err(|e| AppError::Initialization(e.to_string()))?;
+        let sig_header = self.sign_request(&body_bytes)?;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(url)
+            .header("Content-Type", "application/json")
+            .header(
+                "X-Flashbots-Signature",
+                HeaderValue::from_str(&sig_header)
+                    .map_err(|e| AppError::Connection(format!("Signature header invalid: {}", e)))?,
+            )
+            .body(body_bytes)
+            .timeout(Duration::from_millis(RELAY_TIMEOUT_MS))
+            .send()
+            .await
+            .map_err(|e| AppError::Connection(format!("Relay cancel POST failed: {}", e)))?;
+
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if status.is_success() {
+            self.stats.record_relay_bundle_status(
+                relay_name,
+                "cancelled_previous",
+                Some(replacement_uuid),
+                None,
+            );
+            tracing::info!(
+                target: "executor",
+                relay = %url,
+                relay_name = %relay_name,
+                replacement_uuid = %replacement_uuid,
+                body = %body,
+                "Cancelled previous bundle"
+            );
+            return Ok(());
+        }
+        self.stats.record_relay_bundle_status(
+            relay_name,
+            "cancel_failed",
+            Some(replacement_uuid),
+            None,
+        );
+        Err(AppError::Connection(format!(
+            "Relay {} rejected eth_cancelBundle: {} body={}",
+            relay_name, status, body
+        )))
     }
 
     pub async fn canonicalize_mevshare_builders(builders: Vec<String>) -> Vec<String> {
@@ -633,6 +841,8 @@ mod tests {
             ],
             signer,
             stats,
+            true,
+            false,
         )
     }
 
@@ -719,6 +929,32 @@ mod tests {
                 "Titan".to_string(),
                 "custom".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn replacement_uuid_generation_is_uuid_v4_shaped() {
+        let raw = vec![vec![0x01u8, 0x02u8], vec![0x03u8]];
+        let uuid = BundleSender::generate_replacement_uuid(&raw, 12345);
+        assert_eq!(uuid.len(), 36);
+        assert_eq!(&uuid[8..9], "-");
+        assert_eq!(&uuid[13..14], "-");
+        assert_eq!(&uuid[18..19], "-");
+        assert_eq!(&uuid[23..24], "-");
+        assert_eq!(&uuid[14..15], "4");
+    }
+
+    #[test]
+    fn extract_bundle_id_accepts_string_and_object_results() {
+        let raw_string = r#"{"jsonrpc":"2.0","id":1,"result":"0xabc"}"#;
+        assert_eq!(
+            BundleSender::extract_bundle_id(raw_string).as_deref(),
+            Some("0xabc")
+        );
+        let raw_obj = r#"{"jsonrpc":"2.0","id":1,"result":{"bundleHash":"0xdef"}}"#;
+        assert_eq!(
+            BundleSender::extract_bundle_id(raw_obj).as_deref(),
+            Some("0xdef")
         );
     }
 }

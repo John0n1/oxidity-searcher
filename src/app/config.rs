@@ -64,6 +64,21 @@ pub struct GlobalSettings {
     pub metrics_token: Option<String>,
     #[serde(default = "default_slippage_bps")]
     pub slippage_bps: u64,
+    /// Multiplier applied to the base dynamic profit floor.
+    #[serde(default = "default_profit_guard_base_floor_multiplier_bps")]
+    pub profit_guard_base_floor_multiplier_bps: u64,
+    /// Multiplier applied to direct execution costs (gas + bribe + premium).
+    #[serde(default = "default_profit_guard_cost_multiplier_bps")]
+    pub profit_guard_cost_multiplier_bps: u64,
+    /// Minimum margin above gas cost required by risk/reward gate.
+    #[serde(default = "default_profit_guard_min_margin_bps")]
+    pub profit_guard_min_margin_bps: u64,
+    /// Liquidity floor used by ratio-based build checks (parts-per-million).
+    #[serde(default = "default_liquidity_ratio_floor_ppm")]
+    pub liquidity_ratio_floor_ppm: u64,
+    /// Minimum native output floor for sell-path checks.
+    #[serde(default = "default_sell_min_native_out_wei")]
+    pub sell_min_native_out_wei: u64,
     #[serde(default = "default_gas_cap_multiplier_bps")]
     pub gas_cap_multiplier_bps: u64,
     #[serde(default = "default_skip_log_every")]
@@ -90,6 +105,12 @@ pub struct GlobalSettings {
     pub emergency_exit_on_unknown_receipt: bool,
     #[serde(default = "default_rpc_capability_strict")]
     pub rpc_capability_strict: bool,
+    #[serde(default = "default_chainlink_feed_conflict_strict")]
+    pub chainlink_feed_conflict_strict: bool,
+    #[serde(default = "default_bundle_use_replacement_uuid")]
+    pub bundle_use_replacement_uuid: bool,
+    #[serde(default = "default_bundle_cancel_previous")]
+    pub bundle_cancel_previous: bool,
 
     // Router discovery
     #[serde(default = "default_router_discovery_enabled")]
@@ -125,7 +146,7 @@ fn default_chain() -> Vec<u64> {
     Vec::new()
 }
 fn default_max_gas() -> u64 {
-    0
+    500
 }
 fn default_true() -> bool {
     true
@@ -138,6 +159,21 @@ fn default_metrics_port() -> u16 {
 }
 fn default_slippage_bps() -> u64 {
     0
+}
+fn default_profit_guard_base_floor_multiplier_bps() -> u64 {
+    7_000
+}
+fn default_profit_guard_cost_multiplier_bps() -> u64 {
+    10_000
+}
+fn default_profit_guard_min_margin_bps() -> u64 {
+    700
+}
+fn default_liquidity_ratio_floor_ppm() -> u64 {
+    700
+}
+fn default_sell_min_native_out_wei() -> u64 {
+    3_000_000_000_000
 }
 fn default_gas_cap_multiplier_bps() -> u64 {
     12_000
@@ -172,13 +208,22 @@ fn default_receipt_poll_ms() -> u64 {
     500
 }
 fn default_receipt_timeout_ms() -> u64 {
-    60_000
+    12_000
 }
 fn default_receipt_confirm_blocks() -> u64 {
     4
 }
 fn default_rpc_capability_strict() -> bool {
     true
+}
+fn default_chainlink_feed_conflict_strict() -> bool {
+    true
+}
+fn default_bundle_use_replacement_uuid() -> bool {
+    true
+}
+fn default_bundle_cancel_previous() -> bool {
+    false
 }
 fn default_bribe_bps() -> u64 {
     0
@@ -199,7 +244,7 @@ fn default_router_discovery_auto_allow() -> bool {
     false
 }
 fn default_router_discovery_max_entries() -> usize {
-    2000
+    10_000
 }
 
 fn deserialize_chain_list<'de, D>(deserializer: D) -> Result<Vec<u64>, D::Error>
@@ -529,6 +574,27 @@ impl GlobalSettings {
         self.gas_cap_multiplier_bps.max(10_000)
     }
 
+    pub fn profit_guard_base_floor_multiplier_bps_value(&self) -> u64 {
+        self.profit_guard_base_floor_multiplier_bps
+            .clamp(1_000, 20_000)
+    }
+
+    pub fn profit_guard_cost_multiplier_bps_value(&self) -> u64 {
+        self.profit_guard_cost_multiplier_bps.clamp(10_000, 20_000)
+    }
+
+    pub fn profit_guard_min_margin_bps_value(&self) -> u64 {
+        self.profit_guard_min_margin_bps.clamp(200, 5_000)
+    }
+
+    pub fn liquidity_ratio_floor_ppm_value(&self) -> u64 {
+        self.liquidity_ratio_floor_ppm.clamp(50, 10_000)
+    }
+
+    pub fn sell_min_native_out_wei_value(&self) -> u64 {
+        self.sell_min_native_out_wei.max(1_000_000_000_000)
+    }
+
     pub fn skip_log_every_value(&self) -> u64 {
         self.skip_log_every.max(1)
     }
@@ -579,7 +645,11 @@ impl GlobalSettings {
 
         if out.is_empty() {
             if let Some(map) =
-                load_chainlink_feeds_from_file(&self.chainlink_feeds_path(), chain_id)?
+                load_chainlink_feeds_from_file(
+                    &self.chainlink_feeds_path(),
+                    chain_id,
+                    self.chainlink_feed_conflict_strict_for_chain(chain_id),
+                )?
             {
                 out.extend(map);
             }
@@ -648,6 +718,30 @@ impl GlobalSettings {
     pub fn rpc_capability_strict_for_chain(&self, chain_id: u64) -> bool {
         if chain_id == constants::CHAIN_ETHEREUM {
             self.rpc_capability_strict
+        } else {
+            false
+        }
+    }
+
+    pub fn chainlink_feed_conflict_strict_for_chain(&self, chain_id: u64) -> bool {
+        if chain_id == constants::CHAIN_ETHEREUM {
+            self.chainlink_feed_conflict_strict
+        } else {
+            false
+        }
+    }
+
+    pub fn bundle_use_replacement_uuid_for_chain(&self, chain_id: u64) -> bool {
+        if chain_id == constants::CHAIN_ETHEREUM {
+            self.bundle_use_replacement_uuid
+        } else {
+            false
+        }
+    }
+
+    pub fn bundle_cancel_previous_for_chain(&self, chain_id: u64) -> bool {
+        if chain_id == constants::CHAIN_ETHEREUM {
+            self.bundle_cancel_previous
         } else {
             false
         }
@@ -783,6 +877,7 @@ fn quote_priority(quote: &str) -> usize {
 fn load_chainlink_feeds_from_file(
     path: &str,
     chain_id: u64,
+    strict_conflicts: bool,
 ) -> Result<Option<HashMap<String, Address>>, AppError> {
     let file_path = Path::new(path);
     if !file_path.exists() {
@@ -794,36 +889,103 @@ fn load_chainlink_feeds_from_file(
     let entries: Vec<ChainlinkFeedEntry> = serde_json::from_str(&raw)
         .map_err(|e| AppError::Config(format!("chainlink_feeds json parse failed: {}", e)))?;
 
-    let mut selected: HashMap<String, (String, Address)> = HashMap::new();
-    for entry in entries {
+    let canonical = constants::default_chainlink_feeds(chain_id);
+    let mut selected: HashMap<String, (String, Address, usize, usize)> = HashMap::new();
+    let mut by_base_quote: HashMap<(String, String), Vec<Address>> = HashMap::new();
+    let mut seen_any = false;
+    for (index, entry) in entries.into_iter().enumerate() {
         if entry.chain_id != chain_id {
             continue;
         }
+        seen_any = true;
 
         let base = alias_base_symbol(&entry.base);
         let quote = entry.quote.to_uppercase();
         let addr = Address::from_str(&entry.address).map_err(|_| {
             AppError::InvalidAddress(format!("chainlink_feeds:{base} -> {}", entry.address))
         })?;
+        by_base_quote
+            .entry((base.clone(), quote.clone()))
+            .or_default()
+            .push(addr);
 
         let new_score = quote_priority(&quote);
+        let canonical_key = format!("{}_{}", base, quote);
+        let canonical_rank = match canonical.get(&canonical_key) {
+            Some(expected) if *expected == addr => 0usize,
+            _ => 1usize,
+        };
         let replace = match selected.get(&base) {
             None => true,
-            Some((existing_quote, _)) => new_score < quote_priority(existing_quote),
+            Some((existing_quote, existing_addr, existing_canonical_rank, existing_index)) => {
+                let existing_score = quote_priority(existing_quote);
+                if new_score != existing_score {
+                    new_score < existing_score
+                } else if canonical_rank != *existing_canonical_rank {
+                    canonical_rank < *existing_canonical_rank
+                } else if addr != *existing_addr {
+                    addr.to_string().to_lowercase() < existing_addr.to_string().to_lowercase()
+                } else {
+                    index < *existing_index
+                }
+            }
         };
 
         if replace {
-            selected.insert(base, (quote, addr));
+            selected.insert(base, (quote, addr, canonical_rank, index));
+        }
+    }
+
+    let mut conflicts: Vec<String> = Vec::new();
+    for ((base, quote), addrs) in by_base_quote {
+        let mut uniq: Vec<Address> = Vec::new();
+        for addr in addrs {
+            if !uniq.contains(&addr) {
+                uniq.push(addr);
+            }
+        }
+        if uniq.len() > 1 {
+            let list = uniq
+                .into_iter()
+                .map(|a| format!("{:#x}", a))
+                .collect::<Vec<_>>()
+                .join(",");
+            conflicts.push(format!("{base}/{quote} -> [{list}]"));
+        }
+    }
+    if !conflicts.is_empty() {
+        for conflict in conflicts.iter().take(12) {
+            tracing::warn!(
+                target: "config",
+                chain_id,
+                strict = strict_conflicts,
+                conflict = %conflict,
+                "Chainlink feed conflict detected"
+            );
+        }
+        if strict_conflicts {
+            return Err(AppError::Config(format!(
+                "chainlink_feeds contains conflicting duplicate base/quote feeds on chain {} ({} conflicts); strict mode rejects ambiguous feed sets",
+                chain_id,
+                conflicts.len()
+            )));
         }
     }
 
     if selected.is_empty() {
+        if seen_any {
+            tracing::warn!(
+                target: "config",
+                chain_id,
+                "No usable Chainlink feed entries selected from chainlink_feeds file"
+            );
+        }
         return Ok(None);
     }
 
     let out = selected
         .into_iter()
-        .map(|(base, (_, addr))| (base, addr))
+        .map(|(base, (_, addr, _, _))| (base, addr))
         .collect();
 
     Ok(Some(out))
@@ -866,6 +1028,12 @@ mod tests {
             metrics_bind: None,
             metrics_token: None,
             slippage_bps: default_slippage_bps(),
+            profit_guard_base_floor_multiplier_bps: default_profit_guard_base_floor_multiplier_bps(
+            ),
+            profit_guard_cost_multiplier_bps: default_profit_guard_cost_multiplier_bps(),
+            profit_guard_min_margin_bps: default_profit_guard_min_margin_bps(),
+            liquidity_ratio_floor_ppm: default_liquidity_ratio_floor_ppm(),
+            sell_min_native_out_wei: default_sell_min_native_out_wei(),
             gas_cap_multiplier_bps: default_gas_cap_multiplier_bps(),
             skip_log_every: default_skip_log_every(),
             allow_non_wrapped_swaps: default_allow_non_wrapped_swaps(),
@@ -880,6 +1048,9 @@ mod tests {
             receipt_confirm_blocks: default_receipt_confirm_blocks(),
             emergency_exit_on_unknown_receipt: default_false(),
             rpc_capability_strict: default_rpc_capability_strict(),
+            chainlink_feed_conflict_strict: default_chainlink_feed_conflict_strict(),
+            bundle_use_replacement_uuid: default_bundle_use_replacement_uuid(),
+            bundle_cancel_previous: default_bundle_cancel_previous(),
             router_discovery_enabled: default_router_discovery_enabled(),
             router_discovery_min_hits: default_router_discovery_min_hits(),
             router_discovery_flush_every: default_router_discovery_flush_every(),
@@ -970,7 +1141,10 @@ mod tests {
     fn mevshare_builders_defaults_when_empty() {
         let mut settings = base_settings();
         settings.mevshare_builders.clear();
-        assert_eq!(settings.mevshare_builders_value(), default_mevshare_builders());
+        assert_eq!(
+            settings.mevshare_builders_value(),
+            default_mevshare_builders()
+        );
     }
 
     #[test]
@@ -989,5 +1163,71 @@ mod tests {
         let settings = base_settings();
         assert!(settings.rpc_capability_strict_for_chain(1));
         assert!(!settings.rpc_capability_strict_for_chain(137));
+    }
+
+    #[test]
+    fn chainlink_feed_conflict_strict_defaults_to_mainnet_only() {
+        let settings = base_settings();
+        assert!(settings.chainlink_feed_conflict_strict_for_chain(1));
+        assert!(!settings.chainlink_feed_conflict_strict_for_chain(137));
+    }
+
+    #[test]
+    fn chainlink_loader_prefers_canonical_on_equal_priority_quotes() {
+        let tmp = std::env::temp_dir().join(format!(
+            "chainlink-feeds-test-{}.json",
+            std::process::id()
+        ));
+        let body = r#"
+[
+  {"base":"ETH","quote":"USD","chainId":1,"address":"0x5147eA642CAEF7BD9c1265AadcA78f997AbB9649"},
+  {"base":"ETH","quote":"USD","chainId":1,"address":"0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"}
+]
+"#;
+        std::fs::write(&tmp, body).expect("write temp chainlink file");
+
+        let selected = load_chainlink_feeds_from_file(
+            tmp.to_str().expect("utf8 path"),
+            1,
+            false,
+        )
+        .expect("loader result")
+        .expect("selected feeds");
+
+        std::fs::remove_file(&tmp).ok();
+
+        let eth = selected.get("ETH").copied().expect("ETH feed");
+        assert_eq!(
+            format!("{:#x}", eth),
+            "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419"
+        );
+    }
+
+    #[test]
+    fn chainlink_loader_rejects_conflicts_in_strict_mode() {
+        let tmp = std::env::temp_dir().join(format!(
+            "chainlink-feeds-strict-test-{}.json",
+            std::process::id()
+        ));
+        let body = r#"
+[
+  {"base":"ETH","quote":"USD","chainId":1,"address":"0x5147eA642CAEF7BD9c1265AadcA78f997AbB9649"},
+  {"base":"ETH","quote":"USD","chainId":1,"address":"0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"}
+]
+"#;
+        std::fs::write(&tmp, body).expect("write temp chainlink file");
+
+        let err = load_chainlink_feeds_from_file(
+            tmp.to_str().expect("utf8 path"),
+            1,
+            true,
+        )
+        .expect_err("strict conflict mode should fail");
+
+        std::fs::remove_file(&tmp).ok();
+
+        assert!(
+            matches!(err, AppError::Config(msg) if msg.contains("conflicting duplicate"))
+        );
     }
 }

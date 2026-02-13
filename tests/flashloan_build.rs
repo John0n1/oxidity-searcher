@@ -8,14 +8,12 @@ use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolType;
 use alloy_sol_types::SolCall;
 use dashmap::DashSet;
-use oxidity_builder::common::constants::{wrapped_native_for_chain, CHAIN_ETHEREUM};
+use oxidity_builder::common::constants::{CHAIN_ETHEREUM, wrapped_native_for_chain};
 use oxidity_builder::core::executor::BundleSender;
 use oxidity_builder::core::portfolio::PortfolioManager;
 use oxidity_builder::core::safety::SafetyGuard;
 use oxidity_builder::core::simulation::{SimulationBackend, Simulator};
-use oxidity_builder::core::strategy::{
-    FlashloanProvider, StrategyExecutor, StrategyStats, StrategyWork,
-};
+use oxidity_builder::core::strategy::{FlashloanProvider, StrategyExecutor, StrategyStats};
 use oxidity_builder::data::db::Database;
 use oxidity_builder::data::executor::{FlashCallbackData, UnifiedHardenedExecutor};
 use oxidity_builder::network::gas::GasFees;
@@ -23,8 +21,9 @@ use oxidity_builder::network::nonce::NonceManager;
 use oxidity_builder::network::price_feed::PriceFeed;
 use oxidity_builder::network::provider::HttpProvider;
 use oxidity_builder::network::reserves::ReserveCache;
+use oxidity_builder::services::strategy::execution::work_queue::WorkQueue;
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 use url::Url;
 
 /// Build a flash-loan transaction and assert the encoded callbacks round-trip.
@@ -49,6 +48,8 @@ async fn flashloan_builder_encodes_callbacks() {
         ],
         bundle_signer.clone(),
         stats.clone(),
+        true,
+        false,
     ));
     let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), bundle_signer.address()));
@@ -65,13 +66,13 @@ async fn flashloan_builder_encodes_callbacks() {
     let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
     let router_allowlist = Arc::new(DashSet::<Address>::new());
 
-    let (_tx, rx) = mpsc::channel::<StrategyWork>(4);
+    let work_queue = Arc::new(WorkQueue::new(4));
     let (_block_tx, block_rx) = broadcast::channel(4);
 
     let executor_addr = Address::from([0x11; 20]);
 
     let exec = StrategyExecutor::new(
-        rx,
+        work_queue.clone(),
         block_rx,
         safety_guard,
         bundle_sender,
@@ -88,6 +89,11 @@ async fn flashloan_builder_encodes_callbacks() {
         bundle_signer.clone(),
         nonce_manager,
         50,
+        10_000,
+        10_000,
+        1_200,
+        1_000,
+        5_000_000_000_000,
         http.clone(),
         true,
         router_allowlist.clone(),
@@ -114,7 +120,11 @@ async fn flashloan_builder_encodes_callbacks() {
 
     // Two-step callback: approve + dummy swap payload; include reset approvals.
     let callbacks = vec![
-        (wrapped_native_for_chain(CHAIN_ETHEREUM), Bytes::from(vec![0x01, 0x02]), U256::ZERO),
+        (
+            wrapped_native_for_chain(CHAIN_ETHEREUM),
+            Bytes::from(vec![0x01, 0x02]),
+            U256::ZERO,
+        ),
         (
             Address::from([0x22; 20]),
             Bytes::from(vec![0x03]),
@@ -192,6 +202,8 @@ async fn flashloan_builder_uses_aave_selector() {
         ],
         bundle_signer.clone(),
         stats.clone(),
+        true,
+        false,
     ));
     let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), bundle_signer.address()));
@@ -208,14 +220,14 @@ async fn flashloan_builder_uses_aave_selector() {
     let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
     let router_allowlist = Arc::new(DashSet::<Address>::new());
 
-    let (_tx, rx) = mpsc::channel::<StrategyWork>(4);
+    let work_queue = Arc::new(WorkQueue::new(4));
     let (_block_tx, block_rx) = broadcast::channel(4);
 
     let executor_addr = Address::from([0x33; 20]);
     let aave_pool = Address::from([0x44; 20]);
 
     let exec = StrategyExecutor::new(
-        rx,
+        work_queue,
         block_rx,
         safety_guard,
         bundle_sender,
@@ -232,6 +244,11 @@ async fn flashloan_builder_uses_aave_selector() {
         bundle_signer.clone(),
         nonce_manager,
         50,
+        10_000,
+        10_000,
+        1_200,
+        1_000,
+        5_000_000_000_000,
         http.clone(),
         true,
         router_allowlist.clone(),
@@ -256,7 +273,11 @@ async fn flashloan_builder_uses_aave_selector() {
         false,
     );
 
-    let callbacks = vec![(wrapped_native_for_chain(CHAIN_ETHEREUM), Bytes::from(vec![0x99]), U256::from(0u64))];
+    let callbacks = vec![(
+        wrapped_native_for_chain(CHAIN_ETHEREUM),
+        Bytes::from(vec![0x99]),
+        U256::from(0u64),
+    )];
 
     let gas_fees = GasFees {
         max_fee_per_gas: 30_000_000_000,

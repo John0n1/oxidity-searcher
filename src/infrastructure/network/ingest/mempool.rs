@@ -5,6 +5,7 @@ use crate::common::error::AppError;
 use crate::core::strategy::StrategyStats;
 use crate::core::strategy::StrategyWork;
 use crate::network::provider::WsProvider;
+use crate::services::strategy::execution::work_queue::SharedWorkQueue;
 use alloy::consensus::Transaction as _;
 use alloy::network::TransactionResponse;
 use alloy::primitives::B256;
@@ -14,13 +15,12 @@ use dashmap::DashSet;
 use futures::StreamExt;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tokio::sync::mpsc::{Sender, error::TrySendError};
 use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 
 pub struct MempoolScanner {
     provider: WsProvider,
-    tx_sender: Sender<StrategyWork>,
+    work_queue: SharedWorkQueue,
     stats: Arc<StrategyStats>,
     capacity: usize,
     shutdown: CancellationToken,
@@ -36,14 +36,14 @@ const SEEN_MAX: usize = 50_000;
 impl MempoolScanner {
     pub fn new(
         provider: WsProvider,
-        tx_sender: Sender<StrategyWork>,
+        work_queue: SharedWorkQueue,
         stats: Arc<StrategyStats>,
         capacity: usize,
         shutdown: CancellationToken,
     ) -> Self {
         Self {
             provider,
-            tx_sender,
+            work_queue,
             stats,
             capacity,
             shutdown,
@@ -78,7 +78,7 @@ impl MempoolScanner {
                                             self.enqueue(StrategyWork::Mempool {
                                                 tx,
                                                 received_at: std::time::Instant::now(),
-                                            });
+                                            }).await;
                                         }
                                     }
                                     None => break,
@@ -116,7 +116,7 @@ impl MempoolScanner {
                                                             self.enqueue(StrategyWork::Mempool {
                                                                 tx,
                                                                 received_at: std::time::Instant::now(),
-                                                            });
+                                                            }).await;
                                                         }
                                                     }
                                                     Ok(None) => {
@@ -198,7 +198,8 @@ impl MempoolScanner {
                                 self.enqueue(StrategyWork::Mempool {
                                     tx,
                                     received_at: std::time::Instant::now(),
-                                });
+                                })
+                                .await;
                             }
                         }
                     }
@@ -212,11 +213,7 @@ impl MempoolScanner {
                     }
                 }
             } else {
-                match self
-                    .provider
-                    .get_filter_changes::<B256>(filter_id)
-                    .await
-                {
+                match self.provider.get_filter_changes::<B256>(filter_id).await {
                     Ok(hashes) => {
                         for hash in hashes {
                             if !self.mark_seen(hash).await {
@@ -228,7 +225,8 @@ impl MempoolScanner {
                                         self.enqueue(StrategyWork::Mempool {
                                             tx,
                                             received_at: std::time::Instant::now(),
-                                        });
+                                        })
+                                        .await;
                                     }
                                 }
                                 Ok(None) => {}
@@ -278,32 +276,27 @@ impl MempoolScanner {
         true
     }
 
-    fn enqueue(&self, work: StrategyWork) {
-        match self.tx_sender.try_send(work) {
-            Ok(()) => {
-                self.stats
-                    .ingest_queue_depth
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            Err(TrySendError::Full(_)) => {
-                self.stats
-                    .ingest_queue_full
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.stats
-                    .ingest_queue_dropped
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                self.stats
-                    .ingest_backpressure
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                tracing::warn!(
-                    target: "mempool",
-                    capacity = self.capacity,
-                    "ingest channel full; dropped work item"
-                );
-            }
-            Err(TrySendError::Closed(_)) => {
-                tracing::warn!(target: "mempool", "ingest channel closed; dropping work");
-            }
+    async fn enqueue(&self, work: StrategyWork) {
+        let pushed = self.work_queue.push(work).await;
+        if pushed.dropped_oldest {
+            self.stats
+                .ingest_queue_full
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.stats
+                .ingest_queue_dropped
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.stats
+                .ingest_backpressure
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                target: "mempool",
+                capacity = self.capacity,
+                "ingest queue full; dropped oldest work item"
+            );
+        } else {
+            self.stats
+                .ingest_queue_depth
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
@@ -311,7 +304,6 @@ impl MempoolScanner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::mpsc::channel;
     use url::Url;
 
     #[tokio::test]
@@ -334,9 +326,9 @@ mod tests {
     #[tokio::test]
     async fn dedup_marks_and_bounds() {
         let provider = WsProvider::new_http(Url::parse("http://localhost:8545").unwrap());
-        let (tx, _rx) = channel(4);
+        let queue = Arc::new(crate::services::strategy::execution::work_queue::WorkQueue::new(4));
         let stats = Arc::new(StrategyStats::default());
-        let scanner = MempoolScanner::new(provider, tx, stats, 4, CancellationToken::new());
+        let scanner = MempoolScanner::new(provider, queue, stats, 4, CancellationToken::new());
 
         let h1 = B256::from_slice(&[1u8; 32]);
         let h2 = B256::from_slice(&[2u8; 32]);

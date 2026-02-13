@@ -5,7 +5,18 @@ use std::str::FromStr;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 pub fn setup_logging(log_level: &str, json_format: bool) {
-    let filter = EnvFilter::from_str(log_level).unwrap_or_else(|_| EnvFilter::new("info"));
+    // If user passes a bare level (e.g. "debug"), apply sane noisy-module defaults.
+    // Custom directive strings (with ',' or '=') are respected as-is.
+    let normalized = log_level.trim();
+    let filter_spec = if normalized.contains(',') || normalized.contains('=') {
+        normalized.to_string()
+    } else {
+        format!(
+            "{},h2=info,hyper=info,hyper_util=info,reqwest=info,tokio_tungstenite=info,alloy_transport_http=info",
+            normalized
+        )
+    };
+    let filter = EnvFilter::from_str(&filter_spec).unwrap_or_else(|_| EnvFilter::new("info"));
     let subscriber = tracing_subscriber::registry().with(filter);
 
     if json_format {
@@ -22,5 +33,5 @@ pub fn setup_logging(log_level: &str, json_format: bool) {
         subscriber.with(fmt_layer).init();
     }
 
-    tracing::info!("Logging initialized. Level: {}", log_level);
+    tracing::info!("Logging initialized. Level: {}", filter_spec);
 }

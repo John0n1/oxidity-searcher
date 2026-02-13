@@ -59,8 +59,10 @@ fn parse_alter_add_column_target(line: &str) -> Option<String> {
 
 #[test]
 fn migration_targets_are_not_duplicated() {
-    let allowed_historical_duplicates: BTreeSet<String> =
-        ["table:nonce_state"].into_iter().map(String::from).collect();
+    let allowed_historical_duplicates: BTreeSet<String> = ["table:nonce_state"]
+        .into_iter()
+        .map(String::from)
+        .collect();
 
     let mut files: Vec<_> = fs::read_dir(Path::new(MIGRATIONS_DIR))
         .expect("read migrations")

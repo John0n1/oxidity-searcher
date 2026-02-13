@@ -4,7 +4,14 @@
 use crate::common::error::AppError;
 use crate::data::db::Database;
 use crate::services::strategy::decode::RouterKind;
+use crate::services::strategy::routers::{
+    BalancerVault, DexRouter, KyberAggregationRouterV2, OneInchAggregationRouter,
+    OneInchAggregationRouterV5, ParaSwapAugustusV6, RelayApprovalProxyV3, RelayRouterV3,
+    TransitSwapRouterV5, UniV2Router, UniV3Multicall, UniV3MulticallDeadline, UniV3Router,
+    UniversalRouter, UniversalRouterDeadline, ZeroXExchangeProxy,
+};
 use alloy::primitives::Address;
+use alloy_sol_types::SolCall;
 use dashmap::{DashMap, DashSet};
 use reqwest::Client;
 use serde::Deserialize;
@@ -84,13 +91,35 @@ impl RouterDiscovery {
             return;
         }
         if self.state.len() >= self.max_entries && !self.state.contains_key(&router) {
-            tracing::debug!(
-                target: "router_discovery",
-                len = self.state.len(),
-                max = self.max_entries,
-                "Router discovery at capacity; dropping new router"
-            );
-            return;
+            // Prefer evicting a stale/low-signal entry over dropping new unknowns forever.
+            let victim = self
+                .state
+                .iter()
+                .min_by(|a, b| {
+                    a.value()
+                        .seen
+                        .cmp(&b.value().seen)
+                        .then_with(|| a.value().last_checked.cmp(&b.value().last_checked))
+                })
+                .map(|entry| *entry.key());
+            if let Some(victim) = victim {
+                self.state.remove(&victim);
+                tracing::debug!(
+                    target: "router_discovery",
+                    evicted = %format!("{victim:#x}"),
+                    len = self.state.len(),
+                    max = self.max_entries,
+                    "Router discovery at capacity; evicted stale entry"
+                );
+            } else {
+                tracing::debug!(
+                    target: "router_discovery",
+                    len = self.state.len(),
+                    max = self.max_entries,
+                    "Router discovery at capacity; dropping new router"
+                );
+                return;
+            }
         }
 
         let mut should_flush = None;
@@ -214,7 +243,10 @@ impl RouterDiscovery {
         }
     }
 
-    async fn classify_router(&self, router: Address) -> Result<Option<RouterClassification>, AppError> {
+    async fn classify_router(
+        &self,
+        router: Address,
+    ) -> Result<Option<RouterClassification>, AppError> {
         if let Some(classification) = self.classify_router_via_etherscan(router).await? {
             return Ok(Some(classification));
         }
@@ -236,8 +268,8 @@ impl RouterDiscovery {
         }
 
         let url = format!(
-            "https://api.etherscan.io/api?module=contract&action=getabi&address={:#x}&apikey={}",
-            router, key
+            "https://api.etherscan.io/v2/api?chainid={}&module=contract&action=getabi&address={:#x}&apikey={}",
+            self.chain_id, router, key
         );
         let resp = self
             .client
@@ -322,8 +354,9 @@ impl RouterDiscovery {
             .into_iter()
             .find(|(selector, _)| Self::selector_kind(selector).is_some())
         {
-            let kind = Self::selector_kind(selector)
-                .ok_or_else(|| AppError::Initialization("selector classification missing".into()))?;
+            let kind = Self::selector_kind(selector).ok_or_else(|| {
+                AppError::Initialization("selector classification missing".into())
+            })?;
             return Ok(Some(RouterClassification {
                 kind,
                 note: format!("selector_observed:{selector}"),
@@ -337,7 +370,11 @@ impl RouterDiscovery {
             return;
         }
 
-        let candidates = match self.db.top_unknown_routers(self.chain_id, limit as u64).await {
+        let candidates = match self
+            .db
+            .top_unknown_routers(self.chain_id, limit as u64)
+            .await
+        {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(
@@ -519,34 +556,96 @@ impl RouterDiscovery {
                 status: resp.status().as_u16(),
             });
         }
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| AppError::Initialization(format!("Router discovery RPC decode failed: {e}")))?;
+        let body: serde_json::Value = resp.json().await.map_err(|e| {
+            AppError::Initialization(format!("Router discovery RPC decode failed: {e}"))
+        })?;
         if let Some(err) = body.get("error") {
             return Err(AppError::Initialization(format!(
                 "Router discovery RPC error for {method}: {err}"
             )));
         }
-        Ok(body.get("result").cloned().unwrap_or(serde_json::Value::Null))
+        Ok(body
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
     }
 
     fn selector_kind(selector: &str) -> Option<RouterKind> {
-        match selector.to_ascii_lowercase().as_str() {
-            // Uniswap Universal Router execute selectors
-            "0x3593564c" | "0x24856bc3" => Some(RouterKind::V3Like),
-            // Uniswap V3 router selectors
-            "0x414bf389" | "0x5023b4df" | "0xc04b8d59" | "0xdb3e2198" => {
-                Some(RouterKind::V3Like)
-            }
-            // Uniswap V2-like selectors
-            "0x7ff36ab5" | "0xfb3bdb41" | "0x18cbafe5" | "0x4a25d94a" | "0x38ed1739"
-            | "0x8803dbee" | "0x5c11d795" | "0x791ac947" | "0xb6f9de95" => {
-                Some(RouterKind::V2Like)
-            }
-            _ => None,
+        let parsed = parse_selector_hex(selector)?;
+        if matches!(
+            parsed,
+            UniversalRouter::executeCall::SELECTOR
+                | UniversalRouterDeadline::executeCall::SELECTOR
+                | UniV3Router::exactInputCall::SELECTOR
+                | UniV3Router::exactInputSingleCall::SELECTOR
+                | UniV3Router::exactOutputCall::SELECTOR
+                | UniV3Router::exactOutputSingleCall::SELECTOR
+                | UniV3Multicall::multicallCall::SELECTOR
+                | UniV3MulticallDeadline::multicallCall::SELECTOR
+        ) {
+            return Some(RouterKind::V3Like);
         }
+        if matches!(
+            parsed,
+            UniV2Router::swapExactETHForTokensCall::SELECTOR
+                | UniV2Router::swapETHForExactTokensCall::SELECTOR
+                | UniV2Router::swapExactTokensForETHCall::SELECTOR
+                | UniV2Router::swapTokensForExactETHCall::SELECTOR
+                | UniV2Router::swapExactTokensForTokensCall::SELECTOR
+                | UniV2Router::swapTokensForExactTokensCall::SELECTOR
+                | UniV2Router::swapExactETHForTokensSupportingFeeOnTransferTokensCall::SELECTOR
+                | UniV2Router::swapExactTokensForETHSupportingFeeOnTransferTokensCall::SELECTOR
+                | UniV2Router::swapExactTokensForTokensSupportingFeeOnTransferTokensCall::SELECTOR
+                | OneInchAggregationRouter::swapCall::SELECTOR
+                | OneInchAggregationRouterV5::swapCall::SELECTOR
+                | ParaSwapAugustusV6::swapExactAmountInCall::SELECTOR
+                | ParaSwapAugustusV6::swapExactAmountOutCall::SELECTOR
+                | KyberAggregationRouterV2::swapCall::SELECTOR
+                | KyberAggregationRouterV2::swapGenericCall::SELECTOR
+                | KyberAggregationRouterV2::swapSimpleModeCall::SELECTOR
+                | ZeroXExchangeProxy::transformERC20Call::SELECTOR
+                | DexRouter::dagSwapByOrderIdCall::SELECTOR
+                | DexRouter::dagSwapToCall::SELECTOR
+                | DexRouter::smartSwapByOrderIdCall::SELECTOR
+                | DexRouter::smartSwapToCall::SELECTOR
+                | DexRouter::smartSwapByInvestCall::SELECTOR
+                | DexRouter::smartSwapByInvestWithRefundCall::SELECTOR
+                | DexRouter::swapWrapToWithBaseRequestCall::SELECTOR
+                | DexRouter::uniswapV3SwapToWithBaseRequestCall::SELECTOR
+                | DexRouter::unxswapToWithBaseRequestCall::SELECTOR
+                | TransitSwapRouterV5::exactInputV2SwapCall::SELECTOR
+                | TransitSwapRouterV5::exactInputV2SwapAndGasUsedCall::SELECTOR
+                | TransitSwapRouterV5::exactInputV3SwapCall::SELECTOR
+                | TransitSwapRouterV5::exactInputV3SwapAndGasUsedCall::SELECTOR
+                | RelayRouterV3::multicallCall::SELECTOR
+                | RelayApprovalProxyV3::transferAndMulticallCall::SELECTOR
+                | RelayApprovalProxyV3::permitTransferAndMulticallCall::SELECTOR
+                | RelayApprovalProxyV3::permit3009TransferAndMulticallCall::SELECTOR
+                | RelayApprovalProxyV3::permit2TransferAndMulticallCall::SELECTOR
+                | BalancerVault::swapCall::SELECTOR
+                | BalancerVault::batchSwapCall::SELECTOR
+        ) {
+            return Some(RouterKind::V2Like);
+        }
+        None
     }
+}
+
+fn parse_selector_hex(raw: &str) -> Option<[u8; 4]> {
+    let s = raw.trim();
+    let hex = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
+    if hex.len() != 8 {
+        return None;
+    }
+    let mut out = [0u8; 4];
+    for i in 0..4 {
+        let byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok()?;
+        out[i] = byte;
+    }
+    Some(out)
 }
 
 #[derive(Debug, Deserialize)]

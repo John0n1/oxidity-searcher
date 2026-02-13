@@ -100,6 +100,118 @@ impl PriceFeed {
         }
     }
 
+    pub async fn audit_chainlink_feeds(&self, strict: bool) -> Result<(), AppError> {
+        if self.chainlink_feeds.is_empty() {
+            tracing::warn!(
+                target: "price_feed",
+                "No Chainlink feeds configured; startup feed audit skipped"
+            );
+            return Ok(());
+        }
+
+        sol! {
+            #[derive(Debug, PartialEq, Eq)]
+            #[sol(rpc)]
+            contract AggregatorV3Audit {
+                function latestRoundData() external view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound);
+            }
+        }
+
+        let mut feeds: Vec<(String, Address)> = self
+            .chainlink_feeds
+            .iter()
+            .map(|(symbol, addr)| (symbol.clone(), *addr))
+            .collect();
+        feeds.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut stale: Vec<String> = Vec::new();
+        let mut invalid: Vec<String> = Vec::new();
+
+        for (symbol, addr) in feeds {
+            let contract = AggregatorV3Audit::new(addr, self.provider.clone());
+            let latest = retry_async(
+                move |_| {
+                    let c = contract.clone();
+                    async move { c.latestRoundData().call().await }
+                },
+                2,
+                Duration::from_millis(75),
+            )
+            .await;
+
+            let latest = match latest {
+                Ok(v) => v,
+                Err(e) => {
+                    invalid.push(format!("{symbol}@{:#x}:rpc_error={e}", addr));
+                    continue;
+                }
+            };
+            if latest.answer.is_negative() {
+                invalid.push(format!("{symbol}@{:#x}:negative_answer", addr));
+                continue;
+            }
+
+            let updated_at_secs: u64 = latest
+                .updatedAt
+                .try_into()
+                .ok()
+                .or_else(|| latest.updatedAt.to_string().parse().ok())
+                .unwrap_or(0u64);
+            if updated_at_secs == 0 {
+                invalid.push(format!("{symbol}@{:#x}:updated_at_zero", addr));
+                continue;
+            }
+            let age = now.saturating_sub(updated_at_secs);
+            if age > CHAINLINK_STALENESS_SECS {
+                stale.push(format!("{symbol}@{:#x}:age={}s", addr, age));
+            }
+        }
+
+        if !invalid.is_empty() {
+            for row in invalid.iter().take(12) {
+                tracing::warn!(
+                    target: "price_feed",
+                    strict,
+                    issue = %row,
+                    "Chainlink feed audit invalid feed"
+                );
+            }
+        }
+        if !stale.is_empty() {
+            for row in stale.iter().take(12) {
+                tracing::warn!(
+                    target: "price_feed",
+                    strict,
+                    issue = %row,
+                    stale_threshold_secs = CHAINLINK_STALENESS_SECS,
+                    "Chainlink feed audit stale feed"
+                );
+            }
+        }
+
+        if !invalid.is_empty() || (strict && !stale.is_empty()) {
+            return Err(AppError::Config(format!(
+                "Chainlink feed audit failed (invalid={}, stale={}, strict={})",
+                invalid.len(),
+                stale.len(),
+                strict
+            )));
+        }
+
+        tracing::info!(
+            target: "price_feed",
+            strict,
+            stale = stale.len(),
+            invalid = invalid.len(),
+            "Chainlink feed audit completed"
+        );
+        Ok(())
+    }
+
     /// Get price from Binance (e.g., symbol = "ETHUSDT")
     pub async fn get_price(&self, symbol: &str) -> Result<PriceQuote, AppError> {
         let normalized = normalize_symbol(symbol);
@@ -250,10 +362,7 @@ impl PriceFeed {
             .json()
             .await
             .map_err(|e| AppError::Initialization(format!("OKX decode failed: {}", e)))?;
-        let price = parsed
-            .data
-            .first()
-            .and_then(|d| d.last.parse::<f64>().ok());
+        let price = parsed.data.first().and_then(|d| d.last.parse::<f64>().ok());
         if let Some(p) = price {
             return Ok(Some(PriceQuote {
                 price: p,

@@ -14,7 +14,7 @@ use crate::services::strategy::decode::{
 };
 use crate::services::strategy::planning::bundles::NonceLease;
 use crate::services::strategy::planning::{ApproveTx, BackrunTx, FrontRunTx};
-use crate::services::strategy::strategy::BundleTelemetry;
+use crate::services::strategy::strategy::{BundleTelemetry, PerBlockInputs};
 use crate::services::strategy::strategy::{
     ReceiptStatus, SkipReason, StrategyExecutor, StrategyWork,
 };
@@ -27,6 +27,78 @@ use alloy::rpc::types::eth::state::StateOverridesBuilder;
 use alloy::rpc::types::eth::{Transaction, TransactionInput, TransactionRequest};
 
 impl StrategyExecutor {
+    fn adaptive_min_bundle_gas_estimate(
+        &self,
+        observed_swap: &ObservedSwap,
+        gas_limit_hint: u64,
+        allow_front_run: bool,
+        has_wrapped: bool,
+    ) -> u64 {
+        // Start from both external hint and local rolling probe stats.
+        let mut estimate = gas_limit_hint.max(self.probe_gas_limit(observed_swap.router));
+        let router_floor = match observed_swap.router_kind {
+            RouterKind::V2Like => 170_000u64,
+            RouterKind::V3Like => 200_000u64,
+        };
+        estimate = estimate.max(router_floor);
+        if allow_front_run {
+            estimate = estimate.saturating_add(90_000);
+        }
+        if has_wrapped && self.flashloan_enabled && self.has_usable_flashloan_provider() {
+            estimate = estimate.saturating_add(70_000);
+        }
+        let with_headroom = estimate
+            .saturating_mul(110)
+            .checked_div(100)
+            .unwrap_or(estimate);
+        with_headroom.clamp(140_000, 650_000)
+    }
+
+    fn adaptive_min_bundle_gas_from_plan(
+        &self,
+        baseline_gas: u64,
+        gas_limit_hint: u64,
+        approvals: &[ApproveTx],
+        front_run: &Option<FrontRunTx>,
+        backrun: &BackrunTx,
+        executor_request: &Option<TransactionRequest>,
+    ) -> u64 {
+        let mut planned = 0u64;
+
+        for approval in approvals {
+            let gas = approval
+                .request
+                .gas
+                .unwrap_or(70_000)
+                .clamp(45_000, 130_000);
+            planned = planned.saturating_add(gas);
+        }
+
+        if let Some(front) = front_run.as_ref() {
+            let gas = front
+                .request
+                .gas
+                .unwrap_or(gas_limit_hint)
+                .clamp(80_000, 380_000);
+            planned = planned.saturating_add(gas);
+        }
+
+        let main_req = executor_request.as_ref().unwrap_or(&backrun.request);
+        let main_default = gas_limit_hint.max(self.probe_gas_limit(backrun.to));
+        let main_gas = main_req.gas.unwrap_or(main_default).clamp(120_000, 750_000);
+        planned = planned.saturating_add(main_gas);
+
+        if backrun.uses_flashloan {
+            planned = planned.saturating_add(backrun.flashloan_overhead_gas.max(80_000));
+        }
+
+        let with_headroom = planned
+            .saturating_mul(110)
+            .checked_div(100)
+            .unwrap_or(planned);
+        with_headroom.max(baseline_gas).clamp(150_000, 900_000)
+    }
+
     pub async fn process_work(self: std::sync::Arc<Self>, work: StrategyWork) {
         if let Err(e) = self.handle_work(work).await {
             tracing::error!(target: "strategy", error=%e, "Strategy task failed");
@@ -62,15 +134,27 @@ impl StrategyExecutor {
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             (Ok(None), from, tx_hash) => {
-                tracing::debug!(
-                    target: "strategy",
-                    from=?from,
-                    tx_hash=?tx_hash,
-                    "Skipped item"
-                );
-                self.stats
+                let skipped = self
+                    .stats
                     .skipped
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
+                if skipped % self.skip_log_every == 0 {
+                    tracing::debug!(
+                        target: "strategy",
+                        from=?from,
+                        tx_hash=?tx_hash,
+                        skipped,
+                        "Skipped item (sampled)"
+                    );
+                } else {
+                    tracing::trace!(
+                        target: "strategy",
+                        from=?from,
+                        tx_hash=?tx_hash,
+                        "Skipped item"
+                    );
+                }
             }
             (Err(e), _, _) => {
                 let nonce_gap = Self::is_nonce_gap_error(&e);
@@ -140,7 +224,7 @@ impl StrategyExecutor {
         observed_swap: &ObservedSwap,
     ) -> Option<(SwapDirection, Address)> {
         let has_wrapped = observed_swap.path.contains(&self.wrapped_native);
-        if observed_swap.amount_in.is_zero() || (!has_wrapped && !self.allow_non_wrapped_swaps) {
+        if observed_swap.amount_in.is_zero() || !has_wrapped {
             self.log_skip(
                 SkipReason::MissingWrappedOrZeroAmount,
                 "path missing wrapped native or zero amount",
@@ -163,7 +247,6 @@ impl StrategyExecutor {
             );
             return None;
         }
-        self.inventory_tokens.insert(target_token);
         Some((direction, target_token))
     }
 
@@ -775,11 +858,10 @@ impl StrategyExecutor {
         victim_value: U256,
         fee_hints: (Option<u128>, Option<u128>),
     ) -> Result<Option<BundleParts>, AppError> {
-        let mut gas_fees: GasFees = self.gas_oracle.estimate_eip1559_fees().await?;
+        let (mut gas_fees, real_balance) = self.per_block_inputs().await?;
         self.boost_fees(&mut gas_fees, fee_hints.0, fee_hints.1);
         let hard_cap = self.hard_gas_cap_wei();
 
-        let real_balance = self.portfolio.update_eth_balance(self.chain_id).await?;
         let (wallet_chain_balance, _) = if self.dry_run {
             let gas_headroom = U256::from(gas_limit_hint) * U256::from(gas_fees.max_fee_per_gas);
             let value_headroom = victim_value.saturating_mul(U256::from(2u64));
@@ -790,22 +872,6 @@ impl StrategyExecutor {
         } else {
             (real_balance, false)
         };
-
-        // Hard floor: if wallet cannot even afford a single bundle tx at current fee settings,
-        // abort early to avoid spending cycles on paths that can never be submitted.
-        let min_bundle_gas = gas_limit_hint.clamp(180_000, 450_000);
-        let min_bundle_gas_cost =
-            U256::from(min_bundle_gas).saturating_mul(U256::from(gas_fees.max_fee_per_gas));
-        if wallet_chain_balance < min_bundle_gas_cost {
-            self.log_skip(
-                SkipReason::InsufficientBalance,
-                &format!(
-                    "wallet={} below min_bundle_gas_cost={} (gas={} max_fee={})",
-                    wallet_chain_balance, min_bundle_gas_cost, min_bundle_gas, gas_fees.max_fee_per_gas
-                ),
-            );
-            return Ok(None);
-        }
 
         if self.router_is_risky(observed_swap.router) {
             self.log_skip(SkipReason::RouterRevertRate, "router failure rate too high");
@@ -872,40 +938,40 @@ impl StrategyExecutor {
         }
 
         let has_wrapped = observed_swap.path.contains(&self.wrapped_native);
-        let mut trade_balance = wallet_chain_balance;
-        if !has_wrapped && self.allow_non_wrapped_swaps {
-            let token_in = observed_swap
-                .path
-                .first()
-                .copied()
-                .unwrap_or(self.wrapped_native);
-            let token_balance = self
-                .portfolio
-                .update_token_balance(self.chain_id, token_in)
-                .await?;
-            if token_balance.is_zero() {
-                self.log_skip(
-                    SkipReason::NonWrappedBalance,
-                    &format!("token={token_in:#x}"),
-                );
-                return Ok(None);
-            }
-            tracing::info!(
-                target: "strategy",
-                token_in = %format!("{token_in:#x}"),
-                balance = %token_balance,
-                router = %format!("{:#x}", observed_swap.router),
-                router_kind = ?observed_swap.router_kind,
-                path = ?observed_swap.path,
-                "Non-wrapped path accepted"
+        if !has_wrapped {
+            self.log_skip(
+                SkipReason::MissingWrappedOrZeroAmount,
+                "strict atomic mode requires wrapped-native path",
             );
-            trade_balance = token_balance;
+            return Ok(None);
+        }
+        let trade_balance = wallet_chain_balance;
+        let allow_front_run = self.sandwich_attacks_enabled
+            && (direction == SwapDirection::BuyWithEth || !has_wrapped);
+        let min_bundle_gas = self.adaptive_min_bundle_gas_estimate(
+            observed_swap,
+            gas_limit_hint,
+            allow_front_run,
+            has_wrapped,
+        );
+        let min_bundle_gas_cost =
+            U256::from(min_bundle_gas).saturating_mul(U256::from(gas_fees.max_fee_per_gas));
+        if wallet_chain_balance < min_bundle_gas_cost {
+            self.log_skip(
+                SkipReason::InsufficientBalance,
+                &format!(
+                    "wallet={} below adaptive_min_bundle_gas_cost={} (gas={} max_fee={} phase=baseline)",
+                    wallet_chain_balance,
+                    min_bundle_gas_cost,
+                    min_bundle_gas,
+                    gas_fees.max_fee_per_gas
+                ),
+            );
+            return Ok(None);
         }
 
         let mut attack_value_eth = U256::ZERO;
         let mut front_run: Option<FrontRunTx> = None;
-        let allow_front_run = self.sandwich_attacks_enabled
-            && (direction == SwapDirection::BuyWithEth || !has_wrapped);
         if allow_front_run {
             match self
                 .build_front_run_tx(observed_swap, &gas_fees, trade_balance, gas_limit_hint, 0)
@@ -989,9 +1055,12 @@ impl StrategyExecutor {
             }
         };
 
-        let executor_request = self
-            .build_executor_wrapper(&approvals, &backrun, &gas_fees, gas_limit_hint, 0)
-            .await?;
+        let executor_request = if Some(backrun.to) == self.executor {
+            None
+        } else {
+            self.build_executor_wrapper(&approvals, &backrun, &gas_fees, gas_limit_hint, 0)
+                .await?
+        };
 
         let bribe_wei = if let Some((_, req, _)) = executor_request.as_ref() {
             req.value
@@ -1000,8 +1069,36 @@ impl StrategyExecutor {
         } else {
             U256::ZERO
         };
+        let main_request_for_gas = executor_request.as_ref().map(|(_, req, _)| req.clone());
+        let refined_bundle_gas = self.adaptive_min_bundle_gas_from_plan(
+            min_bundle_gas,
+            gas_limit_hint,
+            &approvals,
+            &front_run,
+            &backrun,
+            &main_request_for_gas,
+        );
+        let refined_bundle_gas_cost =
+            U256::from(refined_bundle_gas).saturating_mul(U256::from(gas_fees.max_fee_per_gas));
+        if wallet_chain_balance < refined_bundle_gas_cost {
+            self.log_skip(
+                SkipReason::InsufficientBalance,
+                &format!(
+                    "wallet={} below adaptive_min_bundle_gas_cost={} (gas={} max_fee={} phase=planned)",
+                    wallet_chain_balance,
+                    refined_bundle_gas_cost,
+                    refined_bundle_gas,
+                    gas_fees.max_fee_per_gas
+                ),
+            );
+            return Ok(None);
+        }
 
-        let sim_balance = wallet_chain_balance;
+        let sim_balance = if use_flashloan {
+            U256::ZERO
+        } else {
+            wallet_chain_balance
+        };
 
         Ok(Some(BundleParts {
             gas_fees,
@@ -1014,6 +1111,32 @@ impl StrategyExecutor {
             backrun,
             executor_request: executor_request.map(|(_, req, _)| req),
         }))
+    }
+
+    async fn per_block_inputs(&self) -> Result<(GasFees, U256), AppError> {
+        let block_number = self
+            .current_block
+            .load(std::sync::atomic::Ordering::Relaxed);
+        {
+            let cache = self.per_block_inputs.lock().await;
+            if let Some(entry) = cache.as_ref() {
+                if entry.block_number == block_number {
+                    return Ok((entry.gas_fees.clone(), entry.wallet_balance));
+                }
+            }
+        }
+
+        let (gas_fees, wallet_balance) = tokio::try_join!(
+            self.gas_oracle.estimate_eip1559_fees(),
+            self.portfolio.update_eth_balance(self.chain_id)
+        )?;
+        let mut cache = self.per_block_inputs.lock().await;
+        *cache = Some(PerBlockInputs {
+            block_number,
+            gas_fees: gas_fees.clone(),
+            wallet_balance,
+        });
+        Ok((gas_fees, wallet_balance))
     }
 
     fn apply_nonce_plan(
@@ -1124,10 +1247,13 @@ impl StrategyExecutor {
             return Ok(None);
         }
         let Some(native_out) = self
-            .estimate_native_out(backrun.expected_out, backrun.expected_out_token)
+            .estimate_settlement_native_out(backrun.expected_out, backrun.expected_out_token)
             .await
         else {
-            self.log_skip(SkipReason::ProfitOrGasGuard, "non_native_expected_out");
+            self.log_skip(
+                SkipReason::ProfitOrGasGuard,
+                "unpriced_settlement_token_out",
+            );
             return Ok(None);
         };
         let gross_profit_wei = native_out.saturating_sub(total_eth_in);
@@ -1143,24 +1269,38 @@ impl StrategyExecutor {
         let net_profit_wei = gross_profit_wei.saturating_sub(effective_cost_wei);
         let base_profit_floor = StrategyExecutor::dynamic_profit_floor(wallet_chain_balance);
         let extra_costs = bribe_wei.saturating_add(backrun.flashloan_premium);
-        let profit_floor = StrategyExecutor::dynamic_profit_floor_with_costs(
+        let adaptive_base_bps = self.adaptive_base_floor_bps(gas_fees);
+        let adaptive_cost_bps = self.adaptive_cost_floor_bps(gas_fees);
+        let profit_floor = self.tuned_profit_floor_with_costs(
             wallet_chain_balance,
             gas_cost_wei,
             extra_costs,
+            gas_fees,
         );
 
         if net_profit_wei < profit_floor {
             self.log_skip(
                 SkipReason::ProfitOrGasGuard,
                 &format!(
-                    "Net {} < Floor {} (base_floor={} gas_cost={} extra_costs={})",
-                    net_profit_wei, profit_floor, base_profit_floor, gas_cost_wei, extra_costs
+                    "Net {} < Floor {} (base_floor={} gas_cost={} extra_costs={} base_bps={} cost_bps={})",
+                    net_profit_wei,
+                    profit_floor,
+                    base_profit_floor,
+                    gas_cost_wei,
+                    extra_costs,
+                    adaptive_base_bps,
+                    adaptive_cost_bps
                 ),
             );
             return Ok(None);
         }
 
-        if !self.gas_ratio_ok(gas_cost_wei, gross_profit_wei, wallet_chain_balance) {
+        if !self.gas_ratio_ok_with_fees(
+            gas_cost_wei,
+            gross_profit_wei,
+            wallet_chain_balance,
+            gas_fees,
+        ) {
             self.log_skip(SkipReason::ProfitOrGasGuard, "Bad Risk/Reward");
             return Ok(None);
         }

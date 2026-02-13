@@ -129,18 +129,20 @@ impl PortfolioManager {
         let effective_cost_wei = gas_wei
             .saturating_add(bribe_wei)
             .saturating_add(flashloan_premium_wei);
-        let computed_net_wei = gross_wei.saturating_sub(effective_cost_wei);
-        let applied_net_wei = if computed_net_wei == net_wei {
-            net_wei
+        let gross_i256 = u256_to_i256_saturating(gross_wei);
+        let cost_i256 = u256_to_i256_saturating(effective_cost_wei);
+        let computed_net_i256 = gross_i256.saturating_sub(cost_i256);
+        let reported_net_i256 = u256_to_i256_saturating(net_wei);
+        let applied_net_i256 = if computed_net_i256 == reported_net_i256 {
+            reported_net_i256
         } else {
-            computed_net_wei
+            computed_net_i256
         };
-        let net_i256 = I256::from_raw(applied_net_wei);
 
         self.net_pnl_wei
             .entry(chain_id)
-            .and_modify(|v| *v = v.saturating_add(net_i256))
-            .or_insert(net_i256);
+            .and_modify(|v| *v = v.saturating_add(applied_net_i256))
+            .or_insert(applied_net_i256);
 
         self.total_gas_spent_wei
             .entry(chain_id)
@@ -213,6 +215,10 @@ fn i256_to_eth_f64(val: I256) -> f64 {
     sign * (num / 1e18)
 }
 
+fn u256_to_i256_saturating(value: U256) -> I256 {
+    I256::try_from(value).unwrap_or(I256::MAX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,8 +258,47 @@ mod tests {
 
         assert_eq!(pm.get_net_profit_i256(1), I256::from_raw(net));
         assert_eq!(
-            pm.total_gas_spent_wei.get(&1).map(|v| *v).unwrap_or(U256::ZERO),
+            pm.total_gas_spent_wei
+                .get(&1)
+                .map(|v| *v)
+                .unwrap_or(U256::ZERO),
             gas
+        );
+    }
+
+    #[tokio::test]
+    async fn record_trade_components_records_negative_net_when_cost_exceeds_gross() {
+        let dummy_provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
+        let pm = PortfolioManager::new(dummy_provider, Address::ZERO);
+
+        let gross = U256::from(1_000u64);
+        let gas = U256::from(1_100u64);
+        let bribe = U256::from(250u64);
+        let premium = U256::from(50u64);
+
+        // Reported net may come in clamped from older callers; computed signed net must prevail.
+        pm.record_trade_components(1, gross, gas, bribe, premium, U256::ZERO);
+
+        assert_eq!(
+            pm.get_net_profit_i256(1),
+            I256::from_raw(U256::from(400u64))
+                .checked_neg()
+                .unwrap_or(I256::MIN),
+            "net pnl must preserve negative outcomes"
+        );
+    }
+
+    #[tokio::test]
+    async fn record_profit_records_negative_outcome() {
+        let dummy_provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
+        let pm = PortfolioManager::new(dummy_provider, Address::ZERO);
+
+        pm.record_profit(1, U256::from(1_000u64), U256::from(1_500u64));
+        assert_eq!(
+            pm.get_net_profit_i256(1),
+            I256::from_raw(U256::from(500u64))
+                .checked_neg()
+                .unwrap_or(I256::MIN)
         );
     }
 }

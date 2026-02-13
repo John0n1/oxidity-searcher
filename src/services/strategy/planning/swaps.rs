@@ -4,6 +4,7 @@
 use crate::common::constants;
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
+use crate::network::gas::GasFees;
 use crate::services::strategy::routers::{UniV2Router, UniV3Quoter, UniV3Router};
 use crate::services::strategy::strategy::{StrategyExecutor, V3_QUOTE_CACHE_TTL_MS};
 use crate::services::strategy::time_utils::current_unix;
@@ -124,6 +125,7 @@ impl StrategyExecutor {
         use_flashloan: bool,
         recipient: Address,
         strict_liquidity: bool,
+        gas_fees: &GasFees,
     ) -> Result<Option<V2SwapBuild>, AppError> {
         let router_contract = UniV2Router::new(router, self.http_provider.clone());
         let access_list = Self::build_access_list(router, &path);
@@ -151,7 +153,7 @@ impl StrategyExecutor {
         };
 
         let ratio_ppm = Self::price_ratio_ppm(expected_out, amount_in);
-        if ratio_ppm < U256::from(1_000u64) {
+        if ratio_ppm < U256::from(self.adaptive_liquidity_ratio_floor_ppm(gas_fees)) {
             if strict_liquidity {
                 return Err(AppError::Strategy("V2 liquidity too low".into()));
             } else {

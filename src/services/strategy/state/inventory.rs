@@ -56,26 +56,7 @@ impl StrategyExecutor {
     }
 
     pub async fn maybe_rebalance_inventory(&self) -> Result<(), AppError> {
-        let mut guard = self.last_rebalance.lock().await;
-        if guard.elapsed().as_secs() < 60 {
-            return Ok(());
-        }
-        *guard = std::time::Instant::now();
-        drop(guard);
-
-        let routers: Vec<Address> = self.router_allowlist.iter().map(|r| *r).collect();
-        if routers.is_empty() {
-            return Ok(());
-        }
-
-        let tokens: Vec<Address> = self.inventory_tokens.iter().map(|t| *t).collect();
-        for token in tokens.into_iter().take(2) {
-            for router in routers.iter().copied().take(3) {
-                if self.rebalance_token(token, router).await.is_ok() {
-                    break;
-                }
-            }
-        }
+        // Strict atomic execution mode: disable periodic inventory holds/rebalancing.
         Ok(())
     }
 
@@ -140,8 +121,7 @@ impl StrategyExecutor {
                 expected_out
             };
 
-        let gas_floor = U256::from(180_000u64)
-            .saturating_mul(U256::from(gas_fees.max_fee_per_gas));
+        let gas_floor = U256::from(180_000u64).saturating_mul(U256::from(gas_fees.max_fee_per_gas));
         let min_eth = gas_floor
             .saturating_mul(U256::from(120u64))
             .checked_div(U256::from(100u64))
@@ -161,7 +141,8 @@ impl StrategyExecutor {
         {
             return Ok(());
         }
-        let min_out = expected_out.saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
+        let min_out = expected_out
+            .saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
             / U256::from(10_000u64);
         let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 300);
 
@@ -230,7 +211,11 @@ impl StrategyExecutor {
             )
             .await;
         let (raw, _, _) = self.sign_with_access_list(request, access_list).await?;
-        if let Err(e) = self.bundle_sender.send_bundle(&[raw.clone()], self.chain_id).await {
+        if let Err(e) = self
+            .bundle_sender
+            .send_bundle(&[raw.clone()], self.chain_id)
+            .await
+        {
             tracing::warn!(
                 target: "inventory",
                 error = %e,
