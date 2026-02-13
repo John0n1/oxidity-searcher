@@ -13,11 +13,6 @@
   <img src="https://img.shields.io/badge/Node-Nethermind-0E7490?style=for-the-badge" alt="Nethermind" />
 </p>
 
-<p>
-  <img src="https://img.shields.io/badge/Simulation-eth__simulateV1%20%7C%20debug__traceCallMany-1D4ED8?style=for-the-badge" alt="Simulation Backends" />
-  <img src="https://img.shields.io/badge/CI-fmt%20%2B%20clippy%20-D%20warnings%20%2B%20tests-14532D?style=for-the-badge" alt="CI Quality" />
-  <img src="https://img.shields.io/codecov/c/github/John0n1/oxidity.searcher?style=for-the-badge" alt="Codecov" />
-</p>
 
 <p>
   <a href="#quick-start">Quick Start</a> |
@@ -29,16 +24,12 @@
 
 </div>
 
-<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
-
-## Brand Profile
+## Mission
 
 - Product: `Oxidity Searcher`
 - Mission: detect and execute profitable MEV opportunities with strict safety boundaries
 - Scope: single-operator runtime, Ethereum mainnet primary, EVM-compatible extension path
 - Stack: Rust + Tokio + Alloy + SQLite
-
-<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
 
 ## At A Glance
 
@@ -52,7 +43,6 @@
 | Submission | Flashbots-style multi-relay `eth_sendBundle`, `mev_sendBundle` support |
 | CI bar | format check, strict clippy, compile, tests |
 
-<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
 
 ## Quick Start
 
@@ -63,8 +53,6 @@ METRICS_TOKEN=<token> cargo run --release
 Health and metrics:
 - `GET /health`
 - `GET /` (bearer token required)
-
-<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
 
 ## Architecture
 
@@ -102,8 +90,6 @@ flowchart LR
   L --> M
 ```
 
-<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
-
 ## Mainnet And Nethermind Requirements
 
 ### Strict capability checks
@@ -122,8 +108,6 @@ flowchart LR
 - Prefer local IPC/WS endpoints for latency-sensitive paths
 - Tune burst behavior: `JsonRpc.EthModuleConcurrentInstances`, `JsonRpc.RequestQueueLimit`, `JsonRpc.Timeout`
 
-<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
-
 ## Safety And Risk Controls
 
 | Control | Purpose |
@@ -135,8 +119,6 @@ flowchart LR
 | Toxic token probes | avoids unreliable sell paths |
 | Receipt tri-state | handles unknown relay outcomes safely |
 | Gas cap floors | prevents uncapped bidding behavior |
-
-<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
 
 ## Simulation And Execution
 
@@ -157,8 +139,6 @@ flowchart LR
 | MEV-Share | enforces one victim hash + one backrun tx shape |
 | Non-mainnet | falls back to `eth_sendRawTransaction` |
 
-<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
-
 ## Persistence And Accounting
 
 ### Core tables
@@ -176,8 +156,6 @@ flowchart LR
 `net = gross - gas - bribe - flashloan_premium`
 
 This equation is consistent across strategy logic, DB writes, and portfolio tracking.
-
-<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
 
 ## Configuration
 
@@ -213,8 +191,6 @@ This equation is consistent across strategy logic, DB writes, and portfolio trac
 - `STRATEGY_WORKERS`
 - `METRICS_*`
 
-<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
-
 ## Testing And CI
 
 ### CI gates
@@ -233,8 +209,6 @@ This equation is consistent across strategy logic, DB writes, and portfolio trac
 - simulation backend and error handling
 - MEV-Share path integrity
 
-<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
-
 ## Deployment Checklist
 
 - [ ] Set `WALLET_KEY`, `BUNDLE_SIGNER_KEY`, `METRICS_TOKEN`, and RPC URLs via environment.
@@ -243,15 +217,5 @@ This equation is consistent across strategy logic, DB writes, and portfolio trac
 - [ ] Validate executor/profit receiver settings.
 - [ ] Fund wallet or enable flash-loan path with deployed executor.
 - [ ] Restrict metrics endpoint exposure (loopback/TLS/ACL).
-
-<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
-
-## Windows Installer (Preview)
-
-- Build: `./scripts/build-installer.ps1`
-- Installer definition: `installer/oxidity_installer.iss`
-- Setup writes `{app}\\config.prod.toml`
-
-<p align="center"><sub>-------------------------------- OXIDITY SEARCHER --------------------------------</sub></p>
 
 Updated: **February 13, 2026**
