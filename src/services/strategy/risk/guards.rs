@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use crate::common::constants::MIN_PROFIT_THRESHOLD_WEI;
 use crate::common::error::AppError;

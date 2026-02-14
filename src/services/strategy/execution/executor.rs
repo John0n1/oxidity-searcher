@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use crate::common::error::AppError;
 use crate::network::provider::HttpProvider;
@@ -895,6 +895,29 @@ mod tests {
             .expect("bundle at byte limit should be accepted");
     }
 
+    #[tokio::test]
+    async fn send_bundle_rejects_payload_above_flashbots_tx_limit() {
+        let sender = dry_run_sender();
+        let oversized = vec![vec![0u8; 1]; FLASHBOTS_MAX_TXS + 1];
+        let err = sender
+            .send_bundle(&oversized, 1)
+            .await
+            .expect_err("bundle should exceed max tx count");
+        assert!(
+            matches!(err, AppError::Strategy(msg) if msg.contains("Bundle exceeds Flashbots limits"))
+        );
+    }
+
+    #[tokio::test]
+    async fn send_bundle_accepts_payload_at_flashbots_tx_limit() {
+        let sender = dry_run_sender();
+        let boundary = vec![vec![0u8; 1]; FLASHBOTS_MAX_TXS];
+        sender
+            .send_bundle(&boundary, 1)
+            .await
+            .expect("bundle at tx count limit should be accepted");
+    }
+
     #[test]
     fn normalize_builders_uses_registry_names_and_dedupes() {
         let requested = vec![
@@ -941,6 +964,16 @@ mod tests {
         assert_eq!(
             BundleSender::extract_bundle_id(raw_obj).as_deref(),
             Some("0xdef")
+        );
+        let raw_bundle_id = r#"{"jsonrpc":"2.0","id":1,"result":{"bundleId":"id-123"}}"#;
+        assert_eq!(
+            BundleSender::extract_bundle_id(raw_bundle_id).as_deref(),
+            Some("id-123")
+        );
+        let raw_uuid = r#"{"jsonrpc":"2.0","id":1,"result":{"uuid":"uuid-123"}}"#;
+        assert_eq!(
+            BundleSender::extract_bundle_id(raw_uuid).as_deref(),
+            Some("uuid-123")
         );
     }
 }

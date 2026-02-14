@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use crate::common::constants::default_balancer_vault_for_chain;
 use crate::common::error::AppError;
@@ -285,7 +285,7 @@ impl Engine {
             return;
         }
 
-        tracing::info!(
+        tracing::debug!(
             target: "rpc",
             chain_id = self.chain_id,
             "Nethermind tuning guidance: JsonRpc.EnabledModules should include Eth,Subscribe,Debug,Trace,TxPool; raise JsonRpc.EthModuleConcurrentInstances for concurrent eth_* load; tune JsonRpc.RequestQueueLimit and JsonRpc.Timeout for burst traffic."

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use alloy::consensus::Transaction as ConsensusTxTrait;
 use alloy::primitives::{Address, Bytes, TxKind, U256, aliases::U24};
@@ -916,11 +916,12 @@ mod tests {
     use crate::services::strategy::routers::{
         DexRouter, KyberAggregationRouterV2, OneInchAggregationRouter, OneInchAggregationRouterV5,
         ParaSwapAugustusV6, RelayRouterV3, TransitSwapRouterV5, UniV2Router, UniV3Multicall,
-        UniV3Router, ZeroXExchangeProxy,
+        UniV3Router, UniversalRouter, ZeroXExchangeProxy,
     };
     use alloy::primitives::Bytes;
     use alloy::primitives::{U160, aliases::U24};
     use alloy::sol_types::SolCall;
+    use alloy_sol_types::SolValue;
 
     #[test]
     fn decodes_oneinch_swap_description() {
@@ -1237,5 +1238,135 @@ mod tests {
         assert_eq!(observed.path, vec![usdc, weth]);
         assert_eq!(observed.amount_in, U256::from(1_000_000u64));
         assert_eq!(observed.min_out, U256::from(500_000_000_000_000u64));
+    }
+
+    #[test]
+    fn relay_multicall_uses_per_call_value_for_nested_eth_swap() {
+        let relay = Address::from([0xa1; 20]);
+        let nested_router = Address::from([0xa2; 20]);
+        let weth = crate::common::constants::wrapped_native_for_chain(
+            crate::common::constants::CHAIN_ETHEREUM,
+        );
+        let token_out = Address::from([0xa3; 20]);
+        let outer_eth_value = U256::from(2_000_000_000_000_000u64);
+
+        let nested_call = UniV2Router::swapExactETHForTokensCall {
+            amountOutMin: U256::from(1u64),
+            path: vec![weth, token_out],
+            to: Address::from([0xa4; 20]),
+            deadline: U256::from(123u64),
+        };
+        let relay_call = RelayRouterV3::multicallCall {
+            calls: vec![RelayRouterV3::RelayCall {
+                target: nested_router,
+                allowFailure: false,
+                value: U256::ZERO,
+                callData: Bytes::from(nested_call.abi_encode()),
+            }],
+            refundTo: Address::from([0xa5; 20]),
+            nftRecipient: Address::from([0xa6; 20]),
+            metadata: Bytes::new(),
+        };
+
+        let observed = decode_swap_input(relay, &relay_call.abi_encode(), outer_eth_value)
+            .expect("decode relay nested eth swap");
+        assert_eq!(observed.router, nested_router);
+        assert_eq!(observed.path, vec![weth, token_out]);
+        assert_eq!(observed.amount_in, U256::ZERO);
+    }
+
+    #[test]
+    fn decodes_universal_router_v2_command_with_flag_bits() {
+        let router = Address::from([0xb1; 20]);
+        let token_in = Address::from([0xb2; 20]);
+        let token_out = Address::from([0xb3; 20]);
+        let params = V2SwapExactInParams {
+            recipient: Address::from([0xb4; 20]),
+            amountIn: U256::from(9_999u64),
+            amountOutMin: U256::from(555u64),
+            path: vec![token_in, token_out],
+            payerIsUser: true,
+        };
+        let call = UniversalRouter::executeCall {
+            commands: Bytes::from(vec![0x80 | UR_CMD_V2_SWAP_EXACT_IN]),
+            inputs: vec![Bytes::from(params.abi_encode())],
+        };
+
+        let observed =
+            decode_swap_input(router, &call.abi_encode(), U256::ZERO).expect("decode ur v2");
+        assert_eq!(observed.path, vec![token_in, token_out]);
+        assert_eq!(observed.amount_in, U256::from(9_999u64));
+        assert_eq!(observed.min_out, U256::from(555u64));
+        assert_eq!(observed.router_kind, RouterKind::V2Like);
+    }
+
+    #[test]
+    fn universal_router_skips_invalid_v3_path_and_decodes_next_command() {
+        let router = Address::from([0xc1; 20]);
+        let token_in = Address::from([0xc2; 20]);
+        let token_out = Address::from([0xc3; 20]);
+
+        let invalid_v3 = V3SwapExactInParams {
+            recipient: Address::from([0xc4; 20]),
+            amountIn: U256::from(111u64),
+            amountOutMin: U256::from(1u64),
+            path: Bytes::from(vec![0xde, 0xad]), // malformed V3 path; should be skipped
+            payerIsUser: true,
+        };
+        let valid_v2 = V2SwapExactOutParams {
+            recipient: Address::from([0xc5; 20]),
+            amountOut: U256::from(222u64),
+            amountInMax: U256::from(333u64),
+            path: vec![token_in, token_out],
+            payerIsUser: true,
+        };
+        let call = UniversalRouter::executeCall {
+            commands: Bytes::from(vec![UR_CMD_V3_SWAP_EXACT_IN, UR_CMD_V2_SWAP_EXACT_OUT]),
+            inputs: vec![
+                Bytes::from(invalid_v3.abi_encode()),
+                Bytes::from(valid_v2.abi_encode()),
+            ],
+        };
+
+        let observed =
+            decode_swap_input(router, &call.abi_encode(), U256::ZERO).expect("decode fallback ur");
+        assert_eq!(observed.path, vec![token_in, token_out]);
+        assert_eq!(observed.amount_in, U256::from(333u64));
+        assert_eq!(observed.min_out, U256::from(222u64));
+        assert_eq!(observed.router_kind, RouterKind::V2Like);
+    }
+
+    #[test]
+    fn decode_guard_rejects_excessive_nested_multicall_depth() {
+        let router = Address::from([0xd1; 20]);
+        let weth = crate::common::constants::wrapped_native_for_chain(
+            crate::common::constants::CHAIN_ETHEREUM,
+        );
+        let usdc = Address::from([0xd2; 20]);
+        let inner = UniV3Router::exactInputSingleCall {
+            params: UniV3Router::ExactInputSingleParams {
+                tokenIn: weth,
+                tokenOut: usdc,
+                fee: U24::from(500u32),
+                recipient: Address::from([0xd3; 20]),
+                deadline: U256::from(1u64),
+                amountIn: U256::from(1_000u64),
+                amountOutMinimum: U256::from(1u64),
+                sqrtPriceLimitX96: U160::ZERO,
+            },
+        };
+
+        let mut payload = inner.abi_encode();
+        for _ in 0..=MAX_DECODE_RECURSION {
+            payload = UniV3Multicall::multicallCall {
+                data: vec![Bytes::from(payload)],
+            }
+            .abi_encode();
+        }
+
+        assert!(
+            decode_swap_input(router, &payload, U256::ZERO).is_none(),
+            "decode should stop once recursion guard is exceeded"
+        );
     }
 }

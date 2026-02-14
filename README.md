@@ -1,9 +1,9 @@
 <div align="center">
 
-# Oxidity Searcher
+# mitander search
 
 <p>
-  <strong>Mainnet-first MEV searcher for Ethereum</strong><br/>
+  <strong>Mainnet-first MEV search for Ethereum</strong><br/>
   Low-latency ingest, deterministic simulation, strict risk controls, and relay-aware execution.
 </p>
 
@@ -26,7 +26,7 @@
 
 ## Mission
 
-- Product: `Oxidity Searcher`
+- Product: `mitander search`
 - Mission: detect and execute profitable MEV opportunities with strict safety boundaries
 - Scope: single-operator runtime, Ethereum mainnet primary, EVM-compatible extension path
 - Stack: Rust + Tokio + Alloy + SQLite

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use crate::common::error::AppError;
 use crate::data::executor::UnifiedHardenedExecutor;
@@ -358,6 +358,13 @@ impl Simulator {
                             "eth_simulateV1 not available on node; falling back"
                         );
                     }
+                } else if rpc_insufficient_sender_balance(&msg) {
+                    tracing::debug!(
+                        target: "simulation",
+                        backend = "eth_simulate",
+                        error = %e,
+                        "simulate_request eth_simulate insufficient sender balance"
+                    );
                 } else {
                     tracing::warn!(
                         target: "simulation",
@@ -549,12 +556,21 @@ impl Simulator {
                         "eth_simulateV1 unavailable for bundles; cached fallback"
                     );
                 }
-                tracing::warn!(
-                    target: "simulation",
-                    backend = "eth_simulate",
-                    error = %e,
-                    "simulate_bundle_requests failed"
-                );
+                if rpc_insufficient_sender_balance(&msg) {
+                    tracing::debug!(
+                        target: "simulation",
+                        backend = "eth_simulate",
+                        error = %e,
+                        "simulate_bundle_requests insufficient sender balance"
+                    );
+                } else {
+                    tracing::warn!(
+                        target: "simulation",
+                        backend = "eth_simulate",
+                        error = %e,
+                        "simulate_bundle_requests failed"
+                    );
+                }
                 Ok(None)
             }
         }
@@ -629,6 +645,13 @@ fn rpc_method_unavailable(message: &str) -> bool {
     let msg = message.to_lowercase();
     (msg.contains("method") && msg.contains("not found"))
         || (msg.contains("namespace") && msg.contains("disabled"))
+}
+
+fn rpc_insufficient_sender_balance(message: &str) -> bool {
+    let msg = message.to_lowercase();
+    (msg.contains("insufficient") && msg.contains("sender balance"))
+        || msg.contains("insufficient maxfeepergas for sender balance")
+        || msg.contains("error code -38014")
 }
 
 fn sim_call_result_to_outcome(call: &SimCallResult) -> SimulationOutcome {
@@ -756,7 +779,38 @@ pub fn decode_flashloan_revert(revert_data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::{Address, U256};
+    use alloy::primitives::{Address, Bytes, U256};
+    use alloy::rpc::types::eth::simulate::SimulateError;
+    use alloy_sol_types::SolError;
+
+    #[test]
+    fn backend_config_respects_first_known_token_and_order() {
+        let backend = SimulationBackend::new("debug,eth_call");
+        assert_eq!(
+            backend.order(),
+            &[
+                SimulationBackendMethod::DebugTraceCall,
+                SimulationBackendMethod::EthSimulate,
+                SimulationBackendMethod::EthCall
+            ]
+        );
+
+        let backend = SimulationBackend::new("eth_call debug");
+        assert_eq!(
+            backend.order(),
+            &[
+                SimulationBackendMethod::EthCall,
+                SimulationBackendMethod::EthSimulate,
+                SimulationBackendMethod::DebugTraceCall
+            ]
+        );
+    }
+
+    #[test]
+    fn backend_config_defaults_to_eth_simulate_for_unknown_config() {
+        let backend = SimulationBackend::new("not_a_backend");
+        assert_eq!(backend.order()[0], SimulationBackendMethod::EthSimulate);
+    }
 
     #[test]
     fn decodes_insufficient_funds_error() {
@@ -842,6 +896,68 @@ mod tests {
     }
 
     #[test]
+    fn decodes_standard_revert_reason() {
+        let data = Revert::from("slippage exceeded").abi_encode();
+        let msg = decode_flashloan_revert(&data);
+        assert_eq!(msg, "Standard Revert: slippage exceeded");
+    }
+
+    #[test]
+    fn decodes_unknown_revert_payload_as_hex() {
+        let msg = decode_flashloan_revert(&[0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(msg, "Unknown Revert: 0xdeadbeef");
+    }
+
+    #[test]
+    fn execution_failed_with_non_utf8_reason_is_hex_encoded() {
+        let err = UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::ExecutionFailed(
+            UnifiedHardenedExecutor::ExecutionFailed {
+                index: U256::from(7u64),
+                reason: Bytes::from(vec![0xff, 0xfe, 0xfd]),
+            },
+        );
+        let msg = decode_flashloan_revert(&err.abi_encode());
+        assert!(msg.contains("index 7"));
+        assert!(msg.contains("0xfffefd"));
+    }
+
+    #[test]
+    fn sim_call_result_uses_rpc_error_reason_when_present() {
+        let call = SimCallResult {
+            return_data: Bytes::new(),
+            logs: Vec::new(),
+            gas_used: 42_000,
+            status: false,
+            error: Some(SimulateError {
+                code: -32000,
+                message: "execution reverted".to_string(),
+            }),
+        };
+        let outcome = sim_call_result_to_outcome(&call);
+        assert!(!outcome.success);
+        assert_eq!(outcome.gas_used, 42_000);
+        let reason = outcome.reason.expect("reason");
+        assert!(reason.contains("execution reverted"));
+    }
+
+    #[test]
+    fn default_frame_failure_decodes_reason() {
+        let frame = DefaultFrame {
+            failed: true,
+            gas: 123_456,
+            return_value: Bytes::from(Revert::from("bad route").abi_encode()),
+            struct_logs: Vec::new(),
+        };
+        let outcome = default_frame_to_outcome(frame);
+        assert!(!outcome.success);
+        assert_eq!(outcome.gas_used, 123_456);
+        assert_eq!(
+            outcome.reason.as_deref(),
+            Some("Standard Revert: bad route")
+        );
+    }
+
+    #[test]
     fn rpc_unavailable_detection_matches_nethermind_patterns() {
         assert!(rpc_method_unavailable(
             "RPC error -32601: Method eth_simulateV1 not found"
@@ -850,5 +966,18 @@ mod tests {
             "RPC error -32600: Namespace debug is disabled"
         ));
         assert!(!rpc_method_unavailable("execution reverted: custom error"));
+    }
+
+    #[test]
+    fn insufficient_sender_balance_detection_matches_nethermind_patterns() {
+        assert!(rpc_insufficient_sender_balance(
+            "error code -38014: insufficient MaxFeePerGas for sender balance"
+        ));
+        assert!(rpc_insufficient_sender_balance(
+            "insufficient sender balance for transaction"
+        ));
+        assert!(!rpc_insufficient_sender_balance(
+            "execution reverted: custom error"
+        ));
     }
 }

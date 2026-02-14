@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use alloy::sol;
 
@@ -592,5 +592,110 @@ sol! {
     #[sol(rpc)]
     contract AavePool {
         function FLASHLOAN_PREMIUM_TOTAL() external view returns (uint128);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::primitives::{Address, Bytes, U256};
+    use alloy::sol_types::SolCall;
+    use std::collections::HashSet;
+
+    #[test]
+    fn decode_critical_selectors_are_unique() {
+        let selectors = [
+            UniV2Router::swapExactETHForTokensCall::SELECTOR,
+            UniV2Router::swapETHForExactTokensCall::SELECTOR,
+            UniV2Router::swapExactTokensForETHCall::SELECTOR,
+            UniV2Router::swapTokensForExactETHCall::SELECTOR,
+            UniV2Router::swapExactTokensForTokensCall::SELECTOR,
+            UniV2Router::swapTokensForExactTokensCall::SELECTOR,
+            UniV3Router::exactInputSingleCall::SELECTOR,
+            UniV3Router::exactOutputSingleCall::SELECTOR,
+            UniV3Router::exactInputCall::SELECTOR,
+            UniV3Router::exactOutputCall::SELECTOR,
+            UniV3Multicall::multicallCall::SELECTOR,
+            UniV3MulticallDeadline::multicallCall::SELECTOR,
+            UniversalRouter::executeCall::SELECTOR,
+            UniversalRouterDeadline::executeCall::SELECTOR,
+            RelayRouterV3::multicallCall::SELECTOR,
+            RelayApprovalProxyV3::transferAndMulticallCall::SELECTOR,
+            RelayApprovalProxyV3::permitTransferAndMulticallCall::SELECTOR,
+            RelayApprovalProxyV3::permit3009TransferAndMulticallCall::SELECTOR,
+            RelayApprovalProxyV3::permit2TransferAndMulticallCall::SELECTOR,
+            TransitSwapRouterV5::exactInputV2SwapCall::SELECTOR,
+            TransitSwapRouterV5::exactInputV2SwapAndGasUsedCall::SELECTOR,
+            TransitSwapRouterV5::exactInputV3SwapCall::SELECTOR,
+            TransitSwapRouterV5::exactInputV3SwapAndGasUsedCall::SELECTOR,
+            BalancerVault::swapCall::SELECTOR,
+            BalancerVault::batchSwapCall::SELECTOR,
+        ];
+
+        let mut unique = HashSet::new();
+        for selector in selectors {
+            assert!(
+                unique.insert(selector),
+                "duplicate selector detected: 0x{}",
+                hex::encode(selector)
+            );
+        }
+    }
+
+    #[test]
+    fn relay_approval_transfer_and_multicall_roundtrips() {
+        let nested = RelayApprovalProxyV3::RelayApprovalCall {
+            target: Address::from([0x11; 20]),
+            allowFailure: false,
+            value: U256::from(42u64),
+            callData: Bytes::from(vec![0xaa, 0xbb, 0xcc]),
+        };
+        let call = RelayApprovalProxyV3::transferAndMulticallCall {
+            tokens: vec![Address::from([0x22; 20])],
+            amounts: vec![U256::from(1000u64)],
+            calls: vec![nested.clone()],
+            refundTo: Address::from([0x33; 20]),
+            nftRecipient: Address::from([0x44; 20]),
+            metadata: Bytes::from(vec![0x01, 0x02]),
+        };
+
+        let encoded = call.abi_encode();
+        let decoded = RelayApprovalProxyV3::transferAndMulticallCall::abi_decode(&encoded)
+            .expect("decode transferAndMulticall");
+        assert_eq!(decoded.calls.len(), 1);
+        assert_eq!(decoded.calls[0].target, nested.target);
+        assert_eq!(decoded.calls[0].value, nested.value);
+        assert_eq!(decoded.calls[0].callData, nested.callData);
+    }
+
+    #[test]
+    fn transit_exact_input_v2_roundtrips() {
+        let call = TransitSwapRouterV5::exactInputV2SwapCall {
+            exactInput: TransitSwapRouterV5::TransitExactInputV2 {
+                dstReceiver: Address::from([0x51; 20]),
+                wrappedToken: Address::from([0x52; 20]),
+                router: U256::from(1u64),
+                amount: U256::from(10_000u64),
+                minReturnAmount: U256::from(9_900u64),
+                fee: U256::from(10u64),
+                path: vec![
+                    Address::from([0x53; 20]),
+                    Address::from([0x54; 20]),
+                    Address::from([0x55; 20]),
+                ],
+                pool: vec![Address::from([0x56; 20]), Address::from([0x57; 20])],
+                signature: Bytes::from(vec![0xde, 0xad]),
+                channel: "unit-test".to_string(),
+            },
+            deadline: U256::from(123u64),
+        };
+
+        let encoded = call.abi_encode();
+        let decoded = TransitSwapRouterV5::exactInputV2SwapCall::abi_decode(&encoded)
+            .expect("decode exactInputV2Swap");
+        assert_eq!(decoded.exactInput.amount, U256::from(10_000u64));
+        assert_eq!(decoded.exactInput.path.len(), 3);
+        assert_eq!(decoded.exactInput.channel, "unit-test".to_string());
+        assert_eq!(decoded.deadline, U256::from(123u64));
     }
 }

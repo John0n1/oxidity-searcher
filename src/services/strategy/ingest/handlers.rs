@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
@@ -27,6 +27,51 @@ use alloy::rpc::types::eth::state::StateOverridesBuilder;
 use alloy::rpc::types::eth::{Transaction, TransactionInput, TransactionRequest};
 
 impl StrategyExecutor {
+    fn required_wallet_upfront_wei(
+        uses_flashloan: bool,
+        principal_wei: U256,
+        bribe_wei: U256,
+        gas_cost_wei: U256,
+    ) -> U256 {
+        let value_and_bribe = if uses_flashloan {
+            bribe_wei
+        } else {
+            principal_wei.saturating_add(bribe_wei)
+        };
+        value_and_bribe.saturating_add(gas_cost_wei)
+    }
+
+    fn tx_max_upfront_wei(
+        req: &TransactionRequest,
+        fallback_max_fee_per_gas: u128,
+        fallback_gas_limit: u64,
+    ) -> U256 {
+        let gas_limit = req.gas.unwrap_or(fallback_gas_limit.max(120_000));
+        let max_fee_per_gas = req.max_fee_per_gas.unwrap_or(fallback_max_fee_per_gas);
+        let value = req.value.unwrap_or(U256::ZERO);
+        U256::from(gas_limit)
+            .saturating_mul(U256::from(max_fee_per_gas))
+            .saturating_add(value)
+    }
+
+    fn signer_bundle_max_upfront_wei(
+        bundle_requests: &[TransactionRequest],
+        signer: Address,
+        fallback_max_fee_per_gas: u128,
+        fallback_gas_limit: u64,
+    ) -> U256 {
+        bundle_requests
+            .iter()
+            .filter(|req| req.from == Some(signer))
+            .fold(U256::ZERO, |acc, req| {
+                acc.saturating_add(Self::tx_max_upfront_wei(
+                    req,
+                    fallback_max_fee_per_gas,
+                    fallback_gas_limit,
+                ))
+            })
+    }
+
     fn adaptive_min_bundle_gas_estimate(
         &self,
         observed_swap: &ObservedSwap,
@@ -189,30 +234,301 @@ impl StrategyExecutor {
         }
 
         if processed.is_multiple_of(5000) {
-            tracing::info!(
-            target: "strategy_summary",
-            processed,
-            submitted = self.stats.submitted.load(std::sync::atomic::Ordering::Relaxed),
-            skipped = self.stats.skipped.load(std::sync::atomic::Ordering::Relaxed),
-            failed = self.stats.failed.load(std::sync::atomic::Ordering::Relaxed),
-            skip_unknown_router = self.stats.skip_unknown_router.load(std::sync::atomic::Ordering::Relaxed),
-            skip_decode = self.stats.skip_decode_failed.load(std::sync::atomic::Ordering::Relaxed),
-            skip_missing_wrapped = self.stats.skip_missing_wrapped.load(std::sync::atomic::Ordering::Relaxed),
-            skip_non_wrapped_balance = self.stats.skip_non_wrapped_balance.load(std::sync::atomic::Ordering::Relaxed),
-            skip_gas_cap = self.stats.skip_gas_cap.load(std::sync::atomic::Ordering::Relaxed),
-            skip_sim_failed = self.stats.skip_sim_failed.load(std::sync::atomic::Ordering::Relaxed),
-            skip_profit_guard = self.stats.skip_profit_guard.load(std::sync::atomic::Ordering::Relaxed),
-            skip_unsupported_router = self.stats.skip_unsupported_router.load(std::sync::atomic::Ordering::Relaxed),
-            skip_token_call = self.stats.skip_token_call.load(std::sync::atomic::Ordering::Relaxed),
-            skip_toxic_token = self.stats.skip_toxic_token.load(std::sync::atomic::Ordering::Relaxed),
-            skip_insufficient_balance = self.stats.skip_insufficient_balance.load(std::sync::atomic::Ordering::Relaxed),
-            skip_router_revert_rate = self.stats.skip_router_revert_rate.load(std::sync::atomic::Ordering::Relaxed),
-            skip_liquidity_depth = self.stats.skip_liquidity_depth.load(std::sync::atomic::Ordering::Relaxed),
-            skip_sandwich_risk = self.stats.skip_sandwich_risk.load(std::sync::atomic::Ordering::Relaxed),
-            skip_front_run_build_failed = self.stats.skip_front_run_build_failed.load(std::sync::atomic::Ordering::Relaxed),
-            skip_backrun_build_failed = self.stats.skip_backrun_build_failed.load(std::sync::atomic::Ordering::Relaxed),
-            "Strategy loop summary"
-            );
+            let submitted = self.stats.submitted.load(std::sync::atomic::Ordering::Relaxed);
+            let skipped = self.stats.skipped.load(std::sync::atomic::Ordering::Relaxed);
+            let failed = self.stats.failed.load(std::sync::atomic::Ordering::Relaxed);
+
+            let skip_unknown_router = self
+                .stats
+                .skip_unknown_router
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let skip_decode = self
+                .stats
+                .skip_decode_failed
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let skip_missing_wrapped = self
+                .stats
+                .skip_missing_wrapped
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let skip_non_wrapped_balance = self
+                .stats
+                .skip_non_wrapped_balance
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let skip_gas_cap = self.stats.skip_gas_cap.load(std::sync::atomic::Ordering::Relaxed);
+            let skip_sim_failed = self
+                .stats
+                .skip_sim_failed
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let skip_profit_guard = self
+                .stats
+                .skip_profit_guard
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let skip_unsupported_router = self
+                .stats
+                .skip_unsupported_router
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let skip_token_call = self
+                .stats
+                .skip_token_call
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let skip_toxic_token = self
+                .stats
+                .skip_toxic_token
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let skip_insufficient_balance = self
+                .stats
+                .skip_insufficient_balance
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let skip_router_revert_rate = self
+                .stats
+                .skip_router_revert_rate
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let skip_liquidity_depth = self
+                .stats
+                .skip_liquidity_depth
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let skip_sandwich_risk = self
+                .stats
+                .skip_sandwich_risk
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let skip_front_run_build_failed = self
+                .stats
+                .skip_front_run_build_failed
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let skip_backrun_build_failed = self
+                .stats
+                .skip_backrun_build_failed
+                .load(std::sync::atomic::Ordering::Relaxed);
+
+            let pct_of = |value: u64, total: u64| -> f64 {
+                if total == 0 {
+                    0.0
+                } else {
+                    (value as f64 * 100.0) / (total as f64)
+                }
+            };
+            const ANSI_RESET: &str = "\x1b[0m";
+            const ANSI_BOLD: &str = "\x1b[1m";
+            const ANSI_DIM: &str = "\x1b[2m";
+            const ANSI_RED: &str = "\x1b[31m";
+            const ANSI_GREEN: &str = "\x1b[32m";
+            const ANSI_YELLOW: &str = "\x1b[33m";
+            const ANSI_CYAN: &str = "\x1b[36m";
+            let colorize = |text: String, color: &str, enabled: bool| -> String {
+                if enabled {
+                    format!("{color}{text}{ANSI_RESET}")
+                } else {
+                    text
+                }
+            };
+            let visible_len = |text: &str| -> usize {
+                let mut count = 0usize;
+                let mut in_escape = false;
+                let mut in_csi = false;
+                for ch in text.chars() {
+                    if in_escape {
+                        if !in_csi {
+                            if ch == '[' {
+                                in_csi = true;
+                            } else {
+                                in_escape = false;
+                            }
+                            continue;
+                        }
+                        if ('@'..='~').contains(&ch) {
+                            in_escape = false;
+                            in_csi = false;
+                        }
+                        continue;
+                    }
+                    if ch == '\x1b' {
+                        in_escape = true;
+                        continue;
+                    }
+                    count += 1;
+                }
+                count
+            };
+
+            let mut skip_rows = vec![
+                ("token_call", skip_token_call),
+                ("unknown_router", skip_unknown_router),
+                ("decode", skip_decode),
+                ("missing_wrapped", skip_missing_wrapped),
+                ("insufficient_balance", skip_insufficient_balance),
+                ("backrun_build_failed", skip_backrun_build_failed),
+                ("toxic_token", skip_toxic_token),
+                ("sandwich_risk", skip_sandwich_risk),
+                ("front_run_build_failed", skip_front_run_build_failed),
+                ("sim_failed", skip_sim_failed),
+                ("profit_guard", skip_profit_guard),
+                ("router_revert_rate", skip_router_revert_rate),
+                ("liquidity_depth", skip_liquidity_depth),
+                ("gas_cap", skip_gas_cap),
+                ("non_wrapped_balance", skip_non_wrapped_balance),
+                ("unsupported_router", skip_unsupported_router),
+            ];
+            skip_rows.sort_by(|a, b| b.1.cmp(&a.1));
+
+            let submit_rate = pct_of(submitted, processed);
+            let skip_rate = pct_of(skipped, processed);
+            let fail_rate = pct_of(failed, processed);
+
+            let submit_rate_col = if submit_rate > 0.0 {
+                ANSI_GREEN
+            } else {
+                ANSI_RED
+            };
+            let skip_rate_col = if skip_rate >= 95.0 {
+                ANSI_RED
+            } else if skip_rate >= 60.0 {
+                ANSI_YELLOW
+            } else {
+                ANSI_GREEN
+            };
+            let fail_rate_col = if fail_rate >= 1.0 {
+                ANSI_RED
+            } else if fail_rate > 0.0 {
+                ANSI_YELLOW
+            } else {
+                ANSI_GREEN
+            };
+
+            let top_skip_rows = skip_rows
+                .iter()
+                .take(6)
+                .map(|(name, value)| {
+                    let pct = pct_of(*value, skipped);
+                    let plain = format!("{name}={value} ({pct:.2}%)");
+                    let severity = if pct >= 25.0 {
+                        ANSI_RED
+                    } else if pct >= 5.0 {
+                        ANSI_YELLOW
+                    } else {
+                        ANSI_DIM
+                    };
+                    (
+                        plain.clone(),
+                        colorize(plain, severity, true),
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            let highlighted_count =
+                |label: &str, value: u64, warn_if_nonzero: bool, color_enabled: bool| -> String {
+                let text = format!("{label}={value}");
+                if !warn_if_nonzero {
+                    return colorize(text, ANSI_GREEN, color_enabled);
+                }
+                if value == 0 {
+                    colorize(text, ANSI_GREEN, color_enabled)
+                } else if value < 10 {
+                    colorize(text, ANSI_YELLOW, color_enabled)
+                } else {
+                    colorize(text, ANSI_RED, color_enabled)
+                }
+            };
+
+            let build_lines = |color_enabled: bool| {
+                let mut lines = vec![
+                    colorize(
+                        format!("{ANSI_BOLD}Strategy Summary @ {processed}"),
+                        ANSI_CYAN,
+                        color_enabled,
+                    ),
+                    format!(
+                        "totals : {} {} {}",
+                        highlighted_count("submitted", submitted, false, color_enabled),
+                        highlighted_count("skipped", skipped, true, color_enabled),
+                        highlighted_count("failed", failed, true, color_enabled)
+                    ),
+                    format!(
+                        "rates  : submit={} skip={} fail={}",
+                        colorize(format!("{submit_rate:.2}%"), submit_rate_col, color_enabled),
+                        colorize(format!("{skip_rate:.2}%"), skip_rate_col, color_enabled),
+                        colorize(format!("{fail_rate:.2}%"), fail_rate_col, color_enabled),
+                    ),
+                    "top skips (of skipped):".to_string(),
+                ];
+                for (idx, row) in top_skip_rows.iter().enumerate() {
+                    let rendered = if color_enabled {
+                        row.1.clone()
+                    } else {
+                        row.0.clone()
+                    };
+                    lines.push(format!("  {}. {}", idx + 1, rendered));
+                }
+                lines.push(format!(
+                    "build/sim/funding: {} {} {} {}",
+                    highlighted_count(
+                        "backrun_build_failed",
+                        skip_backrun_build_failed,
+                        true,
+                        color_enabled
+                    ),
+                    highlighted_count(
+                        "front_run_build_failed",
+                        skip_front_run_build_failed,
+                        true,
+                        color_enabled
+                    ),
+                    highlighted_count("sim_failed", skip_sim_failed, true, color_enabled),
+                    highlighted_count(
+                        "insufficient_balance",
+                        skip_insufficient_balance,
+                        true,
+                        color_enabled
+                    ),
+                ));
+                lines
+            };
+
+            let build_framed = |lines: &[String], color_border: bool| {
+                let width = lines
+                    .iter()
+                    .map(|line| visible_len(line))
+                    .max()
+                    .unwrap_or(0);
+                let border_raw = format!("+{}+", "-".repeat(width + 2));
+                let border = colorize(border_raw, ANSI_CYAN, color_border);
+                let mut framed = String::new();
+                framed.push_str(&border);
+                for line in lines {
+                    let line_len = visible_len(line);
+                    let pad = width.saturating_sub(line_len);
+                    framed.push('\n');
+                    framed.push_str(&format!("| {}{} |", line, " ".repeat(pad)));
+                }
+                framed.push('\n');
+                framed.push_str(&border);
+                framed
+            };
+
+            let lines_plain = build_lines(false);
+            let lines_color = build_lines(true);
+            let framed_plain = build_framed(&lines_plain, false);
+            let framed_color = build_framed(&lines_color, true);
+
+            use std::io::IsTerminal;
+            let ansi_enabled = std::env::var("NO_COLOR").is_err()
+                && std::env::var("TERM")
+                    .map(|v| !v.eq_ignore_ascii_case("dumb"))
+                    .unwrap_or(true)
+                && std::io::stderr().is_terminal();
+
+            if ansi_enabled {
+                tracing::info!(
+                    target: "strategy_summary",
+                    processed,
+                    submitted,
+                    skipped,
+                    failed,
+                    "Strategy loop summary"
+                );
+                eprintln!("{framed_color}");
+            } else {
+                tracing::info!(target: "strategy_summary", "\n{framed_plain}");
+            }
         }
 
         Ok(())
@@ -1030,10 +1346,37 @@ impl StrategyExecutor {
             }
         }
 
-        let required_value = victim_value.saturating_add(attack_value_eth);
-        let use_flashloan = has_wrapped
-            && self.should_use_flashloan(required_value, wallet_chain_balance, &gas_fees)
-            && front_run.is_none();
+        let mut required_value = attack_value_eth;
+        let mut required_total_for_plan = required_value.saturating_add(min_bundle_gas_cost);
+        let mut flashloan_needed_for_plan = has_wrapped
+            && self.should_use_flashloan(
+                required_total_for_plan,
+                wallet_chain_balance,
+                &gas_fees,
+            );
+        if flashloan_needed_for_plan && front_run.is_some() {
+            tracing::info!(
+                target: "strategy",
+                required_value = %required_value,
+                required_total_with_gas = %required_total_for_plan,
+                min_bundle_gas_cost = %min_bundle_gas_cost,
+                max_fee_per_gas = gas_fees.max_fee_per_gas,
+                wallet_balance = %wallet_chain_balance,
+                "Underfunded front-run plan; falling back to flashloan backrun-only path"
+            );
+            front_run = None;
+            approvals.clear();
+            attack_value_eth = U256::ZERO;
+            required_value = U256::ZERO;
+            required_total_for_plan = required_value.saturating_add(min_bundle_gas_cost);
+            flashloan_needed_for_plan = has_wrapped
+                && self.should_use_flashloan(
+                    required_total_for_plan,
+                    wallet_chain_balance,
+                    &gas_fees,
+                );
+        }
+        let use_flashloan = has_wrapped && flashloan_needed_for_plan && front_run.is_none();
         // For sizing, flashloans can extend to wallet balance plus victim value instead of a fixed 10k override.
         let trade_balance = if use_flashloan {
             wallet_chain_balance.saturating_add(victim_value)
@@ -1099,11 +1442,10 @@ impl StrategyExecutor {
             return Ok(None);
         }
 
-        let sim_balance = if use_flashloan {
-            U256::ZERO
-        } else {
-            wallet_chain_balance
-        };
+        // Flashloans remove principal requirement, but sender must still fund gas.
+        // Keep real wallet balance in simulation overrides to avoid false
+        // "insufficient MaxFeePerGas for sender balance" rejections.
+        let sim_balance = wallet_chain_balance;
 
         Ok(Some(BundleParts {
             gas_fees,
@@ -1179,6 +1521,22 @@ impl StrategyExecutor {
         gas_fees: &GasFees,
         router: Address,
     ) -> Result<Option<ProfitOutcome>, AppError> {
+        let signer_upfront_need = Self::signer_bundle_max_upfront_wei(
+            &bundle_requests,
+            self.signer.address(),
+            gas_fees.max_fee_per_gas,
+            gas_limit_hint,
+        );
+        if wallet_chain_balance < signer_upfront_need {
+            self.log_skip(
+                SkipReason::InsufficientBalance,
+                &format!(
+                    "wallet={} below signer_bundle_max_upfront={} (phase=pre_sim)",
+                    wallet_chain_balance, signer_upfront_need
+                ),
+            );
+            return Ok(None);
+        }
         for req in bundle_requests.iter_mut() {
             self.populate_access_list(req).await;
         }
@@ -1236,17 +1594,20 @@ impl StrategyExecutor {
             .value
             .unwrap_or(backrun.value)
             .max(backrun.value);
-        let total_eth_in = backrun_value
-            .saturating_add(attack_value_eth)
-            .saturating_add(bribe_wei);
-
-        let upfront_need = total_eth_in.saturating_add(gas_cost_wei);
+        let principal_wei = backrun_value.saturating_add(attack_value_eth);
+        let total_eth_in = principal_wei.saturating_add(bribe_wei);
+        let upfront_need = Self::required_wallet_upfront_wei(
+            backrun.uses_flashloan,
+            principal_wei,
+            bribe_wei,
+            gas_cost_wei,
+        );
         if wallet_chain_balance < upfront_need {
             self.log_skip(
                 SkipReason::InsufficientBalance,
                 &format!(
-                    "need {} wei (value+bribe+gas) have {}",
-                    upfront_need, wallet_chain_balance
+                    "need {} wei (principal+bribe+gas; flashloan={}) have {}",
+                    upfront_need, backrun.uses_flashloan, wallet_chain_balance
                 ),
             );
             return Ok(None);
@@ -1425,5 +1786,62 @@ mod tests {
         StrategyExecutor::apply_nonce_plan(&lease, &mut None, approvals.as_mut_slice(), &mut main)
             .unwrap();
         assert_eq!(main.nonce, Some(42));
+    }
+
+    #[test]
+    fn required_wallet_upfront_includes_principal_without_flashloan() {
+        let upfront = StrategyExecutor::required_wallet_upfront_wei(
+            false,
+            U256::from(100u64),
+            U256::from(10u64),
+            U256::from(5u64),
+        );
+        assert_eq!(upfront, U256::from(115u64));
+    }
+
+    #[test]
+    fn required_wallet_upfront_excludes_principal_with_flashloan() {
+        let upfront = StrategyExecutor::required_wallet_upfront_wei(
+            true,
+            U256::from(100u64),
+            U256::from(10u64),
+            U256::from(5u64),
+        );
+        assert_eq!(upfront, U256::from(15u64));
+    }
+
+    #[test]
+    fn signer_bundle_max_upfront_sums_only_signer_requests() {
+        let signer = Address::from([0x11; 20]);
+        let other = Address::from([0x22; 20]);
+        let req_a = TransactionRequest {
+            from: Some(signer),
+            gas: Some(100_000),
+            max_fee_per_gas: Some(10),
+            value: Some(U256::from(50u64)),
+            ..Default::default()
+        };
+        let req_b = TransactionRequest {
+            from: Some(other),
+            gas: Some(500_000),
+            max_fee_per_gas: Some(100),
+            value: Some(U256::from(999u64)),
+            ..Default::default()
+        };
+        let req_c = TransactionRequest {
+            from: Some(signer),
+            gas: Some(200_000),
+            max_fee_per_gas: Some(20),
+            value: Some(U256::from(70u64)),
+            ..Default::default()
+        };
+        let total = StrategyExecutor::signer_bundle_max_upfront_wei(
+            &[req_a, req_b, req_c],
+            signer,
+            1,
+            210_000,
+        );
+        // (100_000*10 + 50) + (200_000*20 + 70) = 5_000_120
+        assert_eq!(total, U256::from(5_000_120u64));
     }
 }

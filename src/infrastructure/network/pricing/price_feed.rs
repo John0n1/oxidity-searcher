@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
@@ -183,7 +183,7 @@ impl PriceFeed {
         }
         if !stale.is_empty() {
             for row in stale.iter().take(12) {
-                tracing::warn!(
+                tracing::debug!(
                     target: "price_feed",
                     strict,
                     issue = %row,

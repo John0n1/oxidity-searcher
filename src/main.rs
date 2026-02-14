@@ -1,30 +1,30 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use clap::Parser;
 use dashmap::DashSet;
 use futures::future::try_join_all;
-use oxidity_searcher::app::config::GlobalSettings;
-use oxidity_searcher::app::logging::setup_logging;
-use oxidity_searcher::domain::error::AppError;
-use oxidity_searcher::infrastructure::data::address_registry::validate_address_map;
-use oxidity_searcher::infrastructure::data::db::Database;
-use oxidity_searcher::infrastructure::data::token_manager::TokenManager;
-use oxidity_searcher::infrastructure::network::gas::GasOracle;
-use oxidity_searcher::infrastructure::network::nonce::NonceManager;
-use oxidity_searcher::infrastructure::network::price_feed::PriceFeed;
-use oxidity_searcher::infrastructure::network::provider::ConnectionFactory;
-use oxidity_searcher::services::strategy::engine::Engine;
-use oxidity_searcher::services::strategy::portfolio::PortfolioManager;
-use oxidity_searcher::services::strategy::safety::SafetyGuard;
-use oxidity_searcher::services::strategy::simulation::{SimulationBackend, Simulator};
+use mitander_search::app::config::GlobalSettings;
+use mitander_search::app::logging::setup_logging;
+use mitander_search::domain::error::AppError;
+use mitander_search::infrastructure::data::address_registry::validate_address_map;
+use mitander_search::infrastructure::data::db::Database;
+use mitander_search::infrastructure::data::token_manager::TokenManager;
+use mitander_search::infrastructure::network::gas::GasOracle;
+use mitander_search::infrastructure::network::nonce::NonceManager;
+use mitander_search::infrastructure::network::price_feed::PriceFeed;
+use mitander_search::infrastructure::network::provider::ConnectionFactory;
+use mitander_search::services::strategy::engine::Engine;
+use mitander_search::services::strategy::portfolio::PortfolioManager;
+use mitander_search::services::strategy::safety::SafetyGuard;
+use mitander_search::services::strategy::simulation::{SimulationBackend, Simulator};
 use std::str::FromStr;
 use std::sync::Arc;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about = "Oxidity Searcher")]
+#[command(author, version, about = "mitander search")]
 struct Cli {
     /// Path to config file (default: config.{toml,yaml,...})
     #[arg(long)]
@@ -175,7 +175,7 @@ async fn main() -> Result<(), AppError> {
             tracing::warn!("No Chainlink feeds configured for chain {}", chain_id);
         }
         let wrapped_native =
-            oxidity_searcher::common::constants::wrapped_native_for_chain(chain_id);
+            mitander_search::common::constants::wrapped_native_for_chain(chain_id);
         let price_feed = PriceFeed::new(
             http_provider.clone(),
             chainlink_feeds,
@@ -204,7 +204,7 @@ async fn main() -> Result<(), AppError> {
 
         let router_discovery = if settings.router_discovery_enabled {
             let discovery = Arc::new(
-                oxidity_searcher::services::strategy::router_discovery::RouterDiscovery::new(
+                mitander_search::services::strategy::router_discovery::RouterDiscovery::new(
                     chain_id,
                     router_allowlist.clone(),
                     db.clone(),
@@ -276,7 +276,7 @@ async fn main() -> Result<(), AppError> {
             settings.mevshare_builders_value(),
             settings.sandwich_attacks_enabled,
             settings.simulation_backend.clone(),
-            settings.chainlink_feed_conflict_strict_for_chain(chain_id),
+            settings.chainlink_feed_audit_strict_for_chain(chain_id),
             settings.bundle_use_replacement_uuid_for_chain(chain_id),
             settings.bundle_cancel_previous_for_chain(chain_id),
             worker_limit,

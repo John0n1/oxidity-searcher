@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use std::str::FromStr;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -33,5 +33,25 @@ pub fn setup_logging(log_level: &str, json_format: bool) {
         subscriber.with(fmt_layer).init();
     }
 
-    tracing::info!("Logging initialized. Level: {}", filter_spec);
+    let directives: Vec<&str> = filter_spec
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    let base = directives.first().copied().unwrap_or("info");
+    let overrides = directives
+        .iter()
+        .skip(1)
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    if overrides.is_empty() {
+        tracing::info!("Logging initialized\n  base: {base}\n  format: {}", if json_format { "json" } else { "compact" });
+    } else {
+        tracing::info!(
+            "Logging initialized\n  base: {base}\n  overrides: {overrides}\n  format: {}",
+            if json_format { "json" } else { "compact" }
+        );
+    }
 }

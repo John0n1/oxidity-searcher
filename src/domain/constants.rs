@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use alloy::primitives::{Address, U256};
 use lazy_static::lazy_static;
@@ -273,7 +273,7 @@ fn load_native_sentinel_from_tokenlist(path: &str) -> HashMap<u64, Address> {
 // =============================================================================
 
 pub const DEFAULT_LOG_LEVEL: &str = "info";
-pub const LOG_FILE_NAME: &str = "oxidity_searcher.log";
+pub const LOG_FILE_NAME: &str = "mitander_search.log";
 
 pub fn default_routers_for_chain(chain_id: u64) -> HashMap<String, Address> {
     ADDRESS_REGISTRY_DEFAULTS

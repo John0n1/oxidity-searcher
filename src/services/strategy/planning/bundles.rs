@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use crate::common::error::AppError;
 use crate::services::strategy::strategy::StrategyExecutor;
@@ -523,6 +523,17 @@ mod tests {
     use crate::services::strategy::execution::strategy::dummy_executor_for_tests;
     use alloy::primitives::address;
 
+    fn request_with_nonce(nonce: u64, to: Address) -> TransactionRequest {
+        TransactionRequest {
+            to: Some(TxKind::Call(to)),
+            nonce: Some(nonce),
+            gas: Some(21_000),
+            max_fee_per_gas: Some(1),
+            max_priority_fee_per_gas: Some(1),
+            ..Default::default()
+        }
+    }
+
     #[tokio::test]
     async fn approvals_precede_front_run_and_victim() {
         let exec = dummy_executor_for_tests().await;
@@ -582,5 +593,79 @@ mod tests {
         // Approval hash should be present, and front_run should not be None, proving ordering worked.
         assert_eq!(hashes.approvals.len(), 1);
         assert!(hashes.front_run.is_some());
+    }
+
+    #[tokio::test]
+    async fn approval_nonce_outside_lease_is_rejected() {
+        let exec = dummy_executor_for_tests().await;
+        let lease = NonceLease {
+            block: 1,
+            base: 10,
+            count: 2,
+        };
+        let plan = BundlePlan {
+            front_run: None,
+            approvals: vec![request_with_nonce(
+                12,
+                address!("1111111111111111111111111111111111111111"),
+            )],
+            main: request_with_nonce(10, address!("3333333333333333333333333333333333333333")),
+            victims: Vec::new(),
+        };
+
+        let err = match exec.merge_and_send_bundle(plan, Vec::new(), lease).await {
+            Ok(_) => panic!("approval nonce outside lease should fail"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, AppError::Strategy(msg) if msg.contains("approval nonce outside lease"))
+        );
+    }
+
+    #[tokio::test]
+    async fn main_nonce_outside_lease_is_rejected() {
+        let exec = dummy_executor_for_tests().await;
+        let lease = NonceLease {
+            block: 1,
+            base: 10,
+            count: 2,
+        };
+        let plan = BundlePlan {
+            front_run: None,
+            approvals: Vec::new(),
+            main: request_with_nonce(12, address!("3333333333333333333333333333333333333333")),
+            victims: Vec::new(),
+        };
+
+        let err = match exec.merge_and_send_bundle(plan, Vec::new(), lease).await {
+            Ok(_) => panic!("main nonce outside lease should fail"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, AppError::Strategy(msg) if msg.contains("main nonce outside lease")));
+    }
+
+    #[tokio::test]
+    async fn single_merge_over_flashbots_tx_count_is_rejected() {
+        let exec = dummy_executor_for_tests().await;
+        let lease = NonceLease {
+            block: 1,
+            base: 10,
+            count: 256,
+        };
+        let plan = BundlePlan {
+            front_run: None,
+            approvals: Vec::new(),
+            main: request_with_nonce(10, address!("3333333333333333333333333333333333333333")),
+            victims: vec![vec![0u8; 1]; MAX_FLASHBOTS_TXS],
+        };
+
+        let err = match exec.merge_and_send_bundle(plan, Vec::new(), lease).await {
+            Ok(_) => panic!("bundle larger than tx limit should fail"),
+            Err(e) => e,
+        };
+        assert!(matches!(
+            err,
+            AppError::Strategy(msg) if msg.contains("Single merge would exceed Flashbots bundle limits")
+        ));
     }
 }

@@ -8,20 +8,21 @@ use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolType;
 use alloy_sol_types::SolCall;
 use dashmap::DashSet;
-use oxidity_searcher::common::constants::{CHAIN_ETHEREUM, wrapped_native_for_chain};
-use oxidity_searcher::core::executor::BundleSender;
-use oxidity_searcher::core::portfolio::PortfolioManager;
-use oxidity_searcher::core::safety::SafetyGuard;
-use oxidity_searcher::core::simulation::{SimulationBackend, Simulator};
-use oxidity_searcher::core::strategy::{FlashloanProvider, StrategyExecutor, StrategyStats};
-use oxidity_searcher::data::db::Database;
-use oxidity_searcher::data::executor::{FlashCallbackData, UnifiedHardenedExecutor};
-use oxidity_searcher::network::gas::GasFees;
-use oxidity_searcher::network::nonce::NonceManager;
-use oxidity_searcher::network::price_feed::PriceFeed;
-use oxidity_searcher::network::provider::HttpProvider;
-use oxidity_searcher::network::reserves::ReserveCache;
-use oxidity_searcher::services::strategy::execution::work_queue::WorkQueue;
+use mitander_search::common::constants::{CHAIN_ETHEREUM, wrapped_native_for_chain};
+use mitander_search::common::error::AppError;
+use mitander_search::core::executor::BundleSender;
+use mitander_search::core::portfolio::PortfolioManager;
+use mitander_search::core::safety::SafetyGuard;
+use mitander_search::core::simulation::{SimulationBackend, Simulator};
+use mitander_search::core::strategy::{FlashloanProvider, StrategyExecutor, StrategyStats};
+use mitander_search::data::db::Database;
+use mitander_search::data::executor::{FlashCallbackData, UnifiedHardenedExecutor};
+use mitander_search::network::gas::GasFees;
+use mitander_search::network::nonce::NonceManager;
+use mitander_search::network::price_feed::PriceFeed;
+use mitander_search::network::provider::HttpProvider;
+use mitander_search::network::reserves::ReserveCache;
+use mitander_search::services::strategy::execution::work_queue::WorkQueue;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use url::Url;
@@ -53,15 +54,15 @@ async fn flashloan_builder_encodes_callbacks() {
     ));
     let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), bundle_signer.address()));
-    let gas_oracle = oxidity_searcher::network::gas::GasOracle::new(http.clone(), 1);
+    let gas_oracle = mitander_search::network::gas::GasOracle::new(http.clone(), 1);
     let price_feed = PriceFeed::new(
         http.clone(),
         std::collections::HashMap::new(),
-        oxidity_searcher::network::price_feed::PriceApiKeys::default(),
+        mitander_search::network::price_feed::PriceApiKeys::default(),
     );
     let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
     let token_manager =
-        Arc::new(oxidity_searcher::infrastructure::data::token_manager::TokenManager::default());
+        Arc::new(mitander_search::infrastructure::data::token_manager::TokenManager::default());
     let nonce_manager = NonceManager::new(http.clone(), bundle_signer.address());
     let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
     let router_allowlist = Arc::new(DashSet::<Address>::new());
@@ -207,15 +208,15 @@ async fn flashloan_builder_uses_aave_selector() {
     ));
     let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), bundle_signer.address()));
-    let gas_oracle = oxidity_searcher::network::gas::GasOracle::new(http.clone(), 1);
+    let gas_oracle = mitander_search::network::gas::GasOracle::new(http.clone(), 1);
     let price_feed = PriceFeed::new(
         http.clone(),
         std::collections::HashMap::new(),
-        oxidity_searcher::network::price_feed::PriceApiKeys::default(),
+        mitander_search::network::price_feed::PriceApiKeys::default(),
     );
     let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
     let token_manager =
-        Arc::new(oxidity_searcher::infrastructure::data::token_manager::TokenManager::default());
+        Arc::new(mitander_search::infrastructure::data::token_manager::TokenManager::default());
     let nonce_manager = NonceManager::new(http.clone(), bundle_signer.address());
     let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
     let router_allowlist = Arc::new(DashSet::<Address>::new());
@@ -316,5 +317,126 @@ async fn flashloan_builder_uses_aave_selector() {
     assert_eq!(
         selector,
         UnifiedHardenedExecutor::executeAaveFlashLoanSimpleCall::SELECTOR
+    );
+}
+
+#[tokio::test]
+async fn flashloan_builder_rejects_when_no_provider_available() {
+    let http = HttpProvider::new_http(Url::parse("http://127.0.0.1:8545").unwrap());
+    let safety_guard = Arc::new(SafetyGuard::new());
+    let bundle_signer = PrivateKeySigner::random();
+    let stats = Arc::new(StrategyStats::default());
+    let bundle_sender = Arc::new(BundleSender::new(
+        http.clone(),
+        true,
+        "https://relay.flashbots.net".to_string(),
+        "https://mev-share.flashbots.net".to_string(),
+        vec![
+            "flashbots".to_string(),
+            "beaverbuild.org".to_string(),
+            "rsync".to_string(),
+            "Titan".to_string(),
+        ],
+        bundle_signer.clone(),
+        stats.clone(),
+        true,
+        false,
+    ));
+    let db = Database::new("sqlite::memory:").await.expect("db");
+    let portfolio = Arc::new(PortfolioManager::new(http.clone(), bundle_signer.address()));
+    let gas_oracle = mitander_search::network::gas::GasOracle::new(http.clone(), 1);
+    let price_feed = PriceFeed::new(
+        http.clone(),
+        std::collections::HashMap::new(),
+        mitander_search::network::price_feed::PriceApiKeys::default(),
+    );
+    let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
+    let token_manager =
+        Arc::new(mitander_search::infrastructure::data::token_manager::TokenManager::default());
+    let nonce_manager = NonceManager::new(http.clone(), bundle_signer.address());
+    let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
+    let router_allowlist = Arc::new(DashSet::<Address>::new());
+
+    let work_queue = Arc::new(WorkQueue::new(4));
+    let (_block_tx, block_rx) = broadcast::channel(4);
+    let executor_addr = Address::from([0x55; 20]);
+
+    let exec = StrategyExecutor::new(
+        work_queue,
+        block_rx,
+        safety_guard,
+        bundle_sender,
+        db,
+        portfolio,
+        gas_oracle,
+        price_feed,
+        1,
+        200,
+        12_000,
+        simulator,
+        token_manager,
+        stats,
+        bundle_signer.clone(),
+        nonce_manager,
+        50,
+        10_000,
+        10_000,
+        1_200,
+        1_000,
+        5_000_000_000_000,
+        http.clone(),
+        true,
+        router_allowlist,
+        None,
+        500,
+        wrapped_native_for_chain(CHAIN_ETHEREUM),
+        false,
+        Some(executor_addr),
+        0,
+        None,
+        true,
+        vec![],
+        None,
+        reserve_cache,
+        true,
+        "revm".to_string(),
+        4,
+        tokio_util::sync::CancellationToken::new(),
+        500,
+        60_000,
+        4,
+        false,
+    );
+
+    let callbacks = vec![(
+        wrapped_native_for_chain(CHAIN_ETHEREUM),
+        Bytes::from(vec![0x01]),
+        U256::ZERO,
+    )];
+    let gas_fees = GasFees {
+        max_fee_per_gas: 30_000_000_000,
+        max_priority_fee_per_gas: 2_000_000_000,
+        next_base_fee_per_gas: 28_000_000_000,
+        base_fee_per_gas: 28_000_000_000,
+        p50_priority_fee_per_gas: None,
+        p90_priority_fee_per_gas: None,
+        gas_used_ratio: None,
+        suggested_max_fee_per_gas: None,
+    };
+
+    let err = exec
+        .build_flashloan_transaction(
+            executor_addr,
+            wrapped_native_for_chain(CHAIN_ETHEREUM),
+            U256::from(1_000_000u64),
+            callbacks,
+            180_000,
+            &gas_fees,
+            11,
+        )
+        .await
+        .expect_err("missing provider should fail");
+    assert!(
+        matches!(err, AppError::Strategy(msg) if msg.contains("No flashloan provider available"))
     );
 }

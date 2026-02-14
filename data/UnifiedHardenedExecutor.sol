@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 pragma solidity ^0.8.33;
 
@@ -62,7 +62,7 @@ interface IAaveFlashLoanSimpleReceiver {
 // ==========================================
 /// @title UnifiedHardenedExecutor
 /// @notice Single-owner helper for MEV bundles and Balancer/Aave flashloans. Intended to be driven
-///         by an off-chain searcher via private relay (Flashbots / builder). Ownership must remain
+///         by an off-chain search via private relay (Flashbots / builder). Ownership must remain
 ///         with that off-chain signer; no shared custody assumed.
 /// @dev Hardened for low-level token quirks (USDT-style approvals) and tolerant profit sweeping.
 

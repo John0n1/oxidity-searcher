@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use crate::common::error::AppError;
 use crate::core::executor::SharedBundleSender;
@@ -1680,6 +1680,31 @@ mod tests {
         assert_eq!(req.from, Some(Address::from([1u8; 20])));
         assert_eq!(req.chain_id, Some(1));
         assert_eq!(req.input.clone().into_input().unwrap_or_default(), calldata);
+    }
+
+    #[tokio::test]
+    async fn has_usable_flashloan_provider_matrix() {
+        let mut exec = dummy_executor_for_tests().await;
+
+        exec.flashloan_enabled = false;
+        exec.executor = Some(Address::from([0x10; 20]));
+        exec.flashloan_providers = vec![FlashloanProvider::Balancer];
+        assert!(!exec.has_usable_flashloan_provider());
+
+        exec.flashloan_enabled = true;
+        exec.executor = None;
+        assert!(!exec.has_usable_flashloan_provider());
+
+        exec.executor = Some(Address::from([0x10; 20]));
+        exec.flashloan_providers = vec![FlashloanProvider::Balancer];
+        assert!(exec.has_usable_flashloan_provider());
+
+        exec.flashloan_providers = vec![FlashloanProvider::AaveV3];
+        exec.aave_pool = None;
+        assert!(!exec.has_usable_flashloan_provider());
+
+        exec.aave_pool = Some(Address::from([0x44; 20]));
+        assert!(exec.has_usable_flashloan_provider());
     }
 
     #[test]

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 pub mod bundles;
 pub mod graph;
@@ -75,6 +75,35 @@ static BALANCER_FEE_CACHE: Lazy<DashMap<u64, (U256, std::time::Instant)>> = Lazy
 static AAVE_FEE_CACHE: Lazy<DashMap<Address, (U256, std::time::Instant)>> = Lazy::new(DashMap::new);
 
 impl StrategyExecutor {
+    fn flashloan_roundtrip_callbacks(
+        executor: Address,
+        exec_router: Address,
+        approval_token: Address,
+        approval_amount: U256,
+        forward_payload: Bytes,
+        reverse_payload: Bytes,
+    ) -> Vec<(Address, Bytes, U256)> {
+        let approve_target = UnifiedHardenedExecutor::safeApproveCall {
+            token: approval_token,
+            spender: exec_router,
+            amount: approval_amount,
+        }
+        .abi_encode();
+        let reset_target = UnifiedHardenedExecutor::safeApproveCall {
+            token: approval_token,
+            spender: exec_router,
+            amount: U256::ZERO,
+        }
+        .abi_encode();
+
+        vec![
+            (executor, Bytes::from(approve_target), U256::ZERO),
+            (exec_router, forward_payload, U256::ZERO),
+            (exec_router, reverse_payload, U256::ZERO),
+            (executor, Bytes::from(reset_target), U256::ZERO),
+        ]
+    }
+
     fn single_leg_route(
         venue: RouteVenue,
         target: Address,
@@ -464,7 +493,7 @@ impl StrategyExecutor {
         &self,
         required_value: U256,
         wallet_balance: U256,
-        gas_fees: &crate::network::gas::GasFees,
+        _gas_fees: &crate::network::gas::GasFees,
     ) -> bool {
         if !self.flashloan_enabled || self.executor.is_none() || self.dry_run {
             return false;
@@ -472,15 +501,10 @@ impl StrategyExecutor {
         if !self.has_usable_flashloan_provider() {
             return false;
         }
-        let safety_buffer =
-            U256::from(gas_fees.max_fee_per_gas).saturating_mul(U256::from(120_000u64));
-        if wallet_balance < required_value.saturating_add(safety_buffer) {
-            return true;
-        }
-        let overhead_gas = U256::from(180_000u64);
-        let overhead_cost = overhead_gas.saturating_mul(U256::from(gas_fees.max_fee_per_gas));
-        let remaining = wallet_balance.saturating_sub(required_value);
-        remaining < overhead_cost
+        // Caller passes total upfront requirement for current plan phase
+        // (trade principal + adaptive bundle gas floor). If that cannot be
+        // funded from signer balance, prefer flashloan route.
+        wallet_balance < required_value
     }
 
     pub(crate) async fn build_quote_graph(
@@ -1084,24 +1108,14 @@ impl StrategyExecutor {
                         let reverse_payload = Bytes::from(reverse_calldata);
                         if use_flashloan {
                             // Build forward+reverse callbacks inside flashloan to guarantee round-trip.
-                            let approve_target = UnifiedHardenedExecutor::safeApproveCall {
-                                token: target_token,
-                                spender: exec_router,
-                                amount: reverse_amount_in,
-                            }
-                            .abi_encode();
-                            let reset_target = UnifiedHardenedExecutor::safeApproveCall {
-                                token: target_token,
-                                spender: exec_router,
-                                amount: U256::ZERO,
-                            }
-                            .abi_encode();
-                            let callbacks = vec![
-                                (executor, Bytes::from(approve_target), U256::ZERO),
-                                (exec_router, forward_payload, U256::ZERO),
-                                (exec_router, reverse_payload, U256::ZERO),
-                                (executor, Bytes::from(reset_target), U256::ZERO),
-                            ];
+                            let callbacks = Self::flashloan_roundtrip_callbacks(
+                                executor,
+                                exec_router,
+                                target_token,
+                                reverse_amount_in,
+                                forward_payload,
+                                reverse_payload,
+                            );
                             let (raw, req, hash, premium, overhead_gas) = self
                                 .build_flashloan_transaction(
                                     executor,
@@ -1109,16 +1123,7 @@ impl StrategyExecutor {
                                     value,
                                     callbacks,
                                     gas_limit_hint,
-                                    &crate::network::gas::GasFees {
-                                        max_fee_per_gas: gas_fees.max_fee_per_gas,
-                                        max_priority_fee_per_gas: gas_fees.max_priority_fee_per_gas,
-                                        next_base_fee_per_gas: 0,
-                                        base_fee_per_gas: 0,
-                                        p50_priority_fee_per_gas: None,
-                                        p90_priority_fee_per_gas: None,
-                                        gas_used_ratio: None,
-                                        suggested_max_fee_per_gas: None,
-                                    },
+                                    gas_fees,
                                     nonce,
                                 )
                                 .await?;
@@ -1286,11 +1291,6 @@ impl StrategyExecutor {
                         / U256::from(10_000u64);
                     let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 300);
                     if has_wrapped {
-                        if use_flashloan {
-                            return Err(AppError::Strategy(
-                                "V3 strict atomic path does not support flashloan yet".into(),
-                            ));
-                        }
                         let executor = self.executor.ok_or_else(|| {
                             AppError::Strategy("strict atomic mode requires executor".into())
                         })?;
@@ -1323,6 +1323,47 @@ impl StrategyExecutor {
                                 })
                                 .calldata()
                                 .to_vec();
+                        if use_flashloan {
+                            let callbacks = Self::flashloan_roundtrip_callbacks(
+                                executor,
+                                exec_router,
+                                target_token,
+                                min_mid_out,
+                                Bytes::from(forward_payload),
+                                Bytes::from(reverse_payload),
+                            );
+                            let flashloan_asset = observed
+                                .path
+                                .first()
+                                .copied()
+                                .unwrap_or(self.wrapped_native);
+                            let (raw, req, hash, premium, overhead_gas) = self
+                                .build_flashloan_transaction(
+                                    executor,
+                                    flashloan_asset,
+                                    value,
+                                    callbacks,
+                                    gas_limit_hint,
+                                    gas_fees,
+                                    nonce,
+                                )
+                                .await?;
+                            return Ok(BackrunTx {
+                                raw,
+                                hash,
+                                to: executor,
+                                value: U256::ZERO,
+                                request: req,
+                                expected_out: reverse_expected_out,
+                                expected_out_token: self.wrapped_native,
+                                unwrap_to_native: false,
+                                uses_flashloan: true,
+                                flashloan_premium: premium,
+                                flashloan_overhead_gas: overhead_gas,
+                                router_kind: observed.router_kind,
+                                route_plan: None,
+                            });
+                        }
                         let (_executor, raw, request, hash) = self
                             .build_atomic_executor_roundtrip_tx(
                                 exec_router,
@@ -1780,5 +1821,41 @@ impl StrategyExecutor {
             .map_err(|e| AppError::Strategy(format!("Aave premium fetch failed: {}", e)))?;
         AAVE_FEE_CACHE.insert(pool, (v, std::time::Instant::now()));
         Ok(v)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flashloan_roundtrip_callbacks_include_approve_swap_swap_reset() {
+        let executor = Address::from([0x11; 20]);
+        let router = Address::from([0x22; 20]);
+        let token = Address::from([0x33; 20]);
+        let amount = U256::from(123u64);
+        let fwd = Bytes::from(vec![0xaa, 0xbb]);
+        let rev = Bytes::from(vec![0xcc, 0xdd]);
+
+        let callbacks = StrategyExecutor::flashloan_roundtrip_callbacks(
+            executor,
+            router,
+            token,
+            amount,
+            fwd.clone(),
+            rev.clone(),
+        );
+
+        assert_eq!(callbacks.len(), 4);
+        assert_eq!(callbacks[0].0, executor);
+        assert_eq!(callbacks[1].0, router);
+        assert_eq!(callbacks[2].0, router);
+        assert_eq!(callbacks[3].0, executor);
+        assert_eq!(callbacks[1].1, fwd);
+        assert_eq!(callbacks[2].1, rev);
+        assert_eq!(callbacks[0].2, U256::ZERO);
+        assert_eq!(callbacks[1].2, U256::ZERO);
+        assert_eq!(callbacks[2].2, U256::ZERO);
+        assert_eq!(callbacks[3].2, U256::ZERO);
     }
 }

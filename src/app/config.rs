@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.com>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use crate::domain::constants;
 use crate::domain::error::AppError;
@@ -107,6 +107,8 @@ pub struct GlobalSettings {
     pub rpc_capability_strict: bool,
     #[serde(default = "default_chainlink_feed_conflict_strict")]
     pub chainlink_feed_conflict_strict: bool,
+    #[serde(default = "default_chainlink_feed_audit_strict")]
+    pub chainlink_feed_audit_strict: bool,
     #[serde(default = "default_bundle_use_replacement_uuid")]
     pub bundle_use_replacement_uuid: bool,
     #[serde(default = "default_bundle_cancel_previous")]
@@ -218,6 +220,9 @@ fn default_rpc_capability_strict() -> bool {
 }
 fn default_chainlink_feed_conflict_strict() -> bool {
     true
+}
+fn default_chainlink_feed_audit_strict() -> bool {
+    false
 }
 fn default_bundle_use_replacement_uuid() -> bool {
     true
@@ -460,7 +465,7 @@ impl GlobalSettings {
         std::env::var("DATABASE_URL")
             .ok()
             .or_else(|| self.database_url.clone())
-            .unwrap_or_else(|| "sqlite://oxidity_searcher.db".to_string())
+            .unwrap_or_else(|| "sqlite://mitander_search.db".to_string())
     }
 
     pub fn flashbots_relay_url(&self) -> String {
@@ -728,6 +733,14 @@ impl GlobalSettings {
         }
     }
 
+    pub fn chainlink_feed_audit_strict_for_chain(&self, chain_id: u64) -> bool {
+        if chain_id == constants::CHAIN_ETHEREUM {
+            self.chainlink_feed_audit_strict
+        } else {
+            false
+        }
+    }
+
     pub fn bundle_use_replacement_uuid_for_chain(&self, chain_id: u64) -> bool {
         if chain_id == constants::CHAIN_ETHEREUM {
             self.bundle_use_replacement_uuid
@@ -933,7 +946,8 @@ fn load_chainlink_feeds_from_file(
         }
     }
 
-    let mut conflicts: Vec<String> = Vec::new();
+    let mut resolved_conflicts: Vec<String> = Vec::new();
+    let mut unresolved_conflicts: Vec<String> = Vec::new();
     for ((base, quote), addrs) in by_base_quote {
         let mut uniq: Vec<Address> = Vec::new();
         for addr in addrs {
@@ -942,29 +956,71 @@ fn load_chainlink_feeds_from_file(
             }
         }
         if uniq.len() > 1 {
+            uniq.sort();
             let list = uniq
-                .into_iter()
+                .iter()
                 .map(|a| format!("{:#x}", a))
                 .collect::<Vec<_>>()
                 .join(",");
-            conflicts.push(format!("{base}/{quote} -> [{list}]"));
+            let key = format!("{}_{}", base, quote);
+            let canonical_addr = canonical.get(&key).copied();
+            let selected_for_quote =
+                selected
+                    .get(&base)
+                    .and_then(|(selected_quote, selected_addr, _, _)| {
+                        if selected_quote == &quote {
+                            Some(*selected_addr)
+                        } else {
+                            None
+                        }
+                    });
+            let selected_str = selected_for_quote
+                .map(|a| format!("{:#x}", a))
+                .unwrap_or_else(|| "<not-selected>".to_string());
+            let canonical_str = canonical_addr
+                .map(|a| format!("{:#x}", a))
+                .unwrap_or_else(|| "<none>".to_string());
+
+            let canonical_resolves = canonical_addr
+                .map(|addr| uniq.contains(&addr))
+                .unwrap_or(false);
+            let record = format!(
+                "{base}/{quote} -> [{list}] selected={selected_str} canonical={canonical_str}"
+            );
+            if canonical_resolves {
+                resolved_conflicts.push(record);
+            } else {
+                unresolved_conflicts.push(record);
+            }
         }
     }
-    if !conflicts.is_empty() {
-        for conflict in conflicts.iter().take(12) {
+    if !resolved_conflicts.is_empty() {
+        for conflict in resolved_conflicts.iter().take(12) {
+            tracing::debug!(
+                target: "config",
+                chain_id,
+                strict = strict_conflicts,
+                conflict = %conflict,
+                "Chainlink feed conflict resolved via canonical tie-break"
+            );
+        }
+    }
+    if !unresolved_conflicts.is_empty() {
+        for conflict in unresolved_conflicts.iter().take(12) {
             tracing::warn!(
                 target: "config",
                 chain_id,
                 strict = strict_conflicts,
                 conflict = %conflict,
-                "Chainlink feed conflict detected"
+                "Chainlink feed conflict unresolved"
             );
         }
         if strict_conflicts {
             return Err(AppError::Config(format!(
-                "chainlink_feeds contains conflicting duplicate base/quote feeds on chain {} ({} conflicts); strict mode rejects ambiguous feed sets",
+                "chainlink_feeds contains unresolved conflicting duplicate base/quote feeds on chain {} ({} unresolved, {} resolved); strict mode rejects ambiguous feed sets",
                 chain_id,
-                conflicts.len()
+                unresolved_conflicts.len(),
+                resolved_conflicts.len()
             )));
         }
     }
@@ -1046,6 +1102,7 @@ mod tests {
             emergency_exit_on_unknown_receipt: default_false(),
             rpc_capability_strict: default_rpc_capability_strict(),
             chainlink_feed_conflict_strict: default_chainlink_feed_conflict_strict(),
+            chainlink_feed_audit_strict: default_chainlink_feed_audit_strict(),
             bundle_use_replacement_uuid: default_bundle_use_replacement_uuid(),
             bundle_cancel_previous: default_bundle_cancel_previous(),
             router_discovery_enabled: default_router_discovery_enabled(),
@@ -1170,6 +1227,13 @@ mod tests {
     }
 
     #[test]
+    fn chainlink_feed_audit_strict_defaults_disabled() {
+        let settings = base_settings();
+        assert!(!settings.chainlink_feed_audit_strict_for_chain(1));
+        assert!(!settings.chainlink_feed_audit_strict_for_chain(137));
+    }
+
+    #[test]
     fn chainlink_loader_prefers_canonical_on_equal_priority_quotes() {
         let tmp =
             std::env::temp_dir().join(format!("chainlink-feeds-test-{}.json", std::process::id()));
@@ -1195,7 +1259,7 @@ mod tests {
     }
 
     #[test]
-    fn chainlink_loader_rejects_conflicts_in_strict_mode() {
+    fn chainlink_loader_accepts_resolved_conflicts_in_strict_mode() {
         let tmp = std::env::temp_dir().join(format!(
             "chainlink-feeds-strict-test-{}.json",
             std::process::id()
@@ -1208,11 +1272,40 @@ mod tests {
 "#;
         std::fs::write(&tmp, body).expect("write temp chainlink file");
 
-        let err = load_chainlink_feeds_from_file(tmp.to_str().expect("utf8 path"), 1, true)
-            .expect_err("strict conflict mode should fail");
+        let selected = load_chainlink_feeds_from_file(tmp.to_str().expect("utf8 path"), 1, true)
+            .expect("loader result")
+            .expect("selected feeds");
 
         std::fs::remove_file(&tmp).ok();
 
-        assert!(matches!(err, AppError::Config(msg) if msg.contains("conflicting duplicate")));
+        let eth = selected.get("ETH").copied().expect("ETH feed");
+        assert_eq!(
+            format!("{:#x}", eth),
+            "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419"
+        );
+    }
+
+    #[test]
+    fn chainlink_loader_rejects_unresolved_conflicts_in_strict_mode() {
+        let tmp = std::env::temp_dir().join(format!(
+            "chainlink-feeds-strict-unresolved-test-{}.json",
+            std::process::id()
+        ));
+        let body = r#"
+[
+  {"base":"FOO","quote":"USD","chainId":1,"address":"0x1111111111111111111111111111111111111111"},
+  {"base":"FOO","quote":"USD","chainId":1,"address":"0x2222222222222222222222222222222222222222"}
+]
+"#;
+        std::fs::write(&tmp, body).expect("write temp chainlink file");
+
+        let err = load_chainlink_feeds_from_file(tmp.to_str().expect("utf8 path"), 1, true)
+            .expect_err("strict unresolved conflict mode should fail");
+
+        std::fs::remove_file(&tmp).ok();
+
+        assert!(
+            matches!(err, AppError::Config(msg) if msg.contains("unresolved conflicting duplicate"))
+        );
     }
 }
