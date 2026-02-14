@@ -295,33 +295,21 @@ impl GlobalSettings {
         // Load .env file if it exists
         dotenvy::dotenv().ok();
 
-        let active_config = detect_active_config_file();
+        let selected_config = resolve_config_path(path);
         let mut builder = Config::builder();
 
-        match active_config {
-            Some(ref active_path) => {
-                // Environment is lower priority; active config wins
-                builder = builder
-                    .add_source(Environment::default())
-                    .add_source(File::from(Path::new(active_path)).required(true));
-            }
-            None => {
-                if let Some(path) = path {
-                    builder = builder.add_source(File::with_name(path).required(true));
-                } else {
-                    builder = builder.add_source(File::with_name("config").required(false));
-                }
-                // Environment (and .env) override non-active configs
-                builder = builder.add_source(Environment::default());
-            }
+        if let Some(ref selected_path) = selected_config {
+            builder = builder.add_source(File::from(Path::new(selected_path)).required(true));
+        } else {
+            builder = builder.add_source(File::with_name("config").required(false));
         }
+        // Deterministic precedence: CLI (in main) > env/.env > selected profile file.
+        builder = builder.add_source(Environment::default());
 
         let mut settings: GlobalSettings = builder.build()?.try_deserialize()?;
 
         // Allow CHAINS env to be comma/space separated string (e.g. "1,137")
-        if active_config.is_none()
-            && let Ok(chains_str) = std::env::var("CHAINS")
-        {
+        if let Ok(chains_str) = std::env::var("CHAINS") {
             settings.chains = parse_chain_list(&chains_str)?;
         }
 
@@ -779,6 +767,13 @@ impl GlobalSettings {
     }
 }
 
+fn resolve_config_path(path: Option<&str>) -> Option<String> {
+    if let Some(path) = path {
+        return Some(path.to_string());
+    }
+    detect_active_config_file()
+}
+
 fn detect_active_config_file() -> Option<String> {
     // Check common config.*.toml files first
     let priority_files = [
@@ -1136,6 +1131,17 @@ mod tests {
 
     #[test]
     fn ws_lookup_does_not_use_ipc_entries() {
+        let old_ws_1 = std::env::var("WS_URL_1").ok();
+        let old_ws = std::env::var("WS_URL").ok();
+        let old_websocket_1 = std::env::var("WEBSOCKET_URL_1").ok();
+        let old_websocket = std::env::var("WEBSOCKET_URL").ok();
+        unsafe {
+            std::env::remove_var("WS_URL_1");
+            std::env::remove_var("WS_URL");
+            std::env::remove_var("WEBSOCKET_URL_1");
+            std::env::remove_var("WEBSOCKET_URL");
+        }
+
         let mut settings = base_settings();
         settings.ipc_urls = Some(HashMap::from([(
             "1".to_string(),
@@ -1147,6 +1153,19 @@ mod tests {
         match err {
             AppError::Config(msg) => assert!(msg.contains("No WS URL")),
             other => panic!("Unexpected error variant: {other:?}"),
+        }
+
+        if let Some(v) = old_ws_1 {
+            unsafe { std::env::set_var("WS_URL_1", v) };
+        }
+        if let Some(v) = old_ws {
+            unsafe { std::env::set_var("WS_URL", v) };
+        }
+        if let Some(v) = old_websocket_1 {
+            unsafe { std::env::set_var("WEBSOCKET_URL_1", v) };
+        }
+        if let Some(v) = old_websocket {
+            unsafe { std::env::set_var("WEBSOCKET_URL", v) };
         }
     }
 
@@ -1307,5 +1326,76 @@ mod tests {
         assert!(
             matches!(err, AppError::Config(msg) if msg.contains("unresolved conflicting duplicate"))
         );
+    }
+
+    #[test]
+    fn explicit_config_path_wins_over_active_discovery() {
+        let resolved = resolve_config_path(Some("custom-config.toml"));
+        assert_eq!(resolved.as_deref(), Some("custom-config.toml"));
+    }
+
+    #[test]
+    fn env_overrides_selected_profile_file_values() {
+        let tmp = std::env::temp_dir().join(format!(
+            "config-env-override-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let body = r#"
+wallet_key = "file_wallet_key"
+wallet_address = "0x0000000000000000000000000000000000000001"
+"#;
+        std::fs::write(&tmp, body).expect("write temp config");
+        let old_wallet_key = std::env::var("WALLET_KEY").ok();
+        unsafe {
+            std::env::set_var("WALLET_KEY", "env_wallet_key");
+        }
+
+        let loaded = GlobalSettings::load_with_path(Some(tmp.to_str().expect("utf8 path")))
+            .expect("load settings");
+        assert_eq!(loaded.wallet_key, "env_wallet_key");
+
+        std::fs::remove_file(&tmp).ok();
+        if let Some(v) = old_wallet_key {
+            unsafe { std::env::set_var("WALLET_KEY", v) };
+        } else {
+            unsafe { std::env::remove_var("WALLET_KEY") };
+        }
+    }
+
+    #[test]
+    fn chains_env_overrides_profile_file_even_when_selected() {
+        let tmp = std::env::temp_dir().join(format!(
+            "config-chains-env-override-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let body = r#"
+wallet_key = "file_wallet_key"
+wallet_address = "0x0000000000000000000000000000000000000001"
+chains = [1]
+"#;
+        std::fs::write(&tmp, body).expect("write temp config");
+        let old_chains = std::env::var("CHAINS").ok();
+        unsafe {
+            std::env::set_var("CHAINS", "1,137");
+        }
+
+        let loaded = GlobalSettings::load_with_path(Some(tmp.to_str().expect("utf8 path")))
+            .expect("load settings");
+        assert_eq!(loaded.chains, vec![1, 137]);
+
+        std::fs::remove_file(&tmp).ok();
+        if let Some(v) = old_chains {
+            unsafe { std::env::set_var("CHAINS", v) };
+        } else {
+            unsafe { std::env::remove_var("CHAINS") };
+        }
     }
 }

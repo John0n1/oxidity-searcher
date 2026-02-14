@@ -59,7 +59,8 @@ async fn flashloan_builder_encodes_callbacks() {
         http.clone(),
         std::collections::HashMap::new(),
         mitander_search::network::price_feed::PriceApiKeys::default(),
-    );
+    )
+    .expect("price feed");
     let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
     let token_manager =
         Arc::new(mitander_search::infrastructure::data::token_manager::TokenManager::default());
@@ -213,7 +214,8 @@ async fn flashloan_builder_uses_aave_selector() {
         http.clone(),
         std::collections::HashMap::new(),
         mitander_search::network::price_feed::PriceApiKeys::default(),
-    );
+    )
+    .expect("price feed");
     let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
     let token_manager =
         Arc::new(mitander_search::infrastructure::data::token_manager::TokenManager::default());
@@ -349,7 +351,8 @@ async fn flashloan_builder_rejects_when_no_provider_available() {
         http.clone(),
         std::collections::HashMap::new(),
         mitander_search::network::price_feed::PriceApiKeys::default(),
-    );
+    )
+    .expect("price feed");
     let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
     let token_manager =
         Arc::new(mitander_search::infrastructure::data::token_manager::TokenManager::default());

@@ -81,7 +81,8 @@ async fn mev_share_v3_pipeline_manual() {
         http.clone(),
         std::collections::HashMap::new(),
         PriceApiKeys::default(),
-    );
+    )
+    .expect("price feed");
     let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
     let token_manager = Arc::new(TokenManager::default());
     let nonce_manager = NonceManager::new(http.clone(), signer.address());

@@ -20,11 +20,13 @@ pub async fn spawn_metrics_server(
     portfolio: Arc<PortfolioManager>,
 ) -> Option<SocketAddr> {
     let token = match std::env::var("METRICS_TOKEN") {
-        Ok(t) if !t.is_empty() => t,
+        Ok(t) if !t.trim().is_empty() => t,
         _ => {
-            // Fail fast: metrics are required for observability / health.
-            tracing::error!("METRICS_TOKEN missing or empty; aborting startup.");
-            std::process::exit(1);
+            tracing::warn!(
+                target: "metrics",
+                "METRICS_TOKEN missing/empty; metrics server disabled (strategy continues)"
+            );
+            return None;
         }
     };
     let bind_addr = std::env::var("METRICS_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -281,6 +283,36 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
     let queue_backpressure = stats
         .ingest_backpressure
         .load(std::sync::atomic::Ordering::Relaxed);
+    let sim_success_ratio = if processed == 0 {
+        1.0
+    } else {
+        ((processed.saturating_sub(skip_sim_failed)) as f64) / (processed as f64)
+    };
+    let nonce_total = nonce_loads
+        .saturating_add(nonce_persist)
+        .saturating_add(nonce_load_fail)
+        .saturating_add(nonce_persist_fail);
+    let nonce_error_ratio = if nonce_total == 0 {
+        0.0
+    } else {
+        ((nonce_load_fail.saturating_add(nonce_persist_fail)) as f64) / (nonce_total as f64)
+    };
+    let bundle_reject_total = skip_profit_guard
+        .saturating_add(skip_sim_failed)
+        .saturating_add(skip_gas_cap)
+        .saturating_add(skip_router_revert_rate)
+        .saturating_add(skip_liquidity_depth)
+        .saturating_add(skip_sandwich_risk)
+        .saturating_add(skip_front_run_build_failed)
+        .saturating_add(skip_backrun_build_failed);
+    let bundles_snapshot: Vec<crate::core::strategy::BundleTelemetry> = {
+        let guard = stats.bundles.lock().unwrap_or_else(|e| e.into_inner());
+        guard.clone()
+    };
+    let bundle_samples = bundles_snapshot.len() as u64;
+    let bundle_profit_eth_sum: f64 = bundles_snapshot.iter().map(|b| b.profit_eth).sum();
+    let bundle_gas_eth_sum: f64 = bundles_snapshot.iter().map(|b| b.gas_cost_eth).sum();
+    let bundle_net_eth_sum: f64 = bundles_snapshot.iter().map(|b| b.net_eth).sum();
     let mut body = format!(
         concat!(
             "# TYPE strategy_processed counter\nstrategy_processed {}\n",
@@ -316,7 +348,14 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
             "# TYPE ingest_queue_depth gauge\ningest_queue_depth {}\n",
             "# TYPE ingest_queue_dropped counter\ningest_queue_dropped {}\n",
             "# TYPE ingest_queue_full counter\ningest_queue_full {}\n",
-            "# TYPE ingest_queue_backpressure counter\ningest_queue_backpressure {}\n"
+            "# TYPE ingest_queue_backpressure counter\ningest_queue_backpressure {}\n",
+            "# TYPE strategy_sim_success_ratio gauge\nstrategy_sim_success_ratio {:.6}\n",
+            "# TYPE nonce_state_error_ratio gauge\nnonce_state_error_ratio {:.6}\n",
+            "# TYPE bundle_reject_total counter\nbundle_reject_total {}\n",
+            "# TYPE bundle_telemetry_samples gauge\nbundle_telemetry_samples {}\n",
+            "# TYPE bundle_profit_eth_sum gauge\nbundle_profit_eth_sum {:.12}\n",
+            "# TYPE bundle_gas_cost_eth_sum gauge\nbundle_gas_cost_eth_sum {:.12}\n",
+            "# TYPE bundle_net_eth_sum gauge\nbundle_net_eth_sum {:.12}\n"
         ),
         processed,
         submitted,
@@ -351,7 +390,14 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
         queue_depth,
         queue_dropped,
         queue_full,
-        queue_backpressure
+        queue_backpressure,
+        sim_success_ratio,
+        nonce_error_ratio,
+        bundle_reject_total,
+        bundle_samples,
+        bundle_profit_eth_sum,
+        bundle_gas_eth_sum,
+        bundle_net_eth_sum
     );
 
     for (chain, profit) in portfolio.net_profit_all() {
@@ -482,6 +528,7 @@ mod tests {
     #[tokio::test]
     async fn metrics_endpoint_serves() {
         unsafe { std::env::set_var("METRICS_TOKEN", "testtoken") };
+        unsafe { std::env::set_var("METRICS_BIND", "127.0.0.1") };
         let provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
         let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
         let stats = Arc::new(StrategyStats::default());
@@ -509,6 +556,7 @@ mod tests {
     #[tokio::test]
     async fn health_endpoint_includes_chain_id() {
         unsafe { std::env::set_var("METRICS_TOKEN", "testtoken") };
+        unsafe { std::env::set_var("METRICS_BIND", "127.0.0.1") };
         let provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
         let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
         let stats = Arc::new(StrategyStats::default());
@@ -536,6 +584,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_endpoint_stops_server() {
         unsafe { std::env::set_var("METRICS_TOKEN", "testtoken") };
+        unsafe { std::env::set_var("METRICS_BIND", "127.0.0.1") };
         let provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
         let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
         let stats = Arc::new(StrategyStats::default());
@@ -570,5 +619,25 @@ mod tests {
         }
 
         panic!("metrics server still accepted requests after shutdown");
+    }
+
+    #[tokio::test]
+    #[ignore = "mutates process-wide METRICS_TOKEN env; run explicitly"]
+    async fn missing_metrics_token_disables_server_without_exiting() {
+        let old = std::env::var("METRICS_TOKEN").ok();
+        unsafe {
+            std::env::remove_var("METRICS_TOKEN");
+        }
+        let provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
+        let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
+        let stats = Arc::new(StrategyStats::default());
+        let shutdown = CancellationToken::new();
+
+        let addr = spawn_metrics_server(0, 1, shutdown, stats, portfolio).await;
+        assert!(addr.is_none());
+
+        if let Some(v) = old {
+            unsafe { std::env::set_var("METRICS_TOKEN", v) };
+        }
     }
 }

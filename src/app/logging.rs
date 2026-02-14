@@ -47,7 +47,10 @@ pub fn setup_logging(log_level: &str, json_format: bool) {
         .join(", ");
 
     if overrides.is_empty() {
-        tracing::info!("Logging initialized\n  base: {base}\n  format: {}", if json_format { "json" } else { "compact" });
+        tracing::info!(
+            "Logging initialized\n  base: {base}\n  format: {}",
+            if json_format { "json" } else { "compact" }
+        );
     } else {
         tracing::info!(
             "Logging initialized\n  base: {base}\n  overrides: {overrides}\n  format: {}",

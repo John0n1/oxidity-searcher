@@ -85,16 +85,20 @@ impl MevShareClient {
         capacity: usize,
         history_limit: u32,
         shutdown: CancellationToken,
-    ) -> Self {
+    ) -> Result<Self, AppError> {
         let history_url = format!("{}/api/v1/history", base_url.trim_end_matches('/'));
-        Self {
+        let client = Client::builder()
+            // Use a connect timeout, but keep the stream alive beyond 15s SSE pings.
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| {
+                AppError::Initialization(format!("MEV-Share HTTP client init failed: {e}"))
+            })?;
+
+        Ok(Self {
             base_url,
             history_url,
-            client: Client::builder()
-                // Use a connect timeout, but keep the stream alive beyond 15s SSE pings.
-                .connect_timeout(Duration::from_secs(10))
-                .build()
-                .unwrap(),
+            client,
             chain_id,
             seen: Arc::new(DashSet::new()),
             seen_order: Arc::new(Mutex::new(VecDeque::new())),
@@ -103,7 +107,7 @@ impl MevShareClient {
             capacity,
             history_limit,
             shutdown,
-        }
+        })
     }
 
     pub async fn run(mut self) -> Result<(), AppError> {

@@ -83,6 +83,11 @@ impl QuoteGraph {
                     .iter()
                     .filter(|e| e.token_in == path.current_token)
                 {
+                    if edge.token_out != target
+                        && Self::token_seen_in_path(start, &path.legs, edge.token_out)
+                    {
+                        continue;
+                    }
                     // Size adjust expected_out linearly; edge.amount_in > 0 guaranteed by construction.
                     if edge.amount_in.is_zero() {
                         continue;
@@ -176,5 +181,67 @@ impl QuoteGraph {
             })
             .collect();
         RoutePlan::try_new(legs)
+    }
+
+    fn token_seen_in_path(start: Address, legs: &[QuoteEdge], token: Address) -> bool {
+        if token == start {
+            return true;
+        }
+        legs.iter().any(|l| l.token_out == token)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn edge(
+        token_in: Address,
+        token_out: Address,
+        expected_out: u64,
+        min_out: u64,
+        gas: u64,
+    ) -> QuoteEdge {
+        QuoteEdge {
+            venue: RouteVenue::UniV2,
+            pool: Address::from([0x11; 20]),
+            token_in,
+            token_out,
+            amount_in: U256::from(100u64),
+            expected_out: U256::from(expected_out),
+            min_out: U256::from(min_out),
+            gas_overhead: gas,
+            fee: None,
+            params: None,
+            is_flash: false,
+        }
+    }
+
+    #[test]
+    fn k_best_prunes_cyclic_paths() {
+        let a = Address::from([0x01; 20]);
+        let b = Address::from([0x02; 20]);
+        let c = Address::from([0x03; 20]);
+        let mut graph = QuoteGraph::default();
+        graph.add_edge(edge(a, b, 115, 110, 40_000));
+        graph.add_edge(edge(b, a, 120, 115, 40_000)); // would form a cycle
+        graph.add_edge(edge(a, c, 106, 104, 50_000)); // direct
+
+        let plans = graph.k_best(
+            a,
+            c,
+            U256::from(100u64),
+            3,
+            QuoteSearchOptions {
+                gas_price: 0,
+                max_hops: 3,
+                beam_size: 8,
+                min_ratio_ppm: 500_000,
+            },
+        );
+        assert!(!plans.is_empty(), "at least one plan must be found");
+        assert_eq!(plans[0].legs.len(), 1, "cyclic expansion should be pruned");
+        assert_eq!(plans[0].legs[0].token_in, a);
+        assert_eq!(plans[0].legs[0].token_out, c);
     }
 }

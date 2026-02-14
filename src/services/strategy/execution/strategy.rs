@@ -35,6 +35,7 @@ use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::sync::{Mutex, Semaphore, broadcast::Receiver as BroadcastReceiver};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
@@ -395,7 +396,17 @@ impl StrategyExecutor {
         let base = 120.0 - 30.0 * (eth_balance * 100.0 + 1.0).log10();
         let volatility = self.price_feed.volatility_bps_cached("ETH").unwrap_or(0) as f64;
         let vol_adjust = volatility * 0.35;
-        let slippage = base + vol_adjust;
+        let mut slippage = base + vol_adjust;
+        if let Some(gas_fees) = self.cached_gas_fees() {
+            let stress_mult_bps = match self.classify_stress_profile(&gas_fees) {
+                crate::services::strategy::risk::guards::StressProfile::UltraLow => 9_500u64,
+                crate::services::strategy::risk::guards::StressProfile::Low => 9_800u64,
+                crate::services::strategy::risk::guards::StressProfile::Normal => 10_000u64,
+                crate::services::strategy::risk::guards::StressProfile::Elevated => 10_800u64,
+                crate::services::strategy::risk::guards::StressProfile::High => 11_800u64,
+            } as f64;
+            slippage = slippage * (stress_mult_bps / 10_000f64);
+        }
         slippage.round().clamp(15.0, 500.0) as u64
     }
 
@@ -422,11 +433,23 @@ impl StrategyExecutor {
         gas_fees: &GasFees,
         hard_cap: U256,
     ) -> DynamicGasCap {
+        let stress_mult_bps = match self.classify_stress_profile(gas_fees) {
+            crate::services::strategy::risk::guards::StressProfile::UltraLow => 9_500u64,
+            crate::services::strategy::risk::guards::StressProfile::Low => 10_000u64,
+            crate::services::strategy::risk::guards::StressProfile::Normal => 10_500u64,
+            crate::services::strategy::risk::guards::StressProfile::Elevated => 11_500u64,
+            crate::services::strategy::risk::guards::StressProfile::High => 12_500u64,
+        };
+        let effective_gas_mult_bps = self
+            .gas_cap_multiplier_bps
+            .saturating_mul(stress_mult_bps)
+            .checked_div(10_000u64)
+            .unwrap_or(self.gas_cap_multiplier_bps);
         let base_plus_tip_wei = gas_fees
             .next_base_fee_per_gas
             .saturating_add(gas_fees.max_priority_fee_per_gas);
         let fallback_dynamic_wei =
-            base_plus_tip_wei.saturating_mul(self.gas_cap_multiplier_bps as u128) / 10_000u128;
+            base_plus_tip_wei.saturating_mul(effective_gas_mult_bps as u128) / 10_000u128;
         let base_dynamic_wei = gas_fees
             .suggested_max_fee_per_gas
             .unwrap_or(fallback_dynamic_wei);
@@ -448,6 +471,11 @@ impl StrategyExecutor {
             balance_factor_bps,
             floor_wei,
         }
+    }
+
+    fn cached_gas_fees(&self) -> Option<GasFees> {
+        let guard = self.per_block_inputs.try_lock().ok()?;
+        guard.as_ref().map(|entry| entry.gas_fees.clone())
     }
 
     pub(in crate::services::strategy) fn enforce_dynamic_gas_cap(
@@ -1004,34 +1032,57 @@ impl StrategyExecutor {
 
         // Spawn a lightweight block watcher so work processing never waits on block stream.
         let block_exec = executor.clone();
-        tokio::spawn(async move {
+        let block_watcher = tokio::spawn(async move {
             block_exec.block_watcher().await;
         });
+        let mut worker_tasks: JoinSet<()> = JoinSet::new();
 
         loop {
-            let work_opt = executor.work_queue.pop_latest(&executor.shutdown).await;
-            let Some(work) = work_opt else {
-                tracing::info!(target: "strategy", "Shutdown requested; stopping strategy work loop");
-                break;
-            };
-            executor
-                .stats
-                .ingest_queue_depth
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                    Some(v.saturating_sub(1))
-                })
-                .ok();
-            let permit = executor
-                .worker_semaphore
-                .clone()
-                .acquire_owned()
-                .await
-                .expect("semaphore closed");
-            let exec = executor.clone();
-            tokio::spawn(async move {
-                let _permit = permit;
-                exec.process_work(work).await;
-            });
+            tokio::select! {
+                joined = worker_tasks.join_next(), if !worker_tasks.is_empty() => {
+                    if let Some(Err(e)) = joined {
+                        tracing::warn!(target: "strategy", error = %e, "Strategy worker task failed");
+                    }
+                }
+                work_opt = executor.work_queue.pop_latest(&executor.shutdown) => {
+                    let Some(work) = work_opt else {
+                        tracing::info!(target: "strategy", "Shutdown requested; stopping strategy work loop");
+                        break;
+                    };
+                    executor
+                        .stats
+                        .ingest_queue_depth
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                            Some(v.saturating_sub(1))
+                        })
+                        .ok();
+                    let permit = match executor.worker_semaphore.clone().acquire_owned().await {
+                        Ok(permit) => permit,
+                        Err(e) => {
+                            tracing::warn!(target: "strategy", error = %e, "Worker semaphore closed; requesting shutdown");
+                            executor.shutdown.cancel();
+                            break;
+                        }
+                    };
+                    let exec = executor.clone();
+                    worker_tasks.spawn(async move {
+                        let _permit = permit;
+                        exec.process_work(work).await;
+                    });
+                }
+            }
+        }
+
+        executor.shutdown.cancel();
+
+        while let Some(joined) = worker_tasks.join_next().await {
+            if let Err(e) = joined {
+                tracing::warn!(target: "strategy", error = %e, "Strategy worker task failed during shutdown");
+            }
+        }
+
+        if let Err(e) = block_watcher.await {
+            tracing::warn!(target: "strategy", error = %e, "Block watcher task join failed");
         }
 
         Ok(())
@@ -1853,6 +1904,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dynamic_gas_cap_auto_scales_by_stress_profile() {
+        let exec = dummy_executor_for_tests().await;
+        let low = GasFees {
+            max_fee_per_gas: 60_000_000,
+            max_priority_fee_per_gas: 8_000_000,
+            next_base_fee_per_gas: 50_000_000,
+            base_fee_per_gas: 45_000_000,
+            p50_priority_fee_per_gas: Some(7_000_000),
+            p90_priority_fee_per_gas: Some(9_000_000),
+            gas_used_ratio: Some(0.5),
+            suggested_max_fee_per_gas: None,
+        };
+        let high = GasFees {
+            max_fee_per_gas: 160_000_000_000,
+            max_priority_fee_per_gas: 6_000_000_000,
+            next_base_fee_per_gas: 150_000_000_000,
+            base_fee_per_gas: 140_000_000_000,
+            p50_priority_fee_per_gas: Some(5_000_000_000),
+            p90_priority_fee_per_gas: Some(11_000_000_000),
+            gas_used_ratio: Some(1.15),
+            suggested_max_fee_per_gas: None,
+        };
+
+        let low_cap =
+            exec.dynamic_gas_cap(U256::from(100_000_000_000_000_000u128), &low, U256::MAX);
+        let high_cap =
+            exec.dynamic_gas_cap(U256::from(100_000_000_000_000_000u128), &high, U256::MAX);
+        assert!(high_cap.base_dynamic_wei > low_cap.base_dynamic_wei);
+        assert!(high_cap.adjusted_dynamic_wei > low_cap.adjusted_dynamic_wei);
+    }
+
+    #[tokio::test]
+    async fn effective_slippage_auto_calibrates_by_cached_gas_profile() {
+        let low_exec = dummy_executor_for_tests().await;
+        {
+            let mut cache = low_exec.per_block_inputs.lock().await;
+            *cache = Some(PerBlockInputs {
+                block_number: 1,
+                gas_fees: GasFees {
+                    max_fee_per_gas: 60_000_000,
+                    max_priority_fee_per_gas: 8_000_000,
+                    next_base_fee_per_gas: 50_000_000,
+                    base_fee_per_gas: 45_000_000,
+                    p50_priority_fee_per_gas: Some(7_000_000),
+                    p90_priority_fee_per_gas: Some(9_000_000),
+                    gas_used_ratio: Some(0.5),
+                    suggested_max_fee_per_gas: Some(70_000_000),
+                },
+                wallet_balance: U256::from(10_000_000_000_000_000u128),
+            });
+        }
+        let high_exec = dummy_executor_for_tests().await;
+        {
+            let mut cache = high_exec.per_block_inputs.lock().await;
+            *cache = Some(PerBlockInputs {
+                block_number: 1,
+                gas_fees: GasFees {
+                    max_fee_per_gas: 160_000_000_000,
+                    max_priority_fee_per_gas: 6_000_000_000,
+                    next_base_fee_per_gas: 150_000_000_000,
+                    base_fee_per_gas: 140_000_000_000,
+                    p50_priority_fee_per_gas: Some(5_000_000_000),
+                    p90_priority_fee_per_gas: Some(12_000_000_000),
+                    gas_used_ratio: Some(1.15),
+                    suggested_max_fee_per_gas: Some(220_000_000_000),
+                },
+                wallet_balance: U256::from(10_000_000_000_000_000u128),
+            });
+        }
+        let low = low_exec.effective_slippage_bps();
+        let high = high_exec.effective_slippage_bps();
+        assert!(high >= low);
+    }
+
+    #[tokio::test]
     async fn enforce_dynamic_gas_cap_clamps_tip_and_fee() {
         let _exec = dummy_executor_for_tests().await;
         let mut fees = GasFees {
@@ -1953,7 +2079,8 @@ mod tests {
         let db = Database::new("sqlite::memory:").await.expect("db");
         let portfolio = Arc::new(PortfolioManager::new(http.clone(), Address::ZERO));
         let gas_oracle = GasOracle::new(http.clone(), 1);
-        let price_feed = PriceFeed::new(http.clone(), HashMap::new(), PriceApiKeys::default());
+        let price_feed = PriceFeed::new(http.clone(), HashMap::new(), PriceApiKeys::default())
+            .expect("price feed");
         let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
         let token_manager = Arc::new(TokenManager::default());
         let nonce_manager = NonceManager::new(http.clone(), Address::ZERO);

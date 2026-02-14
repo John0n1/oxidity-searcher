@@ -227,7 +227,11 @@ impl StrategyExecutor {
         }
 
         let conflict = {
-            let state = state_guard.as_ref().unwrap();
+            let Some(state) = state_guard.as_ref() else {
+                return Err(AppError::Strategy(
+                    "bundle state missing while checking pool conflicts".into(),
+                ));
+            };
             touched_pools
                 .iter()
                 .copied()
@@ -240,7 +244,11 @@ impl StrategyExecutor {
                 "Pool conflict; flushing pending bundle before merge"
             );
             let (flush_bundle, block_for_flush, next_nonce_flush) = {
-                let state = state_guard.as_mut().unwrap();
+                let Some(state) = state_guard.as_mut() else {
+                    return Err(AppError::Strategy(
+                        "bundle state missing while flushing conflicting pools".into(),
+                    ));
+                };
                 if state.raw.is_empty() {
                     return Ok(None);
                 }
@@ -344,7 +352,11 @@ impl StrategyExecutor {
         }
 
         // If adding this plan would overflow builder limits, flush existing bundle first.
-        let state = state_guard.as_mut().unwrap();
+        let Some(state) = state_guard.as_mut() else {
+            return Err(AppError::Strategy(
+                "bundle state missing while enforcing bundle limits".into(),
+            ));
+        };
         let combined_txs = state.raw.len().saturating_add(new_raw.len());
         let combined_bytes = bundle_bytes(&state.raw).saturating_add(new_raw_bytes);
         if (combined_txs > MAX_FLASHBOTS_TXS || combined_bytes > MAX_FLASHBOTS_BYTES)
@@ -385,7 +397,11 @@ impl StrategyExecutor {
             });
         }
 
-        let state = state_guard.as_mut().unwrap();
+        let Some(state) = state_guard.as_mut() else {
+            return Err(AppError::Strategy(
+                "bundle state missing while finalizing merge".into(),
+            ));
+        };
 
         state.next_nonce = state.next_nonce.max(nonce.max(lease_end));
         state.raw.extend(new_raw);
@@ -501,7 +517,11 @@ impl StrategyExecutor {
                 send_pending: false,
             });
         }
-        let state = guard.as_mut().unwrap();
+        let Some(state) = guard.as_mut() else {
+            return Err(AppError::Strategy(
+                "bundle state missing while leasing nonces".into(),
+            ));
+        };
         let start = state.next_nonce;
         if count > 0 {
             state.next_nonce = state.next_nonce.saturating_add(count);

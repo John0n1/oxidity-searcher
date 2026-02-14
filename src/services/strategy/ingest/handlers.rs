@@ -234,8 +234,14 @@ impl StrategyExecutor {
         }
 
         if processed.is_multiple_of(5000) {
-            let submitted = self.stats.submitted.load(std::sync::atomic::Ordering::Relaxed);
-            let skipped = self.stats.skipped.load(std::sync::atomic::Ordering::Relaxed);
+            let submitted = self
+                .stats
+                .submitted
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let skipped = self
+                .stats
+                .skipped
+                .load(std::sync::atomic::Ordering::Relaxed);
             let failed = self.stats.failed.load(std::sync::atomic::Ordering::Relaxed);
 
             let skip_unknown_router = self
@@ -254,7 +260,10 @@ impl StrategyExecutor {
                 .stats
                 .skip_non_wrapped_balance
                 .load(std::sync::atomic::Ordering::Relaxed);
-            let skip_gas_cap = self.stats.skip_gas_cap.load(std::sync::atomic::Ordering::Relaxed);
+            let skip_gas_cap = self
+                .stats
+                .skip_gas_cap
+                .load(std::sync::atomic::Ordering::Relaxed);
             let skip_sim_failed = self
                 .stats
                 .skip_sim_failed
@@ -407,27 +416,24 @@ impl StrategyExecutor {
                     } else {
                         ANSI_DIM
                     };
-                    (
-                        plain.clone(),
-                        colorize(plain, severity, true),
-                    )
+                    (plain.clone(), colorize(plain, severity, true))
                 })
                 .collect::<Vec<_>>();
 
             let highlighted_count =
                 |label: &str, value: u64, warn_if_nonzero: bool, color_enabled: bool| -> String {
-                let text = format!("{label}={value}");
-                if !warn_if_nonzero {
-                    return colorize(text, ANSI_GREEN, color_enabled);
-                }
-                if value == 0 {
-                    colorize(text, ANSI_GREEN, color_enabled)
-                } else if value < 10 {
-                    colorize(text, ANSI_YELLOW, color_enabled)
-                } else {
-                    colorize(text, ANSI_RED, color_enabled)
-                }
-            };
+                    let text = format!("{label}={value}");
+                    if !warn_if_nonzero {
+                        return colorize(text, ANSI_GREEN, color_enabled);
+                    }
+                    if value == 0 {
+                        colorize(text, ANSI_GREEN, color_enabled)
+                    } else if value < 10 {
+                        colorize(text, ANSI_YELLOW, color_enabled)
+                    } else {
+                        colorize(text, ANSI_RED, color_enabled)
+                    }
+                };
 
             let build_lines = |color_enabled: bool| {
                 let mut lines = vec![
@@ -1349,11 +1355,7 @@ impl StrategyExecutor {
         let mut required_value = attack_value_eth;
         let mut required_total_for_plan = required_value.saturating_add(min_bundle_gas_cost);
         let mut flashloan_needed_for_plan = has_wrapped
-            && self.should_use_flashloan(
-                required_total_for_plan,
-                wallet_chain_balance,
-                &gas_fees,
-            );
+            && self.should_use_flashloan(required_total_for_plan, wallet_chain_balance, &gas_fees);
         if flashloan_needed_for_plan && front_run.is_some() {
             tracing::info!(
                 target: "strategy",
@@ -1477,6 +1479,19 @@ impl StrategyExecutor {
             self.gas_oracle.estimate_eip1559_fees(),
             self.portfolio.update_eth_balance(self.chain_id)
         )?;
+        let calibrated = self.calibrated_risk_profile(&gas_fees);
+        tracing::debug!(
+            target: "risk_calibration",
+            chain_id = self.chain_id,
+            stress = calibrated.stress.as_str(),
+            base_floor_bps = calibrated.base_floor_bps,
+            cost_floor_bps = calibrated.cost_floor_bps,
+            min_margin_bps = calibrated.min_margin_bps,
+            liquidity_floor_ppm = calibrated.liquidity_ratio_floor_ppm,
+            base_fee_gwei = (gas_fees.base_fee_per_gas as f64) / 1e9f64,
+            next_base_fee_gwei = (gas_fees.next_base_fee_per_gas as f64) / 1e9f64,
+            "Applied automatic risk calibration profile"
+        );
         let mut cache = self.per_block_inputs.lock().await;
         *cache = Some(PerBlockInputs {
             block_number,

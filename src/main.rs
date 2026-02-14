@@ -174,13 +174,12 @@ async fn main() -> Result<(), AppError> {
         if chainlink_feeds.is_empty() {
             tracing::warn!("No Chainlink feeds configured for chain {}", chain_id);
         }
-        let wrapped_native =
-            mitander_search::common::constants::wrapped_native_for_chain(chain_id);
+        let wrapped_native = mitander_search::common::constants::wrapped_native_for_chain(chain_id);
         let price_feed = PriceFeed::new(
             http_provider.clone(),
             chainlink_feeds,
             settings.price_api_keys(),
-        );
+        )?;
         let simulation_backend = if chain_id == 1 {
             SimulationBackend::mainnet_priority()
         } else {
@@ -203,23 +202,34 @@ async fn main() -> Result<(), AppError> {
         }
 
         let router_discovery = if settings.router_discovery_enabled {
-            let discovery = Arc::new(
-                mitander_search::services::strategy::router_discovery::RouterDiscovery::new(
-                    chain_id,
-                    router_allowlist.clone(),
-                    db.clone(),
-                    Some(rpc_url.clone()),
-                    settings.etherscan_api_key_value(),
-                    settings.router_discovery_enabled,
-                    settings.router_discovery_auto_allow,
-                    settings.router_discovery_min_hits,
-                    settings.router_discovery_flush_every,
-                    settings.router_discovery_check_interval(),
-                    settings.router_discovery_max_entries,
-                ),
-            );
-            discovery.spawn_bootstrap_top_unknown(1000, 512);
-            Some(discovery)
+            match mitander_search::services::strategy::router_discovery::RouterDiscovery::new(
+                chain_id,
+                router_allowlist.clone(),
+                db.clone(),
+                Some(rpc_url.clone()),
+                settings.etherscan_api_key_value(),
+                settings.router_discovery_enabled,
+                settings.router_discovery_auto_allow,
+                settings.router_discovery_min_hits,
+                settings.router_discovery_flush_every,
+                settings.router_discovery_check_interval(),
+                settings.router_discovery_max_entries,
+            ) {
+                Ok(discovery) => {
+                    let discovery = Arc::new(discovery);
+                    discovery.spawn_bootstrap_top_unknown(1000, 512);
+                    Some(discovery)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "router_discovery",
+                        chain_id,
+                        error = %e,
+                        "Router discovery init failed; continuing with static allowlist"
+                    );
+                    None
+                }
+            }
         } else {
             None
         };

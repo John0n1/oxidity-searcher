@@ -65,15 +65,19 @@ impl RouterDiscovery {
         flush_every: u64,
         check_interval: Duration,
         max_entries: usize,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, AppError> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(8))
+            .build()
+            .map_err(|e| {
+                AppError::Initialization(format!("router discovery HTTP client init failed: {e}"))
+            })?;
+
+        Ok(Self {
             chain_id,
             allowlist,
             db,
-            client: Client::builder()
-                .timeout(Duration::from_secs(8))
-                .build()
-                .unwrap(),
+            client,
             rpc_url,
             etherscan_api_key,
             enabled,
@@ -83,7 +87,7 @@ impl RouterDiscovery {
             check_interval,
             max_entries: max_entries.max(1),
             state: Arc::new(DashMap::new()),
-        }
+        })
     }
 
     pub fn record_unknown_router(&self, router: Address, source: &str) {
@@ -651,4 +655,45 @@ fn parse_selector_hex(raw: &str) -> Option<[u8; 4]> {
 #[derive(Debug, Deserialize)]
 struct EtherscanAbiResponse {
     result: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selector_parser_handles_hex_prefix_and_rejects_invalid_lengths() {
+        assert_eq!(
+            parse_selector_hex("0x12345678"),
+            Some([0x12, 0x34, 0x56, 0x78])
+        );
+        assert_eq!(
+            parse_selector_hex("12345678"),
+            Some([0x12, 0x34, 0x56, 0x78])
+        );
+        assert!(parse_selector_hex("0x1234").is_none());
+        assert!(parse_selector_hex("0xzzzzzzzz").is_none());
+    }
+
+    #[test]
+    fn selector_kind_classifies_protocol_specific_entrypoints() {
+        let universal = format!("0x{}", hex::encode(UniversalRouter::executeCall::SELECTOR));
+        let balancer_swap = format!("0x{}", hex::encode(BalancerVault::swapCall::SELECTOR));
+        let v2_swap = format!(
+            "0x{}",
+            hex::encode(UniV2Router::swapExactTokensForTokensCall::SELECTOR)
+        );
+        assert_eq!(
+            RouterDiscovery::selector_kind(&universal),
+            Some(RouterKind::V3Like)
+        );
+        assert_eq!(
+            RouterDiscovery::selector_kind(&balancer_swap),
+            Some(RouterKind::V2Like)
+        );
+        assert_eq!(
+            RouterDiscovery::selector_kind(&v2_swap),
+            Some(RouterKind::V2Like)
+        );
+    }
 }

@@ -11,6 +11,36 @@ use crate::services::strategy::strategy::{StrategyExecutor, VICTIM_FEE_BUMP_BPS}
 use alloy::primitives::{I256, U256};
 use std::ops::Neg;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StressProfile {
+    UltraLow,
+    Low,
+    Normal,
+    Elevated,
+    High,
+}
+
+impl StressProfile {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            StressProfile::UltraLow => "ultra_low",
+            StressProfile::Low => "low",
+            StressProfile::Normal => "normal",
+            StressProfile::Elevated => "elevated",
+            StressProfile::High => "high",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CalibratedRiskProfile {
+    pub stress: StressProfile,
+    pub base_floor_bps: u64,
+    pub cost_floor_bps: u64,
+    pub min_margin_bps: u64,
+    pub liquidity_ratio_floor_ppm: u64,
+}
+
 impl StrategyExecutor {
     fn balance_to_eth_f64(balance: U256) -> f64 {
         let num = balance.to_string().parse::<f64>().unwrap_or(0.0);
@@ -81,7 +111,56 @@ impl StrategyExecutor {
         scaled_base.saturating_add(scaled_cost)
     }
 
+    pub(crate) fn classify_stress_profile(&self, gas_fees: &GasFees) -> StressProfile {
+        let base = gas_fees
+            .next_base_fee_per_gas
+            .max(gas_fees.base_fee_per_gas);
+        let base_gwei = (base as f64) / 1e9f64;
+        let util = gas_fees.gas_used_ratio.unwrap_or(0.75);
+        let tip_p50 = gas_fees
+            .p50_priority_fee_per_gas
+            .unwrap_or(gas_fees.max_priority_fee_per_gas)
+            .max(1);
+        let tip_p90 = gas_fees
+            .p90_priority_fee_per_gas
+            .unwrap_or(gas_fees.max_priority_fee_per_gas)
+            .max(tip_p50);
+        let tip_spread_x100 = tip_p90.saturating_mul(100) / tip_p50.max(1);
+
+        let mut score: i32 = if base_gwei <= 0.15 {
+            0
+        } else if base_gwei <= 2.0 {
+            1
+        } else if base_gwei <= 20.0 {
+            2
+        } else if base_gwei <= 60.0 {
+            3
+        } else {
+            4
+        };
+        if util > 1.12 {
+            score += 2;
+        } else if util > 0.98 {
+            score += 1;
+        } else if util < 0.55 {
+            score -= 1;
+        }
+        if tip_spread_x100 > 4_000 {
+            score += 1;
+        } else if tip_spread_x100 < 900 {
+            score -= 1;
+        }
+        match score.clamp(0, 4) {
+            0 => StressProfile::UltraLow,
+            1 => StressProfile::Low,
+            2 => StressProfile::Normal,
+            3 => StressProfile::Elevated,
+            _ => StressProfile::High,
+        }
+    }
+
     fn congestion_factor_bps(&self, gas_fees: &GasFees) -> u64 {
+        let profile = self.classify_stress_profile(gas_fees);
         let util = gas_fees.gas_used_ratio.unwrap_or(0.7);
         let tip_p50 = gas_fees
             .p50_priority_fee_per_gas
@@ -92,7 +171,13 @@ impl StrategyExecutor {
             .unwrap_or(gas_fees.max_priority_fee_per_gas)
             .max(tip_p50);
         let tip_spread_x100 = tip_p90.saturating_mul(100) / tip_p50.max(1);
-        let mut bps: i64 = 10_000;
+        let mut bps: i64 = match profile {
+            StressProfile::UltraLow => 9_800,
+            StressProfile::Low => 10_000,
+            StressProfile::Normal => 10_600,
+            StressProfile::Elevated => 11_600,
+            StressProfile::High => 12_800,
+        };
         if util > 1.05 {
             bps += 1_200;
         } else if util > 0.95 {
@@ -115,47 +200,106 @@ impl StrategyExecutor {
         } else if gas_fees.next_base_fee_per_gas < base.saturating_mul(95) / 100 {
             bps -= 250;
         }
-        bps.clamp(7_500, 14_000) as u64
+        match profile {
+            StressProfile::UltraLow => bps = bps.max(9_500),
+            StressProfile::Low => bps = bps.max(9_700),
+            StressProfile::Normal => bps = bps.max(10_000),
+            StressProfile::Elevated => bps = bps.max(11_000),
+            StressProfile::High => bps = bps.max(12_000),
+        }
+        bps.clamp(9_000, 16_000) as u64
+    }
+
+    pub(crate) fn calibrated_risk_profile(&self, gas_fees: &GasFees) -> CalibratedRiskProfile {
+        let stress = self.classify_stress_profile(gas_fees);
+        let congestion = self.congestion_factor_bps(gas_fees);
+        let base_floor_bps = {
+            let dynamic = self
+                .profit_guard_base_floor_multiplier_bps
+                .saturating_mul(congestion)
+                / 10_000u64;
+            let floor = match stress {
+                StressProfile::UltraLow => 9_500,
+                StressProfile::Low => 10_000,
+                StressProfile::Normal => 10_500,
+                StressProfile::Elevated => 11_250,
+                StressProfile::High => 12_000,
+            };
+            dynamic.max(floor).clamp(8_500, 14_000)
+        };
+        let cost_floor_bps = {
+            let extra = match stress {
+                StressProfile::UltraLow => 10_000,
+                StressProfile::Low => 10_100,
+                StressProfile::Normal => 10_300,
+                StressProfile::Elevated => 10_700,
+                StressProfile::High => 11_000,
+            };
+            let dynamic = self
+                .profit_guard_cost_multiplier_bps
+                .max(10_000)
+                .saturating_mul(extra)
+                / 10_000u64;
+            dynamic.clamp(10_000, 16_000)
+        };
+        let min_margin_bps = {
+            let dynamic = self.profit_guard_min_margin_bps.saturating_mul(congestion) / 10_000u64;
+            let floor = match stress {
+                StressProfile::UltraLow => 600,
+                StressProfile::Low => 700,
+                StressProfile::Normal => 900,
+                StressProfile::Elevated => 1_100,
+                StressProfile::High => 1_300,
+            };
+            dynamic.max(floor).clamp(300, 3_000)
+        };
+        let liquidity_ratio_floor_ppm = {
+            let dynamic = self.liquidity_ratio_floor_ppm.saturating_mul(congestion) / 10_000u64;
+            let floor = match stress {
+                StressProfile::UltraLow => 650,
+                StressProfile::Low => 700,
+                StressProfile::Normal => 850,
+                StressProfile::Elevated => 1_000,
+                StressProfile::High => 1_150,
+            };
+            dynamic.max(floor).clamp(300, 1_800)
+        };
+        CalibratedRiskProfile {
+            stress,
+            base_floor_bps,
+            cost_floor_bps,
+            min_margin_bps,
+            liquidity_ratio_floor_ppm,
+        }
     }
 
     pub(crate) fn adaptive_base_floor_bps(&self, gas_fees: &GasFees) -> u64 {
-        let bps = self
-            .profit_guard_base_floor_multiplier_bps
-            .saturating_mul(self.congestion_factor_bps(gas_fees))
-            / 10_000u64;
-        bps.clamp(3_500, 12_000)
+        self.calibrated_risk_profile(gas_fees).base_floor_bps
     }
 
     pub(crate) fn adaptive_cost_floor_bps(&self, gas_fees: &GasFees) -> u64 {
-        let congestion = self.congestion_factor_bps(gas_fees);
-        let extra = if congestion >= 11_500 { 10_500 } else { 10_000 };
-        let bps = self
-            .profit_guard_cost_multiplier_bps
-            .max(10_000)
-            .saturating_mul(extra)
-            / 10_000u64;
-        bps.clamp(10_000, 15_000)
+        self.calibrated_risk_profile(gas_fees).cost_floor_bps
     }
 
     pub(crate) fn adaptive_min_margin_bps(&self, gas_fees: &GasFees) -> u64 {
-        let bps = self
-            .profit_guard_min_margin_bps
-            .saturating_mul(self.congestion_factor_bps(gas_fees))
-            / 10_000u64;
-        bps.clamp(250, 2_500)
+        self.calibrated_risk_profile(gas_fees).min_margin_bps
     }
 
     pub(crate) fn adaptive_liquidity_ratio_floor_ppm(&self, gas_fees: &GasFees) -> u64 {
-        let ppm = self
+        self.calibrated_risk_profile(gas_fees)
             .liquidity_ratio_floor_ppm
-            .saturating_mul(self.congestion_factor_bps(gas_fees))
-            / 10_000u64;
-        ppm.clamp(300, 1_600)
     }
 
     pub(crate) fn adaptive_sell_min_native_out_wei(&self, gas_fees: &GasFees) -> U256 {
+        let stress_mult_bps = match self.classify_stress_profile(gas_fees) {
+            StressProfile::UltraLow => 9_800,
+            StressProfile::Low => 10_000,
+            StressProfile::Normal => 10_800,
+            StressProfile::Elevated => 11_800,
+            StressProfile::High => 12_500,
+        };
         let scaled_base = U256::from(self.sell_min_native_out_wei)
-            .saturating_mul(U256::from(self.congestion_factor_bps(gas_fees)))
+            .saturating_mul(U256::from(stress_mult_bps))
             .checked_div(U256::from(10_000u64))
             .unwrap_or_else(|| U256::from(self.sell_min_native_out_wei));
         let fee = gas_fees
@@ -510,6 +654,8 @@ impl StrategyExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::gas::GasFees;
+    use crate::services::strategy::execution::strategy::dummy_executor_for_tests;
 
     #[test]
     fn dynamic_profit_floor_with_costs_keeps_base_floor_when_costs_zero() {
@@ -534,5 +680,83 @@ mod tests {
         let base = StrategyExecutor::dynamic_profit_floor(wallet_balance);
         let expected_buffer = gas.saturating_add(extra);
         assert_eq!(floor, base.saturating_add(expected_buffer));
+    }
+
+    #[tokio::test]
+    async fn stress_profile_auto_calibration_scales_with_congestion() {
+        let exec = dummy_executor_for_tests().await;
+        let ultra_low = GasFees {
+            max_fee_per_gas: 50_000_000,
+            max_priority_fee_per_gas: 8_000_000,
+            next_base_fee_per_gas: 40_000_000,
+            base_fee_per_gas: 35_000_000,
+            p50_priority_fee_per_gas: Some(7_000_000),
+            p90_priority_fee_per_gas: Some(9_000_000),
+            gas_used_ratio: Some(0.42),
+            suggested_max_fee_per_gas: Some(55_000_000),
+        };
+        let high = GasFees {
+            max_fee_per_gas: 180_000_000_000,
+            max_priority_fee_per_gas: 6_000_000_000,
+            next_base_fee_per_gas: 160_000_000_000,
+            base_fee_per_gas: 145_000_000_000,
+            p50_priority_fee_per_gas: Some(5_000_000_000),
+            p90_priority_fee_per_gas: Some(12_000_000_000),
+            gas_used_ratio: Some(1.18),
+            suggested_max_fee_per_gas: Some(220_000_000_000),
+        };
+
+        let low_profile = exec.calibrated_risk_profile(&ultra_low);
+        let high_profile = exec.calibrated_risk_profile(&high);
+        assert_eq!(low_profile.stress, StressProfile::UltraLow);
+        assert_eq!(high_profile.stress, StressProfile::High);
+        assert!(high_profile.base_floor_bps > low_profile.base_floor_bps);
+        assert!(high_profile.cost_floor_bps >= low_profile.cost_floor_bps);
+        assert!(high_profile.min_margin_bps > low_profile.min_margin_bps);
+        assert!(high_profile.liquidity_ratio_floor_ppm > low_profile.liquidity_ratio_floor_ppm);
+    }
+
+    #[tokio::test]
+    async fn replay_window_profile_progression_is_monotonic() {
+        let exec = dummy_executor_for_tests().await;
+        let windows = vec![
+            GasFees {
+                max_fee_per_gas: 65_000_000,
+                max_priority_fee_per_gas: 7_000_000,
+                next_base_fee_per_gas: 55_000_000,
+                base_fee_per_gas: 48_000_000,
+                p50_priority_fee_per_gas: Some(6_000_000),
+                p90_priority_fee_per_gas: Some(9_000_000),
+                gas_used_ratio: Some(0.52),
+                suggested_max_fee_per_gas: Some(75_000_000),
+            },
+            GasFees {
+                max_fee_per_gas: 22_000_000_000,
+                max_priority_fee_per_gas: 2_000_000_000,
+                next_base_fee_per_gas: 19_000_000_000,
+                base_fee_per_gas: 17_000_000_000,
+                p50_priority_fee_per_gas: Some(1_800_000_000),
+                p90_priority_fee_per_gas: Some(3_000_000_000),
+                gas_used_ratio: Some(0.9),
+                suggested_max_fee_per_gas: Some(30_000_000_000),
+            },
+            GasFees {
+                max_fee_per_gas: 130_000_000_000,
+                max_priority_fee_per_gas: 4_000_000_000,
+                next_base_fee_per_gas: 120_000_000_000,
+                base_fee_per_gas: 110_000_000_000,
+                p50_priority_fee_per_gas: Some(3_500_000_000),
+                p90_priority_fee_per_gas: Some(9_000_000_000),
+                gas_used_ratio: Some(1.12),
+                suggested_max_fee_per_gas: Some(170_000_000_000),
+            },
+        ];
+
+        let mut prev_base_floor = 0u64;
+        for fees in windows {
+            let profile = exec.calibrated_risk_profile(&fees);
+            assert!(profile.base_floor_bps >= prev_base_floor);
+            prev_base_floor = profile.base_floor_bps;
+        }
     }
 }

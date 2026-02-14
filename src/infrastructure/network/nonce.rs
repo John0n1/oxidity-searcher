@@ -7,7 +7,7 @@ use crate::network::provider::HttpProvider;
 use alloy::primitives::Address;
 use alloy::providers::Provider;
 use std::cmp::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 #[derive(Clone)]
@@ -26,8 +26,14 @@ impl NonceManager {
         }
     }
 
+    fn lock_cache(&self) -> Result<MutexGuard<'_, Option<(u64, u64)>>, AppError> {
+        self.cache
+            .lock()
+            .map_err(|_| AppError::Strategy("nonce cache mutex poisoned".into()))
+    }
+
     pub async fn get_base_nonce(&self, current_block: u64) -> Result<u64, AppError> {
-        if let Some((block, cached)) = *self.cache.lock().unwrap() {
+        if let Some((block, cached)) = *self.lock_cache()? {
             match current_block.cmp(&block) {
                 Ordering::Equal => return Ok(cached),
                 Ordering::Less if current_block == 0 => return Ok(cached),
@@ -48,7 +54,7 @@ impl NonceManager {
         .await
         .map_err(|e| AppError::Connection(format!("Failed to fetch nonce: {}", e)))?;
 
-        *self.cache.lock().unwrap() = Some((current_block, on_chain_nonce));
+        *self.lock_cache()? = Some((current_block, on_chain_nonce));
 
         Ok(on_chain_nonce)
     }
@@ -76,7 +82,7 @@ impl NonceManager {
         .map_err(|e| AppError::Connection(format!("Failed to resync nonce: {}", e)))?;
 
         tracing::debug!("Nonce resynced to {}", on_chain_nonce);
-        *self.cache.lock().unwrap() = Some((block, on_chain_nonce));
+        *self.lock_cache()? = Some((block, on_chain_nonce));
         Ok(())
     }
 }

@@ -503,13 +503,17 @@ impl Engine {
                 "Dropped routers with missing code"
             );
         }
-        {
+        let reserve_listener = {
             let cache = reserve_cache.clone();
             let ws_for_cache = self.ws_provider.clone();
-            tokio::spawn(async move {
-                cache.run_v2_log_listener(ws_for_cache).await;
-            });
-        }
+            let reserve_shutdown = shutdown.clone();
+            async move {
+                cache
+                    .run_v2_log_listener(ws_for_cache, reserve_shutdown)
+                    .await;
+                Ok::<(), AppError>(())
+            }
+        };
         let _metrics_addr = crate::common::metrics::spawn_metrics_server(
             self.metrics_port,
             self.chain_id,
@@ -581,7 +585,7 @@ impl Engine {
             );
 
             if self.mev_share_enabled {
-                let mev_share = MevShareClient::new(
+                match MevShareClient::new(
                     self.mev_share_stream_url.clone(),
                     self.chain_id,
                     work_queue.clone(),
@@ -589,25 +593,50 @@ impl Engine {
                     INGEST_QUEUE_BOUND,
                     self.mev_share_history_limit,
                     shutdown.clone(),
-                );
+                ) {
+                    Ok(mev_share) => {
+                        drop(block_sender);
+                        tokio::try_join!(
+                            mempool.run(),
+                            block_listener.run(),
+                            strategy.run(),
+                            mev_share.run(),
+                            reserve_listener
+                        )
+                        .map(|_| ())
+                        .map_err(|e| AppError::Unknown(e.into()))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "mev_share",
+                            error = %e,
+                            "MEV-Share client init failed; continuing without MEV-Share stream"
+                        );
+                        drop(block_sender);
+                        tokio::try_join!(
+                            mempool.run(),
+                            block_listener.run(),
+                            strategy.run(),
+                            reserve_listener
+                        )
+                        .map(|_| ())
+                        .map_err(|e| AppError::Unknown(e.into()))
+                    }
+                }
+            } else {
                 drop(block_sender);
                 tokio::try_join!(
                     mempool.run(),
                     block_listener.run(),
                     strategy.run(),
-                    mev_share.run()
+                    reserve_listener
                 )
                 .map(|_| ())
                 .map_err(|e| AppError::Unknown(e.into()))
-            } else {
-                drop(block_sender);
-                tokio::try_join!(mempool.run(), block_listener.run(), strategy.run())
-                    .map(|_| ())
-                    .map_err(|e| AppError::Unknown(e.into()))
             }
         } else {
             drop(block_sender);
-            tokio::try_join!(mempool.run(), block_listener.run())
+            tokio::try_join!(mempool.run(), block_listener.run(), reserve_listener)
                 .map(|_| ())
                 .map_err(|e| AppError::Unknown(e.into()))
         }

@@ -22,6 +22,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, sleep, timeout};
+use tokio_util::sync::CancellationToken;
 
 sol! {
     #[derive(Debug, PartialEq, Eq)]
@@ -461,7 +462,7 @@ impl ReserveCache {
         Ok(())
     }
 
-    pub async fn run_v2_log_listener(self: Arc<Self>, ws: WsProvider) {
+    pub async fn run_v2_log_listener(self: Arc<Self>, ws: WsProvider, shutdown: CancellationToken) {
         // Seed a small set of pairs if none are known yet.
         if self.v2_reserves.is_empty() {
             self.seed_pairs_from_ws(ws.clone()).await;
@@ -474,11 +475,25 @@ impl ReserveCache {
             filter = filter.address(addresses);
         }
         loop {
+            if shutdown.is_cancelled() {
+                tracing::info!(target: "reserves", "Shutdown requested; stopping V2 log listener");
+                break;
+            }
             match ws.subscribe_logs(&filter).await {
                 Ok(sub) => {
                     let mut stream = sub.into_stream();
                     tracing::info!(target: "reserves", "Subscribed to V2 Sync logs");
-                    while let Some(log) = stream.next().await {
+                    loop {
+                        let next = tokio::select! {
+                            _ = shutdown.cancelled() => {
+                                tracing::info!(target: "reserves", "Shutdown requested; closing Sync subscription");
+                                return;
+                            }
+                            next = stream.next() => next,
+                        };
+                        let Some(log) = next else {
+                            break;
+                        };
                         if let Err(e) = self.handle_v2_log(log).await {
                             tracing::debug!(target: "reserves", error=%e, "Failed to process Sync log");
                         }
@@ -489,7 +504,13 @@ impl ReserveCache {
                     tracing::warn!(target: "reserves", error=%e, "Sync subscribe failed, retrying");
                 }
             }
-            sleep(Duration::from_secs(2)).await;
+            tokio::select! {
+                _ = shutdown.cancelled() => {
+                    tracing::info!(target: "reserves", "Shutdown requested; stopping V2 log listener retry loop");
+                    break;
+                }
+                _ = sleep(Duration::from_secs(2)) => {}
+            }
         }
     }
 

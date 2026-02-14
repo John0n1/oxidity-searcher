@@ -19,6 +19,8 @@ const CACHE_TTL: u64 = 60; // Cache prices for 60 seconds
 const CHAINLINK_STALENESS_SECS: u64 = 600;
 const STALE_CACHE_GRACE_SECS: u64 = 900; // Accept up to 15m old cache on failures
 const PROVIDER_WINDOW_SECS: u64 = 60; // per-provider RPM window
+const SOURCE_CRYPTOCOMPARE: &str = "cryptocompare";
+const SOURCE_CRYPTOCOMPARE_PUBLIC_BTC: &str = "cryptocompare_public_btc";
 
 #[derive(Deserialize, Debug)]
 struct BinanceTicker {
@@ -83,12 +85,16 @@ impl PriceFeed {
         provider: HttpProvider,
         chainlink_feeds: HashMap<String, Address>,
         api_keys: PriceApiKeys,
-    ) -> Self {
-        Self {
-            client: Client::builder()
-                .timeout(Duration::from_secs(5))
-                .build()
-                .unwrap(),
+    ) -> Result<Self, AppError> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .map_err(|e| {
+                AppError::Initialization(format!("price feed HTTP client init failed: {e}"))
+            })?;
+
+        Ok(Self {
+            client,
             cache: Arc::new(RwLock::new(HashMap::new())),
             volatility_cache: Arc::new(Mutex::new(HashMap::new())),
             last_price: Arc::new(Mutex::new(HashMap::new())),
@@ -97,7 +103,7 @@ impl PriceFeed {
             decimals_cache: Arc::new(Mutex::new(HashMap::new())),
             api_keys,
             rate: Arc::new(Mutex::new(HashMap::new())),
-        }
+        })
     }
 
     pub async fn audit_chainlink_feeds(&self, strict: bool) -> Result<(), AppError> {
@@ -269,9 +275,9 @@ impl PriceFeed {
             return Ok(q);
         }
 
-        // 8. CoinDesk (BTC only, optional key)
+        // 8. CryptoCompare public BTC fallback (legacy COINDESK_API_KEY alias supported)
         if normalized.chainlink_symbol == "BTC"
-            && let Some(q) = self.try_coindesk().await?
+            && let Some(q) = self.try_cryptocompare_btc_public().await?
         {
             self.store_cache(&normalized.cache_key, q.clone()).await;
             return Ok(q);
@@ -509,7 +515,7 @@ impl PriceFeed {
         if let Some(price) = parsed.get("USD").and_then(|v| v.as_f64()) {
             return Ok(Some(PriceQuote {
                 price,
-                source: "cryptocompare".into(),
+                source: SOURCE_CRYPTOCOMPARE.into(),
             }));
         }
         Ok(None)
@@ -556,32 +562,35 @@ impl PriceFeed {
         Ok(None)
     }
 
-    async fn try_coindesk(&self) -> Result<Option<PriceQuote>, AppError> {
-        // User noted Coindesk price now proxies CryptoCompare endpoint.
-        // We respect coindesk API key if present, but the endpoint is public.
-        if !self.allow("coindesk", 30).await {
+    async fn try_cryptocompare_btc_public(&self) -> Result<Option<PriceQuote>, AppError> {
+        if !self.allow("cryptocompare_public", 30).await {
             return Ok(None);
         }
-        let url = "https://min-api.cryptocompare.com/data/price?fsym=BTC&tsyms=USD,JPY,EUR";
-        let mut req = self.client.get(url);
-        if let Some(key) = &self.api_keys.coindesk {
-            req = req.header("X-API-KEY", key);
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| AppError::Connection(format!("Coindesk request failed: {}", e)))?;
+        let key = self
+            .api_keys
+            .cryptocompare
+            .as_ref()
+            .or(self.api_keys.coindesk.as_ref());
+        let url = if let Some(key) = key {
+            format!(
+                "https://min-api.cryptocompare.com/data/price?fsym=BTC&tsyms=USD,JPY,EUR&api_key={key}"
+            )
+        } else {
+            "https://min-api.cryptocompare.com/data/price?fsym=BTC&tsyms=USD,JPY,EUR".to_string()
+        };
+        let resp = self.client.get(&url).send().await.map_err(|e| {
+            AppError::Connection(format!("CryptoCompare public request failed: {}", e))
+        })?;
         if !resp.status().is_success() {
             return Ok(None);
         }
-        let parsed: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| AppError::Initialization(format!("Coindesk decode failed: {}", e)))?;
+        let parsed: serde_json::Value = resp.json().await.map_err(|e| {
+            AppError::Initialization(format!("CryptoCompare public decode failed: {}", e))
+        })?;
         if let Some(price) = parsed.get("USD").and_then(|v| v.as_f64()) {
             return Ok(Some(PriceQuote {
                 price,
-                source: "coindesk".into(),
+                source: SOURCE_CRYPTOCOMPARE_PUBLIC_BTC.into(),
             }));
         }
         Ok(None)
@@ -916,5 +925,11 @@ mod tests {
         assert_eq!(normalized.chainlink_symbol, "ETH");
         assert!(normalized.binance_symbols.contains(&"ETHUSDC".to_string()));
         assert!(normalized.binance_symbols.contains(&"ETHUSDT".to_string()));
+    }
+
+    #[test]
+    fn pricing_source_labels_match_adapter_names() {
+        assert_eq!(SOURCE_CRYPTOCOMPARE, "cryptocompare");
+        assert_eq!(SOURCE_CRYPTOCOMPARE_PUBLIC_BTC, "cryptocompare_public_btc");
     }
 }

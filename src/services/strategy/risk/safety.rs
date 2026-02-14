@@ -33,7 +33,7 @@ impl SafetyGuard {
         if failures >= self.max_failures {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_secs();
             let last = self.last_failure_ts.load(Ordering::Relaxed) as u64;
 
@@ -56,7 +56,7 @@ impl SafetyGuard {
         let count = self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
         self.last_failure_ts.store(now as usize, Ordering::Relaxed);
 
