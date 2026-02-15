@@ -79,6 +79,7 @@ async fn mev_share_v3_pipeline_manual() {
     let gas_oracle = GasOracle::new(http.clone(), chain_id);
     let price_feed = PriceFeed::new(
         http.clone(),
+        chain_id,
         std::collections::HashMap::new(),
         PriceApiKeys::default(),
     )

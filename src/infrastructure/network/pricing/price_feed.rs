@@ -17,10 +17,19 @@ use tokio::sync::RwLock;
 
 const CACHE_TTL: u64 = 60; // Cache prices for 60 seconds
 const CHAINLINK_STALENESS_SECS: u64 = 600;
+const CHAINLINK_STALENESS_SECS_MAINNET_CRITICAL: u64 = 180;
 const STALE_CACHE_GRACE_SECS: u64 = 900; // Accept up to 15m old cache on failures
 const PROVIDER_WINDOW_SECS: u64 = 60; // per-provider RPM window
 const SOURCE_CRYPTOCOMPARE: &str = "cryptocompare";
 const SOURCE_CRYPTOCOMPARE_PUBLIC_BTC: &str = "cryptocompare_public_btc";
+const MAINNET_CHAIN_ID: u64 = 1;
+
+fn is_mainnet_critical_symbol(symbol: &str) -> bool {
+    matches!(
+        symbol.to_uppercase().as_str(),
+        "ETH" | "BTC" | "USDC" | "USDT"
+    )
+}
 
 #[derive(Deserialize, Debug)]
 struct BinanceTicker {
@@ -54,6 +63,7 @@ impl RateState {
 #[derive(Clone)]
 pub struct PriceFeed {
     client: Client,
+    chain_id: u64,
     // Map: Symbol -> (Price, Timestamp)
     cache: Arc<RwLock<HashMap<String, (PriceQuote, Instant)>>>,
     volatility_cache: Arc<Mutex<HashMap<String, (u64, Instant)>>>,
@@ -83,6 +93,7 @@ pub struct PriceApiKeys {
 impl PriceFeed {
     pub fn new(
         provider: HttpProvider,
+        chain_id: u64,
         chainlink_feeds: HashMap<String, Address>,
         api_keys: PriceApiKeys,
     ) -> Result<Self, AppError> {
@@ -95,6 +106,7 @@ impl PriceFeed {
 
         Ok(Self {
             client,
+            chain_id,
             cache: Arc::new(RwLock::new(HashMap::new())),
             volatility_cache: Arc::new(Mutex::new(HashMap::new())),
             last_price: Arc::new(Mutex::new(HashMap::new())),
@@ -135,6 +147,7 @@ impl PriceFeed {
             .unwrap_or_default()
             .as_secs();
         let mut stale: Vec<String> = Vec::new();
+        let mut stale_critical: Vec<String> = Vec::new();
         let mut invalid: Vec<String> = Vec::new();
 
         for (symbol, addr) in feeds {
@@ -172,8 +185,23 @@ impl PriceFeed {
                 continue;
             }
             let age = now.saturating_sub(updated_at_secs);
-            if age > CHAINLINK_STALENESS_SECS {
-                stale.push(format!("{symbol}@{:#x}:age={}s", addr, age));
+            let is_critical_mainnet =
+                self.chain_id == MAINNET_CHAIN_ID && is_mainnet_critical_symbol(&symbol);
+            let threshold = if is_critical_mainnet {
+                CHAINLINK_STALENESS_SECS_MAINNET_CRITICAL
+            } else {
+                CHAINLINK_STALENESS_SECS
+            };
+            if age > threshold {
+                let row = format!(
+                    "{symbol}@{:#x}:age={}s threshold={}s critical_mainnet={}",
+                    addr, age, threshold, is_critical_mainnet
+                );
+                if is_critical_mainnet {
+                    stale_critical.push(row);
+                } else {
+                    stale.push(row);
+                }
             }
         }
 
@@ -198,11 +226,24 @@ impl PriceFeed {
                 );
             }
         }
+        if !stale_critical.is_empty() {
+            for row in stale_critical.iter().take(12) {
+                tracing::warn!(
+                    target: "price_feed",
+                    strict,
+                    chain_id = self.chain_id,
+                    issue = %row,
+                    critical_stale_threshold_secs = CHAINLINK_STALENESS_SECS_MAINNET_CRITICAL,
+                    "Chainlink feed audit stale critical feed"
+                );
+            }
+        }
 
-        if !invalid.is_empty() || (strict && !stale.is_empty()) {
+        if !invalid.is_empty() || !stale_critical.is_empty() || (strict && !stale.is_empty()) {
             return Err(AppError::Config(format!(
-                "Chainlink feed audit failed (invalid={}, stale={}, strict={})",
+                "Chainlink feed audit failed (invalid={}, stale_critical={}, stale={}, strict={})",
                 invalid.len(),
+                stale_critical.len(),
                 stale.len(),
                 strict
             )));
@@ -211,6 +252,8 @@ impl PriceFeed {
         tracing::info!(
             target: "price_feed",
             strict,
+            chain_id = self.chain_id,
+            stale_critical = stale_critical.len(),
             stale = stale.len(),
             invalid = invalid.len(),
             "Chainlink feed audit completed"
@@ -687,15 +730,32 @@ impl PriceFeed {
             .ok()
             .or_else(|| latest.updatedAt.to_string().parse().ok());
         let mut stale = false;
+        let mut critical_stale = false;
         if let Some(ts) = updated_at_secs {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
             let age = now.saturating_sub(ts);
-            if age > CHAINLINK_STALENESS_SECS {
+            let is_critical_mainnet =
+                self.chain_id == MAINNET_CHAIN_ID && is_mainnet_critical_symbol(&key);
+            let threshold = if is_critical_mainnet {
+                CHAINLINK_STALENESS_SECS_MAINNET_CRITICAL
+            } else {
+                CHAINLINK_STALENESS_SECS
+            };
+            if age > threshold {
                 stale = true;
-                tracing::warn!(target: "price_feed", age, "Chainlink price stale for {}", symbol);
+                critical_stale = is_critical_mainnet;
+                tracing::warn!(
+                    target: "price_feed",
+                    age,
+                    threshold,
+                    chain_id = self.chain_id,
+                    critical_mainnet = is_critical_mainnet,
+                    "Chainlink price stale for {}",
+                    symbol
+                );
             }
         }
         let raw: i128 = latest
@@ -703,6 +763,9 @@ impl PriceFeed {
             .try_into()
             .map_err(|e| AppError::Connection(format!("Chainlink answer convert failed: {}", e)))?;
         let price = (raw as f64) / 10f64.powi(decimals);
+        if critical_stale {
+            return Ok(None);
+        }
         let source = if stale {
             "chainlink_stale".into()
         } else {

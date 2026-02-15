@@ -59,6 +59,7 @@ async fn mev_share_hint_round_trip() {
     let gas_oracle = GasOracle::new(http.clone(), 1);
     let price_feed = PriceFeed::new(
         http.clone(),
+        1,
         std::collections::HashMap::new(),
         PriceApiKeys::default(),
     )

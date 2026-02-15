@@ -51,6 +51,9 @@ struct RouterClassification {
     note: String,
 }
 
+const SELECTOR_KIND_SHARE_BPS_MIN: u64 = 7_000;
+const SELECTOR_DISTINCT_MIN: usize = 2;
+
 impl RouterDiscovery {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -228,7 +231,7 @@ impl RouterDiscovery {
                         &format!("{router:#x}"),
                         "ignored",
                         None,
-                        Some("abi_or_selector_unsupported"),
+                        Some("abi_selector_or_bytecode_verification_failed"),
                     )
                     .await;
             }
@@ -251,16 +254,25 @@ impl RouterDiscovery {
         &self,
         router: Address,
     ) -> Result<Option<RouterClassification>, AppError> {
-        if let Some(classification) = self.classify_router_via_etherscan(router).await? {
+        let bytecode = self.fetch_router_bytecode(router).await?;
+        if bytecode.is_empty() {
+            return Ok(None);
+        }
+        if let Some(classification) = self
+            .classify_router_via_etherscan(router, &bytecode)
+            .await?
+        {
             return Ok(Some(classification));
         }
 
-        self.classify_router_via_recent_selectors(router, 96).await
+        self.classify_router_via_recent_selectors(router, 96, &bytecode)
+            .await
     }
 
     async fn classify_router_via_etherscan(
         &self,
         router: Address,
+        bytecode: &[u8],
     ) -> Result<Option<RouterClassification>, AppError> {
         let key = match &self.etherscan_api_key {
             Some(k) if !k.is_empty() => k.clone(),
@@ -304,8 +316,8 @@ impl RouterDiscovery {
             Err(_) => return Ok(None),
         };
 
-        let mut has_v2 = false;
-        let mut has_v3 = false;
+        let mut v2_function_markers = 0u64;
+        let mut v3_function_markers = 0u64;
         for entry in abi {
             if entry.get("type").and_then(|v| v.as_str()) != Some("function") {
                 continue;
@@ -313,34 +325,41 @@ impl RouterDiscovery {
             let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("");
             match name {
                 "swapExactTokensForTokens" | "swapExactETHForTokens" | "swapExactTokensForETH" => {
-                    has_v2 = true;
+                    v2_function_markers = v2_function_markers.saturating_add(1);
                 }
                 "exactInput" | "exactInputSingle" => {
-                    has_v3 = true;
+                    v3_function_markers = v3_function_markers.saturating_add(1);
                 }
                 _ => {}
             }
         }
 
-        if has_v3 {
-            Ok(Some(RouterClassification {
-                kind: RouterKind::V3Like,
-                note: "etherscan_abi".to_string(),
-            }))
-        } else if has_v2 {
-            Ok(Some(RouterClassification {
-                kind: RouterKind::V2Like,
-                note: "etherscan_abi".to_string(),
-            }))
-        } else {
-            Ok(None)
+        let (kind, marker_hits) =
+            if v3_function_markers >= 2 && v3_function_markers >= v2_function_markers {
+                (RouterKind::V3Like, v3_function_markers)
+            } else if v2_function_markers >= 2 {
+                (RouterKind::V2Like, v2_function_markers)
+            } else {
+                return Ok(None);
+            };
+        let bytecode_selector_hits =
+            Self::count_matching_selectors(bytecode, Self::selectors_for_kind(kind));
+        if bytecode_selector_hits == 0 {
+            return Ok(None);
         }
+        Ok(Some(RouterClassification {
+            kind,
+            note: format!(
+                "etherscan_abi:markers={marker_hits} bytecode_selector_hits={bytecode_selector_hits}"
+            ),
+        }))
     }
 
     async fn classify_router_via_recent_selectors(
         &self,
         router: Address,
         lookback_blocks: u64,
+        bytecode: &[u8],
     ) -> Result<Option<RouterClassification>, AppError> {
         let mut candidates = HashSet::new();
         let key = format!("{router:#x}").to_ascii_lowercase();
@@ -351,22 +370,12 @@ impl RouterDiscovery {
         let Some(selector_counts) = observed.get(&key) else {
             return Ok(None);
         };
-
-        let mut ranked: Vec<(&String, &u64)> = selector_counts.iter().collect();
-        ranked.sort_by_key(|(_, count)| std::cmp::Reverse(**count));
-        if let Some((selector, _)) = ranked
-            .into_iter()
-            .find(|(selector, _)| Self::selector_kind(selector).is_some())
-        {
-            let kind = Self::selector_kind(selector).ok_or_else(|| {
-                AppError::Initialization("selector classification missing".into())
-            })?;
-            return Ok(Some(RouterClassification {
-                kind,
-                note: format!("selector_observed:{selector}"),
-            }));
-        }
-        Ok(None)
+        Ok(self.classify_selector_profile(
+            selector_counts,
+            bytecode,
+            self.min_hits.max(2),
+            "selector_profile",
+        ))
     }
 
     async fn bootstrap_top_unknown_allowlist(&self, limit: usize, lookback_blocks: u64) {
@@ -421,25 +430,36 @@ impl RouterDiscovery {
             let Some(selector_counts) = observed.get(&key) else {
                 continue;
             };
-
-            let mut ranked: Vec<(&String, &u64)> = selector_counts.iter().collect();
-            ranked.sort_by_key(|(_, count)| std::cmp::Reverse(**count));
-            let Some((selector, hits)) = ranked
-                .into_iter()
-                .find(|(selector, _)| Self::selector_kind(selector).is_some())
-            else {
+            let bytecode = match self.fetch_router_bytecode(router).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::debug!(
+                        target: "router_discovery",
+                        router = %format!("{router:#x}"),
+                        error = %e,
+                        "Bootstrap bytecode verification failed"
+                    );
+                    continue;
+                }
+            };
+            if bytecode.is_empty() {
+                continue;
+            }
+            let Some(classification) = self.classify_selector_profile(
+                selector_counts,
+                &bytecode,
+                self.min_hits.max(2),
+                "top_unknown_selector",
+            ) else {
                 continue;
             };
-            let Some(kind) = Self::selector_kind(selector) else {
-                continue;
-            };
+            let kind = classification.kind;
             let kind_str = match kind {
                 RouterKind::V2Like => "v2",
                 RouterKind::V3Like => "v3",
             };
 
             self.allowlist.insert(router);
-            let note = format!("top_unknown_selector:{selector}");
             let _ = self
                 .db
                 .set_router_status(
@@ -447,7 +467,7 @@ impl RouterDiscovery {
                     &format!("{router:#x}"),
                     "approved",
                     Some(kind_str),
-                    Some(&note),
+                    Some(&classification.note),
                 )
                 .await;
             approved = approved.saturating_add(1);
@@ -455,9 +475,8 @@ impl RouterDiscovery {
                 target: "router_discovery",
                 router = %format!("{router:#x}"),
                 seen,
-                selector = %selector,
-                selector_hits = *hits,
                 router_kind = kind_str,
+                note = %classification.note,
                 "Bootstrap-approved top unknown router"
             );
         }
@@ -469,6 +488,121 @@ impl RouterDiscovery {
                 "Router discovery bootstrap completed"
             );
         }
+    }
+
+    async fn fetch_router_bytecode(&self, router: Address) -> Result<Vec<u8>, AppError> {
+        let code_val = self
+            .rpc_request("eth_getCode", json!([format!("{router:#x}"), "latest"]))
+            .await?;
+        let code_hex = code_val.as_str().ok_or_else(|| {
+            AppError::Initialization("eth_getCode returned non-string result".into())
+        })?;
+        let compact = code_hex
+            .strip_prefix("0x")
+            .or_else(|| code_hex.strip_prefix("0X"))
+            .unwrap_or(code_hex);
+        if compact.is_empty() {
+            return Ok(Vec::new());
+        }
+        hex::decode(compact)
+            .map_err(|e| AppError::Initialization(format!("eth_getCode hex decode failed: {e}")))
+    }
+
+    fn classify_selector_profile(
+        &self,
+        selector_counts: &HashMap<String, u64>,
+        bytecode: &[u8],
+        min_hits: u64,
+        note_prefix: &str,
+    ) -> Option<RouterClassification> {
+        let mut v2_hits = 0u64;
+        let mut v3_hits = 0u64;
+        let mut v2_ranked: Vec<(String, u64)> = Vec::new();
+        let mut v3_ranked: Vec<(String, u64)> = Vec::new();
+        for (selector, count) in selector_counts {
+            match Self::selector_kind(selector) {
+                Some(RouterKind::V2Like) => {
+                    v2_hits = v2_hits.saturating_add(*count);
+                    v2_ranked.push((selector.clone(), *count));
+                }
+                Some(RouterKind::V3Like) => {
+                    v3_hits = v3_hits.saturating_add(*count);
+                    v3_ranked.push((selector.clone(), *count));
+                }
+                None => {}
+            }
+        }
+        let (kind, kind_hits, mut kind_ranked, other_hits) = if v3_hits >= v2_hits {
+            (RouterKind::V3Like, v3_hits, v3_ranked, v2_hits)
+        } else {
+            (RouterKind::V2Like, v2_hits, v2_ranked, v3_hits)
+        };
+        if kind_hits < min_hits.max(2) {
+            return None;
+        }
+        if kind_ranked.len() < SELECTOR_DISTINCT_MIN {
+            return None;
+        }
+        let total_known_hits = kind_hits.saturating_add(other_hits);
+        if total_known_hits == 0 {
+            return None;
+        }
+        let kind_share_bps = kind_hits.saturating_mul(10_000) / total_known_hits;
+        if kind_share_bps < SELECTOR_KIND_SHARE_BPS_MIN {
+            return None;
+        }
+        kind_ranked.sort_by_key(|(_, hits)| std::cmp::Reverse(*hits));
+        let bytecode_matches = kind_ranked
+            .iter()
+            .filter_map(|(selector, _)| parse_selector_hex(selector))
+            .filter(|selector| Self::bytecode_contains_selector(bytecode, *selector))
+            .count();
+        if bytecode_matches == 0 {
+            return None;
+        }
+        let kind_name = match kind {
+            RouterKind::V2Like => "v2",
+            RouterKind::V3Like => "v3",
+        };
+        let top = kind_ranked
+            .iter()
+            .take(3)
+            .map(|(selector, hits)| format!("{selector}:{hits}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        Some(RouterClassification {
+            kind,
+            note: format!(
+                "{note_prefix}:kind={kind_name} known_hits={kind_hits} distinct={} share_bps={kind_share_bps} bytecode_matches={bytecode_matches} top={top}",
+                kind_ranked.len()
+            ),
+        })
+    }
+
+    fn selectors_for_kind(kind: RouterKind) -> &'static [[u8; 4]] {
+        match kind {
+            RouterKind::V2Like => V2_ROUTER_SELECTORS,
+            RouterKind::V3Like => V3_ROUTER_SELECTORS,
+        }
+    }
+
+    fn count_matching_selectors(bytecode: &[u8], selectors: &[[u8; 4]]) -> usize {
+        selectors
+            .iter()
+            .filter(|selector| Self::bytecode_contains_selector(bytecode, **selector))
+            .count()
+    }
+
+    fn bytecode_contains_selector(bytecode: &[u8], selector: [u8; 4]) -> bool {
+        if bytecode.len() < 5 {
+            return false;
+        }
+        for idx in 0..=bytecode.len() - 5 {
+            if bytecode[idx] == 0x63 && bytecode[idx + 1..idx + 5] == selector {
+                return true;
+            }
+        }
+        false
     }
 
     async fn collect_recent_selectors(
@@ -576,64 +710,66 @@ impl RouterDiscovery {
 
     fn selector_kind(selector: &str) -> Option<RouterKind> {
         let parsed = parse_selector_hex(selector)?;
-        if matches!(
-            parsed,
-            UniversalRouter::executeCall::SELECTOR
-                | UniversalRouterDeadline::executeCall::SELECTOR
-                | UniV3Router::exactInputCall::SELECTOR
-                | UniV3Router::exactInputSingleCall::SELECTOR
-                | UniV3Router::exactOutputCall::SELECTOR
-                | UniV3Router::exactOutputSingleCall::SELECTOR
-                | UniV3Multicall::multicallCall::SELECTOR
-                | UniV3MulticallDeadline::multicallCall::SELECTOR
-        ) {
+        if V3_ROUTER_SELECTORS.contains(&parsed) {
             return Some(RouterKind::V3Like);
         }
-        if matches!(
-            parsed,
-            UniV2Router::swapExactETHForTokensCall::SELECTOR
-                | UniV2Router::swapETHForExactTokensCall::SELECTOR
-                | UniV2Router::swapExactTokensForETHCall::SELECTOR
-                | UniV2Router::swapTokensForExactETHCall::SELECTOR
-                | UniV2Router::swapExactTokensForTokensCall::SELECTOR
-                | UniV2Router::swapTokensForExactTokensCall::SELECTOR
-                | UniV2Router::swapExactETHForTokensSupportingFeeOnTransferTokensCall::SELECTOR
-                | UniV2Router::swapExactTokensForETHSupportingFeeOnTransferTokensCall::SELECTOR
-                | UniV2Router::swapExactTokensForTokensSupportingFeeOnTransferTokensCall::SELECTOR
-                | OneInchAggregationRouter::swapCall::SELECTOR
-                | OneInchAggregationRouterV5::swapCall::SELECTOR
-                | ParaSwapAugustusV6::swapExactAmountInCall::SELECTOR
-                | ParaSwapAugustusV6::swapExactAmountOutCall::SELECTOR
-                | KyberAggregationRouterV2::swapCall::SELECTOR
-                | KyberAggregationRouterV2::swapGenericCall::SELECTOR
-                | KyberAggregationRouterV2::swapSimpleModeCall::SELECTOR
-                | ZeroXExchangeProxy::transformERC20Call::SELECTOR
-                | DexRouter::dagSwapByOrderIdCall::SELECTOR
-                | DexRouter::dagSwapToCall::SELECTOR
-                | DexRouter::smartSwapByOrderIdCall::SELECTOR
-                | DexRouter::smartSwapToCall::SELECTOR
-                | DexRouter::smartSwapByInvestCall::SELECTOR
-                | DexRouter::smartSwapByInvestWithRefundCall::SELECTOR
-                | DexRouter::swapWrapToWithBaseRequestCall::SELECTOR
-                | DexRouter::uniswapV3SwapToWithBaseRequestCall::SELECTOR
-                | DexRouter::unxswapToWithBaseRequestCall::SELECTOR
-                | TransitSwapRouterV5::exactInputV2SwapCall::SELECTOR
-                | TransitSwapRouterV5::exactInputV2SwapAndGasUsedCall::SELECTOR
-                | TransitSwapRouterV5::exactInputV3SwapCall::SELECTOR
-                | TransitSwapRouterV5::exactInputV3SwapAndGasUsedCall::SELECTOR
-                | RelayRouterV3::multicallCall::SELECTOR
-                | RelayApprovalProxyV3::transferAndMulticallCall::SELECTOR
-                | RelayApprovalProxyV3::permitTransferAndMulticallCall::SELECTOR
-                | RelayApprovalProxyV3::permit3009TransferAndMulticallCall::SELECTOR
-                | RelayApprovalProxyV3::permit2TransferAndMulticallCall::SELECTOR
-                | BalancerVault::swapCall::SELECTOR
-                | BalancerVault::batchSwapCall::SELECTOR
-        ) {
+        if V2_ROUTER_SELECTORS.contains(&parsed) {
             return Some(RouterKind::V2Like);
         }
         None
     }
 }
+
+const V3_ROUTER_SELECTORS: &[[u8; 4]] = &[
+    UniversalRouter::executeCall::SELECTOR,
+    UniversalRouterDeadline::executeCall::SELECTOR,
+    UniV3Router::exactInputCall::SELECTOR,
+    UniV3Router::exactInputSingleCall::SELECTOR,
+    UniV3Router::exactOutputCall::SELECTOR,
+    UniV3Router::exactOutputSingleCall::SELECTOR,
+    UniV3Multicall::multicallCall::SELECTOR,
+    UniV3MulticallDeadline::multicallCall::SELECTOR,
+];
+
+const V2_ROUTER_SELECTORS: &[[u8; 4]] = &[
+    UniV2Router::swapExactETHForTokensCall::SELECTOR,
+    UniV2Router::swapETHForExactTokensCall::SELECTOR,
+    UniV2Router::swapExactTokensForETHCall::SELECTOR,
+    UniV2Router::swapTokensForExactETHCall::SELECTOR,
+    UniV2Router::swapExactTokensForTokensCall::SELECTOR,
+    UniV2Router::swapTokensForExactTokensCall::SELECTOR,
+    UniV2Router::swapExactETHForTokensSupportingFeeOnTransferTokensCall::SELECTOR,
+    UniV2Router::swapExactTokensForETHSupportingFeeOnTransferTokensCall::SELECTOR,
+    UniV2Router::swapExactTokensForTokensSupportingFeeOnTransferTokensCall::SELECTOR,
+    OneInchAggregationRouter::swapCall::SELECTOR,
+    OneInchAggregationRouterV5::swapCall::SELECTOR,
+    ParaSwapAugustusV6::swapExactAmountInCall::SELECTOR,
+    ParaSwapAugustusV6::swapExactAmountOutCall::SELECTOR,
+    KyberAggregationRouterV2::swapCall::SELECTOR,
+    KyberAggregationRouterV2::swapGenericCall::SELECTOR,
+    KyberAggregationRouterV2::swapSimpleModeCall::SELECTOR,
+    ZeroXExchangeProxy::transformERC20Call::SELECTOR,
+    DexRouter::dagSwapByOrderIdCall::SELECTOR,
+    DexRouter::dagSwapToCall::SELECTOR,
+    DexRouter::smartSwapByOrderIdCall::SELECTOR,
+    DexRouter::smartSwapToCall::SELECTOR,
+    DexRouter::smartSwapByInvestCall::SELECTOR,
+    DexRouter::smartSwapByInvestWithRefundCall::SELECTOR,
+    DexRouter::swapWrapToWithBaseRequestCall::SELECTOR,
+    DexRouter::uniswapV3SwapToWithBaseRequestCall::SELECTOR,
+    DexRouter::unxswapToWithBaseRequestCall::SELECTOR,
+    TransitSwapRouterV5::exactInputV2SwapCall::SELECTOR,
+    TransitSwapRouterV5::exactInputV2SwapAndGasUsedCall::SELECTOR,
+    TransitSwapRouterV5::exactInputV3SwapCall::SELECTOR,
+    TransitSwapRouterV5::exactInputV3SwapAndGasUsedCall::SELECTOR,
+    RelayRouterV3::multicallCall::SELECTOR,
+    RelayApprovalProxyV3::transferAndMulticallCall::SELECTOR,
+    RelayApprovalProxyV3::permitTransferAndMulticallCall::SELECTOR,
+    RelayApprovalProxyV3::permit3009TransferAndMulticallCall::SELECTOR,
+    RelayApprovalProxyV3::permit2TransferAndMulticallCall::SELECTOR,
+    BalancerVault::swapCall::SELECTOR,
+    BalancerVault::batchSwapCall::SELECTOR,
+];
 
 fn parse_selector_hex(raw: &str) -> Option<[u8; 4]> {
     let s = raw.trim();
@@ -694,6 +830,25 @@ mod tests {
         assert_eq!(
             RouterDiscovery::selector_kind(&v2_swap),
             Some(RouterKind::V2Like)
+        );
+    }
+
+    #[test]
+    fn bytecode_selector_scan_detects_push4_dispatch_entries() {
+        let known = UniV2Router::swapExactTokensForTokensCall::SELECTOR;
+        let unknown = [0xde, 0xad, 0xbe, 0xef];
+        let mut bytecode = vec![0x60, 0x00, 0x63];
+        bytecode.extend_from_slice(&known);
+        bytecode.extend_from_slice(&[0x14, 0x57, 0x5b, 0x00]);
+        assert!(RouterDiscovery::bytecode_contains_selector(
+            &bytecode, known
+        ));
+        assert!(!RouterDiscovery::bytecode_contains_selector(
+            &bytecode, unknown
+        ));
+        assert_eq!(
+            RouterDiscovery::count_matching_selectors(&bytecode, &[known]),
+            1
         );
     }
 }

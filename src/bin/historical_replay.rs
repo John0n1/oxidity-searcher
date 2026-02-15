@@ -128,6 +128,16 @@ struct WindowReport {
     suggestion: CalibrationSuggestion,
 }
 
+struct ReplayWindowInput<'a> {
+    window_index: usize,
+    start_block: u64,
+    end_block: u64,
+    known_routers: &'a HashSet<Address>,
+    include_unknown_routers: bool,
+    trace_cfg: TraceConfig,
+    trace_available: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 struct ReplaySummary {
     chain_id: u64,
@@ -164,7 +174,13 @@ struct ReplayReport {
 #[derive(Debug, Deserialize)]
 struct RpcEnvelope {
     result: Option<serde_json::Value>,
-    error: Option<serde_json::Value>,
+    error: Option<RpcErrorBody>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RpcErrorBody {
+    code: i64,
+    message: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -275,7 +291,8 @@ impl JsonRpcClient {
             .map_err(|e| AppError::Initialization(format!("RPC decode failed ({method}): {e}")))?;
         if let Some(err) = body.error {
             return Err(AppError::Initialization(format!(
-                "RPC returned error for {method}: {err}"
+                "RPC returned error for {method}: code={} message={}",
+                err.code, err.message
             )));
         }
         Ok(body.result.unwrap_or(serde_json::Value::Null))
@@ -317,8 +334,7 @@ impl JsonRpcClient {
         {
             Ok(result) => Ok(parse_debug_trace_result(&result)),
             Err(e) => {
-                let msg = e.to_string().to_lowercase();
-                if rpc_method_unavailable(&msg) {
+                if rpc_method_unavailable(&e) {
                     if fallback_eth_call {
                         return self.eth_call_fallback(tx, block_number).await;
                     }
@@ -370,7 +386,7 @@ impl JsonRpcClient {
                     || msg.contains("vm execution error")
                 {
                     TraceKind::Revert
-                } else if rpc_method_unavailable(&msg) {
+                } else if rpc_method_unavailable(&e) {
                     TraceKind::Unavailable
                 } else {
                     TraceKind::Error
@@ -435,17 +451,16 @@ async fn main() -> Result<(), AppError> {
 
     let mut reports = Vec::with_capacity(windows.len());
     for (idx, (w_start, w_end)) in windows.iter().copied().enumerate() {
-        let report = replay_window(
-            &rpc,
-            idx + 1,
-            w_start,
-            w_end,
-            &routers,
-            cli.include_unknown_routers,
+        let input = ReplayWindowInput {
+            window_index: idx + 1,
+            start_block: w_start,
+            end_block: w_end,
+            known_routers: &routers,
+            include_unknown_routers: cli.include_unknown_routers,
             trace_cfg,
             trace_available,
-        )
-        .await?;
+        };
+        let report = replay_window(&rpc, input).await?;
         if report.trace_unavailable > 0 {
             trace_available = false;
             tracing::warn!(
@@ -555,14 +570,18 @@ fn build_windows(start_block: u64, end_block: u64, window_size: u64) -> Vec<(u64
 
 async fn replay_window(
     rpc: &JsonRpcClient,
-    window_index: usize,
-    start_block: u64,
-    end_block: u64,
-    known_routers: &HashSet<Address>,
-    include_unknown_routers: bool,
-    trace_cfg: TraceConfig,
-    trace_available: bool,
+    input: ReplayWindowInput<'_>,
 ) -> Result<WindowReport, AppError> {
+    let ReplayWindowInput {
+        window_index,
+        start_block,
+        end_block,
+        known_routers,
+        include_unknown_routers,
+        trace_cfg,
+        trace_available,
+    } = input;
+
     let mut tx_total = 0u64;
     let mut tx_candidate = 0u64;
     let mut tx_decoded = 0u64;
@@ -995,12 +1014,31 @@ fn parse_debug_trace_result(value: &serde_json::Value) -> TraceSimSample {
     }
 }
 
-fn rpc_method_unavailable(msg: &str) -> bool {
+fn rpc_error_code(err: &AppError) -> Option<i64> {
+    let AppError::Initialization(msg) = err else {
+        return None;
+    };
+    let marker = "code=";
+    let start = msg.find(marker)?;
+    let tail = &msg[start + marker.len()..];
+    let code_token = tail
+        .split(|c: char| !(c.is_ascii_digit() || c == '-'))
+        .next()
+        .unwrap_or_default();
+    code_token.parse::<i64>().ok()
+}
+
+fn rpc_method_unavailable(err: &AppError) -> bool {
+    if matches!(rpc_error_code(err), Some(-32601)) {
+        return true;
+    }
+    let msg = err.to_string().to_lowercase();
     msg.contains("method not found")
         || msg.contains("does not exist/is not available")
         || msg.contains("unsupported")
         || msg.contains("missing value for required argument")
         || msg.contains("the method debug_tracecall does not exist")
+        || (msg.contains("namespace") && msg.contains("disabled"))
 }
 
 fn parse_u64_hex(s: &str) -> Option<u64> {

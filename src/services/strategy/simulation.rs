@@ -14,7 +14,9 @@ use alloy::rpc::types::eth::{
 };
 use alloy::rpc::types::trace::geth::{DefaultFrame, GethDebugTracingCallOptions};
 use alloy::sol_types::SolInterface;
+use alloy::transports::{RpcError as TransportRpcError, TransportError};
 use alloy_sol_types::{Revert, SolError};
+use serde_json::json;
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone)]
@@ -34,6 +36,14 @@ pub struct RpcCapabilities {
     pub eth_simulate: bool,
     pub debug_trace_call: bool,
     pub debug_trace_call_many: bool,
+    pub eth_simulate_shape_ok: bool,
+    pub debug_trace_call_many_shape_ok: bool,
+}
+
+#[derive(Clone, Debug)]
+struct RpcErrorInfo {
+    code: Option<i64>,
+    message: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,8 +155,7 @@ impl Simulator {
                 true
             }
             Err(e) => {
-                let msg = e.to_string().to_lowercase();
-                if rpc_method_unavailable(&msg) {
+                if rpc_method_unavailable(&e) {
                     let _ = ETH_SIMULATE_MISSING.set(());
                     tracing::warn!(
                         target: "simulation",
@@ -162,6 +171,36 @@ impl Simulator {
                     false
                 }
             }
+        }
+    }
+
+    async fn probe_eth_simulate_shape_internal(&self) -> bool {
+        let params = json!([
+            {
+                "blockStateCalls": [
+                    {
+                        "calls": [
+                            {
+                                "from": format!("{:#x}", Address::ZERO),
+                                "to": format!("{:#x}", Address::ZERO),
+                                "value": "0x0"
+                            }
+                        ]
+                    }
+                ],
+                "traceTransfers": false,
+                "validation": false,
+                "returnFullTransactions": false
+            },
+            "latest"
+        ]);
+        let result: Result<serde_json::Value, TransportError> = self
+            .provider
+            .raw_request("eth_simulateV1".into(), params)
+            .await;
+        match result {
+            Ok(value) => value.is_array(),
+            Err(e) => !rpc_method_unavailable(&e),
         }
     }
 
@@ -184,8 +223,7 @@ impl Simulator {
         {
             Ok(_) => true,
             Err(e) => {
-                let msg = e.to_string().to_lowercase();
-                if rpc_method_unavailable(&msg) {
+                if rpc_method_unavailable(&e) {
                     let _ = DEBUG_TRACE_MISSING.set(());
                     tracing::warn!(
                         target: "simulation",
@@ -201,6 +239,32 @@ impl Simulator {
                     false
                 }
             }
+        }
+    }
+
+    async fn probe_debug_trace_many_shape_internal(&self) -> bool {
+        let params = json!([
+            [
+                {
+                    "transactions": [
+                        {
+                            "from": format!("{:#x}", Address::ZERO),
+                            "to": format!("{:#x}", Address::ZERO),
+                            "value": "0x0"
+                        }
+                    ]
+                }
+            ],
+            "latest",
+            {}
+        ]);
+        let result: Result<serde_json::Value, TransportError> = self
+            .provider
+            .raw_request("debug_traceCallMany".into(), params)
+            .await;
+        match result {
+            Ok(value) => value.is_array(),
+            Err(e) => !rpc_method_unavailable(&e),
         }
     }
 
@@ -227,8 +291,7 @@ impl Simulator {
         {
             Ok(_) => true,
             Err(e) => {
-                let msg = e.to_string().to_lowercase();
-                if rpc_method_unavailable(&msg) {
+                if rpc_method_unavailable(&e) {
                     let _ = DEBUG_TRACE_MISSING.set(());
                     tracing::warn!(
                         target: "simulation",
@@ -259,12 +322,24 @@ impl Simulator {
         let eth_simulate = self.probe_eth_simulate_v1_internal().await;
         let debug_trace_call = self.probe_debug_trace_call_internal().await;
         let debug_trace_call_many = self.probe_debug_trace_many_internal().await;
+        let eth_simulate_shape_ok = if eth_simulate {
+            self.probe_eth_simulate_shape_internal().await
+        } else {
+            false
+        };
+        let debug_trace_call_many_shape_ok = if debug_trace_call_many {
+            self.probe_debug_trace_many_shape_internal().await
+        } else {
+            false
+        };
         tracing::info!(
             target: "simulation",
             fee_history,
             eth_simulate,
             debug_trace_call,
             debug_trace_call_many,
+            eth_simulate_shape_ok,
+            debug_trace_call_many_shape_ok,
             "RPC simulation capabilities"
         );
         RpcCapabilities {
@@ -272,6 +347,8 @@ impl Simulator {
             eth_simulate,
             debug_trace_call,
             debug_trace_call_many,
+            eth_simulate_shape_ok,
+            debug_trace_call_many_shape_ok,
         }
     }
 
@@ -350,18 +427,19 @@ impl Simulator {
                 }
             }
             Err(e) => {
-                let msg = e.to_string().to_lowercase();
-                if rpc_method_unavailable(&msg) {
+                let rpc_code = rpc_error_info(&e).code;
+                if rpc_method_unavailable(&e) {
                     if ETH_SIMULATE_MISSING.set(()).is_ok() {
                         tracing::warn!(
                             target: "simulation",
                             "eth_simulateV1 not available on node; falling back"
                         );
                     }
-                } else if rpc_insufficient_sender_balance(&msg) {
+                } else if rpc_insufficient_sender_balance(&e) {
                     tracing::debug!(
                         target: "simulation",
                         backend = "eth_simulate",
+                        rpc_code = rpc_code,
                         error = %e,
                         "simulate_request eth_simulate insufficient sender balance"
                     );
@@ -369,6 +447,7 @@ impl Simulator {
                     tracing::warn!(
                         target: "simulation",
                         backend = "eth_simulate",
+                        rpc_code = rpc_code,
                         error = %e,
                         "simulate_request eth_simulate failed"
                     );
@@ -405,8 +484,8 @@ impl Simulator {
                 }
             },
             Err(e) => {
-                let msg = e.to_string().to_lowercase();
-                if rpc_method_unavailable(&msg) {
+                let rpc_code = rpc_error_info(&e).code;
+                if rpc_method_unavailable(&e) {
                     if DEBUG_TRACE_MISSING.set(()).is_ok() {
                         tracing::warn!(
                             target: "simulation",
@@ -418,6 +497,7 @@ impl Simulator {
                     tracing::warn!(
                         target: "simulation",
                         backend = "debug_trace_call",
+                        rpc_code = rpc_code,
                         error = %e,
                         "debug_trace_call failed"
                     );
@@ -549,17 +629,18 @@ impl Simulator {
                 }
             }
             Err(e) => {
-                let msg = e.to_string().to_lowercase();
-                if rpc_method_unavailable(&msg) && ETH_SIMULATE_MISSING.set(()).is_ok() {
+                let rpc_code = rpc_error_info(&e).code;
+                if rpc_method_unavailable(&e) && ETH_SIMULATE_MISSING.set(()).is_ok() {
                     tracing::warn!(
                         target: "simulation",
                         "eth_simulateV1 unavailable for bundles; cached fallback"
                     );
                 }
-                if rpc_insufficient_sender_balance(&msg) {
+                if rpc_insufficient_sender_balance(&e) {
                     tracing::debug!(
                         target: "simulation",
                         backend = "eth_simulate",
+                        rpc_code = rpc_code,
                         error = %e,
                         "simulate_bundle_requests insufficient sender balance"
                     );
@@ -567,6 +648,7 @@ impl Simulator {
                     tracing::warn!(
                         target: "simulation",
                         backend = "eth_simulate",
+                        rpc_code = rpc_code,
                         error = %e,
                         "simulate_bundle_requests failed"
                     );
@@ -622,8 +704,8 @@ impl Simulator {
                 Ok(Some(outcomes))
             }
             Err(e) => {
-                let msg = e.to_string().to_lowercase();
-                if rpc_method_unavailable(&msg) && DEBUG_TRACE_MISSING.set(()).is_ok() {
+                let rpc_code = rpc_error_info(&e).code;
+                if rpc_method_unavailable(&e) && DEBUG_TRACE_MISSING.set(()).is_ok() {
                     tracing::warn!(
                         target: "simulation",
                         "debug_traceCallMany unavailable; cached fallback"
@@ -632,6 +714,7 @@ impl Simulator {
                 tracing::warn!(
                     target: "simulation",
                     backend = "debug_trace_call",
+                    rpc_code = rpc_code,
                     error = %e,
                     "debug_trace_call_many failed"
                 );
@@ -641,14 +724,68 @@ impl Simulator {
     }
 }
 
-fn rpc_method_unavailable(message: &str) -> bool {
-    let msg = message.to_lowercase();
+fn parse_rpc_error_from_text(text: &str) -> Option<RpcErrorInfo> {
+    let parsed: serde_json::Value = serde_json::from_str(text).ok()?;
+    if let Some(err) = parsed.get("error") {
+        let code = err.get("code").and_then(|v| v.as_i64());
+        let message = err
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        return Some(RpcErrorInfo { code, message });
+    }
+    let code = parsed.get("code").and_then(|v| v.as_i64());
+    let message = parsed
+        .get("message")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    Some(RpcErrorInfo { code, message })
+}
+
+fn rpc_error_info(err: &TransportError) -> RpcErrorInfo {
+    match err {
+        TransportRpcError::ErrorResp(payload) => RpcErrorInfo {
+            code: Some(payload.code),
+            message: payload.message.to_string(),
+        },
+        TransportRpcError::DeserError { text, .. } => parse_rpc_error_from_text(text)
+            .unwrap_or_else(|| RpcErrorInfo {
+                code: None,
+                message: err.to_string(),
+            }),
+        _ => RpcErrorInfo {
+            code: None,
+            message: err.to_string(),
+        },
+    }
+}
+
+fn rpc_method_unavailable(err: &TransportError) -> bool {
+    let info = rpc_error_info(err);
+    if matches!(info.code, Some(-32601)) {
+        return true;
+    }
+    rpc_method_unavailable_message(&info.message)
+}
+
+fn rpc_insufficient_sender_balance(err: &TransportError) -> bool {
+    let info = rpc_error_info(err);
+    if matches!(info.code, Some(-38014)) {
+        return true;
+    }
+    rpc_insufficient_sender_balance_message(&info.message)
+}
+
+fn rpc_method_unavailable_message(msg: &str) -> bool {
+    let msg = msg.to_lowercase();
     (msg.contains("method") && msg.contains("not found"))
         || (msg.contains("namespace") && msg.contains("disabled"))
 }
 
-fn rpc_insufficient_sender_balance(message: &str) -> bool {
-    let msg = message.to_lowercase();
+fn rpc_insufficient_sender_balance_message(msg: &str) -> bool {
+    let msg = msg.to_lowercase();
     (msg.contains("insufficient") && msg.contains("sender balance"))
         || msg.contains("insufficient maxfeepergas for sender balance")
         || msg.contains("error code -38014")
@@ -959,24 +1096,26 @@ mod tests {
 
     #[test]
     fn rpc_unavailable_detection_matches_nethermind_patterns() {
-        assert!(rpc_method_unavailable(
+        assert!(rpc_method_unavailable_message(
             "RPC error -32601: Method eth_simulateV1 not found"
         ));
-        assert!(rpc_method_unavailable(
+        assert!(rpc_method_unavailable_message(
             "RPC error -32600: Namespace debug is disabled"
         ));
-        assert!(!rpc_method_unavailable("execution reverted: custom error"));
+        assert!(!rpc_method_unavailable_message(
+            "execution reverted: custom error"
+        ));
     }
 
     #[test]
     fn insufficient_sender_balance_detection_matches_nethermind_patterns() {
-        assert!(rpc_insufficient_sender_balance(
+        assert!(rpc_insufficient_sender_balance_message(
             "error code -38014: insufficient MaxFeePerGas for sender balance"
         ));
-        assert!(rpc_insufficient_sender_balance(
+        assert!(rpc_insufficient_sender_balance_message(
             "insufficient sender balance for transaction"
         ));
-        assert!(!rpc_insufficient_sender_balance(
+        assert!(!rpc_insufficient_sender_balance_message(
             "execution reverted: custom error"
         ));
     }

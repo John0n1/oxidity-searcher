@@ -714,11 +714,7 @@ impl GlobalSettings {
     }
 
     pub fn chainlink_feed_conflict_strict_for_chain(&self, chain_id: u64) -> bool {
-        if chain_id == constants::CHAIN_ETHEREUM {
-            self.chainlink_feed_conflict_strict
-        } else {
-            false
-        }
+        chain_id == constants::CHAIN_ETHEREUM
     }
 
     pub fn chainlink_feed_audit_strict_for_chain(&self, chain_id: u64) -> bool {
@@ -1044,6 +1040,15 @@ mod tests {
     use super::*;
     use alloy::primitives::Address;
     use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock_guard() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
 
     fn base_settings() -> GlobalSettings {
         GlobalSettings {
@@ -1131,6 +1136,7 @@ mod tests {
 
     #[test]
     fn ws_lookup_does_not_use_ipc_entries() {
+        let _env_lock = env_lock_guard();
         let old_ws_1 = std::env::var("WS_URL_1").ok();
         let old_ws = std::env::var("WS_URL").ok();
         let old_websocket_1 = std::env::var("WEBSOCKET_URL_1").ok();
@@ -1171,6 +1177,7 @@ mod tests {
 
     #[test]
     fn mev_share_relay_url_prefers_config_value() {
+        let _env_lock = env_lock_guard();
         unsafe { std::env::remove_var("MEV_SHARE_RELAY_URL") };
         let mut settings = base_settings();
         settings.mev_share_relay_url = Some("https://relay.example".to_string());
@@ -1200,6 +1207,7 @@ mod tests {
 
     #[test]
     fn ipc_url_requires_explicit_config_or_env() {
+        let _env_lock = env_lock_guard();
         unsafe {
             std::env::remove_var("IPC_URL_1");
             std::env::remove_var("IPC_PATH_1");
@@ -1336,6 +1344,7 @@ mod tests {
 
     #[test]
     fn env_overrides_selected_profile_file_values() {
+        let _env_lock = env_lock_guard();
         let tmp = std::env::temp_dir().join(format!(
             "config-env-override-{}-{}.toml",
             std::process::id(),
@@ -1368,6 +1377,7 @@ wallet_address = "0x0000000000000000000000000000000000000001"
 
     #[test]
     fn chains_env_overrides_profile_file_even_when_selected() {
+        let _env_lock = env_lock_guard();
         let tmp = std::env::temp_dir().join(format!(
             "config-chains-env-override-{}-{}.toml",
             std::process::id(),

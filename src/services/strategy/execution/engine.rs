@@ -295,11 +295,21 @@ impl Engine {
                 target: "rpc",
                 "Nethermind eth_simulateV1 unavailable. Ensure Eth namespace is enabled and node version supports eth_simulateV1."
             );
+        } else if !capabilities.eth_simulate_shape_ok {
+            tracing::warn!(
+                target: "rpc",
+                "Nethermind eth_simulateV1 responded, but the expected parameter shape check failed; verify eth_simulateV1 payload semantics for this node version."
+            );
         }
         if !capabilities.debug_trace_call_many {
             tracing::warn!(
                 target: "rpc",
                 "Nethermind debug_traceCallMany unavailable. Ensure Debug/Trace namespaces are enabled for bundle-level tracing fallback."
+            );
+        } else if !capabilities.debug_trace_call_many_shape_ok {
+            tracing::warn!(
+                target: "rpc",
+                "Nethermind debug_traceCallMany responded, but the expected parameter shape check failed; verify callMany bundle payload semantics for this node version."
             );
         }
     }
@@ -339,6 +349,24 @@ impl Engine {
         {
             return Err(AppError::Config(
                 "rpc_capability_strict=true but neither eth_simulateV1 nor debug_traceCallMany is available"
+                    .into(),
+            ));
+        }
+        if self.rpc_capability_strict
+            && capabilities.eth_simulate
+            && !capabilities.eth_simulate_shape_ok
+        {
+            return Err(AppError::Config(
+                "rpc_capability_strict=true but eth_simulateV1 parameter-shape compatibility check failed"
+                    .into(),
+            ));
+        }
+        if self.rpc_capability_strict
+            && capabilities.debug_trace_call_many
+            && !capabilities.debug_trace_call_many_shape_ok
+        {
+            return Err(AppError::Config(
+                "rpc_capability_strict=true but debug_traceCallMany parameter-shape compatibility check failed"
                     .into(),
             ));
         }

@@ -6,6 +6,7 @@ use std::fs;
 use std::path::Path;
 
 const MIGRATIONS_DIR: &str = "migrations";
+const MIGRATIONS_LEGACY_DIR: &str = "migrations_legacy";
 
 fn normalize_ident(raw: &str) -> String {
     raw.trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == ';' || c == '(')
@@ -57,15 +58,9 @@ fn parse_alter_add_column_target(line: &str) -> Option<String> {
     Some(format!("column:{table}:{column}"))
 }
 
-#[test]
-fn migration_targets_are_not_duplicated() {
-    let allowed_historical_duplicates: BTreeSet<String> = ["table:nonce_state"]
-        .into_iter()
-        .map(String::from)
-        .collect();
-
-    let mut files: Vec<_> = fs::read_dir(Path::new(MIGRATIONS_DIR))
-        .expect("read migrations")
+fn duplicate_targets_for_dir(migrations_dir: &str) -> BTreeMap<String, Vec<String>> {
+    let mut files: Vec<_> = fs::read_dir(Path::new(migrations_dir))
+        .expect("read migrations dir")
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("sql"))
@@ -94,12 +89,29 @@ fn migration_targets_are_not_duplicated() {
             }
         }
     }
-
-    let duplicates: BTreeMap<String, Vec<String>> = seen
-        .into_iter()
+    seen.into_iter()
         .filter(|(_, files)| files.len() > 1)
-        .collect();
+        .collect()
+}
 
+#[test]
+fn active_migration_targets_are_not_duplicated() {
+    let duplicates = duplicate_targets_for_dir(MIGRATIONS_DIR);
+    assert!(
+        duplicates.is_empty(),
+        "Unexpected duplicate migration DDL targets in {}: {:?}",
+        MIGRATIONS_DIR,
+        duplicates
+    );
+}
+
+#[test]
+fn legacy_migration_targets_are_only_known_historical_duplicates() {
+    let allowed_historical_duplicates: BTreeSet<String> = ["table:nonce_state"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    let duplicates = duplicate_targets_for_dir(MIGRATIONS_LEGACY_DIR);
     let unexpected: Vec<(String, Vec<String>)> = duplicates
         .iter()
         .filter(|(target, _)| !allowed_historical_duplicates.contains(*target))
@@ -108,7 +120,8 @@ fn migration_targets_are_not_duplicated() {
 
     assert!(
         unexpected.is_empty(),
-        "Unexpected duplicate migration DDL targets: {:?}",
+        "Unexpected duplicate migration DDL targets in {}: {:?}",
+        MIGRATIONS_LEGACY_DIR,
         unexpected
     );
 }

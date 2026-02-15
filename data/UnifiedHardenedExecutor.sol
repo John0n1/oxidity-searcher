@@ -77,6 +77,8 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
     address public profitReceiver;
     bool public sweepProfitToEth;
     address private activeAavePool;
+    bool private balancerLoanActive;
+    bytes32 private balancerLoanContextHash;
 
     // --- Events ---
     event ArbitrageExecuted(uint256 surplus, address indexed token);
@@ -102,6 +104,8 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
     error OnlyPool();
     error InvalidPool();
     error InvalidAsset();
+    error BalancerLoanNotActive();
+    error BalancerLoanContextMismatch();
 
     /// @param _profitReceiver address to receive residual profits/ETH sweeps.
     constructor(address _profitReceiver) {
@@ -217,12 +221,20 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
             if (amounts[i] == 0) revert ZeroAssets();
         }
 
+        // Guard callback execution to this owner-initiated flashloan session only.
+        balancerLoanActive = true;
+        balancerLoanContextHash = keccak256(abi.encode(assets, amounts, params));
+
         IBalancerVault(BALANCER_VAULT).flashLoan(
             address(this),
             assets,
             amounts,
             params
         );
+
+        // Callback is synchronous; clear session guard after vault returns.
+        balancerLoanActive = false;
+        balancerLoanContextHash = bytes32(0);
     }
 
     /// @notice Initiate an Aave V3 simple flashloan. Params encoding matches Balancer path.
@@ -253,6 +265,15 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
         bytes memory userData
     ) external override {
         if (msg.sender != BALANCER_VAULT) revert OnlyVault();
+        if (!balancerLoanActive) revert BalancerLoanNotActive();
+
+        bytes32 callbackContext = keccak256(abi.encode(tokens, amounts, userData));
+        if (callbackContext != balancerLoanContextHash) revert BalancerLoanContextMismatch();
+
+        // Single-use session authorization to block nested/replayed callbacks.
+        balancerLoanActive = false;
+        balancerLoanContextHash = bytes32(0);
+
         // Basic length checks
         if (tokens.length != amounts.length || tokens.length != feeAmounts.length) {
             revert LengthMismatch();

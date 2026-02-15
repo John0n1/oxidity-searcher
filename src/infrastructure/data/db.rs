@@ -10,6 +10,8 @@ use sqlx::{
 };
 use std::str::FromStr;
 
+const SQUASHED_BASELINE_VERSION: i64 = 20260215000000;
+
 #[derive(Clone)]
 pub struct Database {
     pool: Pool<Sqlite>,
@@ -27,10 +29,43 @@ impl Database {
             .await
             .map_err(|e| AppError::Initialization(format!("DB Connect failed: {}", e)))?;
 
-        sqlx::migrate!("./migrations")
-            .run(&pool)
-            .await
-            .map_err(|e| AppError::Initialization(format!("DB Migration failed: {}", e)))?;
+        let has_migration_table = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(1) FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations'",
+        )
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| AppError::Initialization(format!("DB Migration introspection failed: {e}")))?
+            > 0;
+        let legacy_history_present = if has_migration_table {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(1) FROM _sqlx_migrations WHERE version < ?")
+                .bind(SQUASHED_BASELINE_VERSION)
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| {
+                    AppError::Initialization(format!("DB Migration history check failed: {e}"))
+                })?
+                > 0
+        } else {
+            false
+        };
+
+        if legacy_history_present {
+            tracing::info!(
+                target: "db",
+                "Detected legacy migration history; applying ./migrations_legacy plan"
+            );
+            sqlx::migrate!("./migrations_legacy")
+                .run(&pool)
+                .await
+                .map_err(|e| {
+                    AppError::Initialization(format!("DB legacy migration failed: {}", e))
+                })?;
+        } else {
+            sqlx::migrate!("./migrations")
+                .run(&pool)
+                .await
+                .map_err(|e| AppError::Initialization(format!("DB Migration failed: {}", e)))?;
+        }
 
         Ok(Self { pool })
     }

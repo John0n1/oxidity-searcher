@@ -57,6 +57,7 @@ async fn flashloan_builder_encodes_callbacks() {
     let gas_oracle = mitander_search::network::gas::GasOracle::new(http.clone(), 1);
     let price_feed = PriceFeed::new(
         http.clone(),
+        1,
         std::collections::HashMap::new(),
         mitander_search::network::price_feed::PriceApiKeys::default(),
     )
@@ -212,6 +213,7 @@ async fn flashloan_builder_uses_aave_selector() {
     let gas_oracle = mitander_search::network::gas::GasOracle::new(http.clone(), 1);
     let price_feed = PriceFeed::new(
         http.clone(),
+        1,
         std::collections::HashMap::new(),
         mitander_search::network::price_feed::PriceApiKeys::default(),
     )
@@ -349,6 +351,7 @@ async fn flashloan_builder_rejects_when_no_provider_available() {
     let gas_oracle = mitander_search::network::gas::GasOracle::new(http.clone(), 1);
     let price_feed = PriceFeed::new(
         http.clone(),
+        1,
         std::collections::HashMap::new(),
         mitander_search::network::price_feed::PriceApiKeys::default(),
     )

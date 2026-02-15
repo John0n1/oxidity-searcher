@@ -405,7 +405,7 @@ impl StrategyExecutor {
                 crate::services::strategy::risk::guards::StressProfile::Elevated => 10_800u64,
                 crate::services::strategy::risk::guards::StressProfile::High => 11_800u64,
             } as f64;
-            slippage = slippage * (stress_mult_bps / 10_000f64);
+            slippage *= stress_mult_bps / 10_000f64;
         }
         slippage.round().clamp(15.0, 500.0) as u64
     }
@@ -2079,7 +2079,7 @@ mod tests {
         let db = Database::new("sqlite::memory:").await.expect("db");
         let portfolio = Arc::new(PortfolioManager::new(http.clone(), Address::ZERO));
         let gas_oracle = GasOracle::new(http.clone(), 1);
-        let price_feed = PriceFeed::new(http.clone(), HashMap::new(), PriceApiKeys::default())
+        let price_feed = PriceFeed::new(http.clone(), 1, HashMap::new(), PriceApiKeys::default())
             .expect("price feed");
         let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
         let token_manager = Arc::new(TokenManager::default());

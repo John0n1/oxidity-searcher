@@ -20,6 +20,7 @@ use mitander_search::services::strategy::engine::Engine;
 use mitander_search::services::strategy::portfolio::PortfolioManager;
 use mitander_search::services::strategy::safety::SafetyGuard;
 use mitander_search::services::strategy::simulation::{SimulationBackend, Simulator};
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -49,6 +50,48 @@ struct Cli {
     /// Slippage basis points for crafted bundles
     #[arg(long)]
     slippage_bps: Option<u64>,
+}
+
+fn log_chainlink_feed_summary(chain_id: u64, feeds: &HashMap<String, alloy::primitives::Address>) {
+    let mut entries: Vec<(String, alloy::primitives::Address)> =
+        feeds.iter().map(|(k, v)| (k.to_uppercase(), *v)).collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let feed_count = entries.len();
+    let sample = entries
+        .iter()
+        .take(12)
+        .map(|(symbol, addr)| format!("{symbol}={addr:#x}"))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let critical_symbols = ["ETH", "BTC", "USDC", "USDT"];
+    let missing_critical: Vec<&str> = critical_symbols
+        .iter()
+        .copied()
+        .filter(|symbol| !feeds.contains_key(*symbol))
+        .collect();
+    let critical_summary = critical_symbols
+        .iter()
+        .filter_map(|symbol| feeds.get(*symbol).map(|addr| format!("{symbol}={addr:#x}")))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    tracing::info!(
+        target: "config",
+        chain_id,
+        feed_count,
+        critical = %critical_summary,
+        sample = %sample,
+        "Selected canonical Chainlink feeds"
+    );
+    if !missing_critical.is_empty() {
+        tracing::warn!(
+            target: "config",
+            chain_id,
+            missing = %missing_critical.join(","),
+            "Critical Chainlink symbols missing from selected feed set"
+        );
+    }
 }
 
 #[tokio::main]
@@ -173,10 +216,13 @@ async fn main() -> Result<(), AppError> {
             validate_address_map(&http_provider, chainlink_feeds_raw, "chainlink_feeds").await;
         if chainlink_feeds.is_empty() {
             tracing::warn!("No Chainlink feeds configured for chain {}", chain_id);
+        } else {
+            log_chainlink_feed_summary(chain_id, &chainlink_feeds);
         }
         let wrapped_native = mitander_search::common::constants::wrapped_native_for_chain(chain_id);
         let price_feed = PriceFeed::new(
             http_provider.clone(),
+            chain_id,
             chainlink_feeds,
             settings.price_api_keys(),
         )?;
