@@ -1,8 +1,0 @@
-000000000000000000000000000b26dbd077d5b726769e6f6fe6e1062f32248a
-
------Decoded View---------------
-Arg [0] : _profitReceiver (address): 0x000B26Dbd077d5b726769E6f6FE6e1062F32248A
-
------Encoded View---------------
-1 Constructor Arguments found :
-Arg [0] : 000000000000000000000000000b26dbd077d5b726769e6f6fe6e1062f32248a

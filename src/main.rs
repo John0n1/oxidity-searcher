@@ -128,7 +128,7 @@ async fn main() -> Result<(), AppError> {
 
     // Auto-detect chain if not explicitly configured
     let chains: Vec<u64> = if settings.chains.is_empty() {
-        if let Some(url) = settings.primary_http_url() {
+        if let Some(url) = settings.primary_http_provider() {
             let http = ConnectionFactory::http(&url)?;
             let cid_u64: u64 = http
                 .get_chain_id()
@@ -138,7 +138,7 @@ async fn main() -> Result<(), AppError> {
             vec![cid_u64]
         } else {
             return Err(AppError::Config(
-                "No chains configured and no RPC_URL available to auto-detect".into(),
+                "No chains configured and no http_provider available to auto-detect".into(),
             ));
         }
     } else {
@@ -174,24 +174,24 @@ async fn main() -> Result<(), AppError> {
     let mut engine_tasks = Vec::new();
 
     for (idx, chain_id) in chains.iter().copied().enumerate() {
-        let rpc_url = settings.get_rpc_url(chain_id)?;
-        let ipc_url = settings.get_ipc_url(chain_id);
-        let (ws_provider, http_provider) = if let Some(ipc_path) = ipc_url {
-            let ipc = ConnectionFactory::ipc(&ipc_path).await.map_err(|e| {
+        let http_provider_url = settings.get_http_provider(chain_id)?;
+        let ipc_provider = settings.get_ipc_provider(chain_id);
+        let (websocket_provider, http_provider) = if let Some(ipc_provider) = ipc_provider {
+            let ipc = ConnectionFactory::ipc(&ipc_provider).await.map_err(|e| {
                 AppError::Connection(format!(
-                    "IPC required for chain {chain_id} at {ipc_path} but failed: {e}"
+                    "IPC required for chain {chain_id} at {ipc_provider} but failed: {e}"
                 ))
             })?;
-            let ws_provider = match settings.get_ws_url(chain_id) {
+            let websocket_provider = match settings.get_websocket_provider(chain_id) {
                 Ok(url) => ConnectionFactory::ws(&url).await.unwrap_or_else(|e| {
                     tracing::warn!(target: "rpc", chain_id, error=%e, "WS unavailable, using IPC for streaming");
                     ipc.clone()
                 }),
                 Err(_) => ipc.clone(),
             };
-            (ws_provider, ipc)
+            (websocket_provider, ipc)
         } else {
-            let ws_url = match settings.get_ws_url(chain_id) {
+            let websocket_provider_url = match settings.get_websocket_provider(chain_id) {
                 Ok(url) => Some(url),
                 Err(e) => {
                     tracing::warn!(
@@ -203,7 +203,12 @@ async fn main() -> Result<(), AppError> {
                     None
                 }
             };
-            ConnectionFactory::preferred(None, ws_url.as_deref(), &rpc_url).await?
+            ConnectionFactory::preferred(
+                None,
+                websocket_provider_url.as_deref(),
+                &http_provider_url,
+            )
+            .await?
         };
 
         let portfolio = Arc::new(PortfolioManager::new(http_provider.clone(), wallet_address));
@@ -252,7 +257,7 @@ async fn main() -> Result<(), AppError> {
                 chain_id,
                 router_allowlist.clone(),
                 db.clone(),
-                Some(rpc_url.clone()),
+                Some(http_provider_url.clone()),
                 settings.etherscan_api_key_value(),
                 settings.router_discovery_enabled,
                 settings.router_discovery_auto_allow,
@@ -288,7 +293,7 @@ async fn main() -> Result<(), AppError> {
 
         let engine = Engine::new(
             http_provider,
-            ws_provider,
+            websocket_provider,
             db.clone(),
             nonce_manager,
             portfolio,

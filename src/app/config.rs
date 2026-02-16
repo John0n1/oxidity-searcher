@@ -42,9 +42,9 @@ pub struct GlobalSettings {
     pub executor_address: Option<Address>,
     #[serde(default = "default_true")]
     pub sandwich_attacks_enabled: bool,
-    pub rpc_urls: Option<HashMap<String, String>>,
-    pub ws_urls: Option<HashMap<String, String>>,
-    pub ipc_urls: Option<HashMap<String, String>>,
+    pub http_providers: Option<HashMap<String, String>>,
+    pub websocket_providers: Option<HashMap<String, String>>,
+    pub ipc_providers: Option<HashMap<String, String>>,
     pub chainlink_feeds: Option<HashMap<String, String>>, // Symbol -> aggregator address
     pub chainlink_feeds_path: Option<String>,
     pub aave_pools_by_chain: Option<HashMap<String, String>>,
@@ -326,9 +326,9 @@ impl GlobalSettings {
     }
 
     /// Best-effort primary HTTP RPC URL for chain auto-detection.
-    pub fn primary_http_url(&self) -> Option<String> {
+    pub fn primary_http_provider(&self) -> Option<String> {
         // Prefer explicit map entry with smallest key
-        if let Some(map) = &self.rpc_urls {
+        if let Some(map) = &self.http_providers {
             if let Some((_, v)) = map.iter().min_by_key(|(k, _)| k.parse::<u64>().ok()) {
                 return Some(v.clone());
             }
@@ -337,23 +337,30 @@ impl GlobalSettings {
             }
         }
         // Environment fallbacks
-        std::env::var("RPC_URL")
+        std::env::var("http_provider")
             .ok()
             .filter(|s| !s.is_empty())
-            .or_else(|| std::env::var("RPC_URL_1").ok().filter(|s| !s.is_empty()))
+            .or_else(|| {
+                std::env::var("http_provider_1")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            })
     }
 
     /// Helper to get RPC URL for a specific chain
-    pub fn get_rpc_url(&self, chain_id: u64) -> Result<String, AppError> {
+    pub fn get_http_provider(&self, chain_id: u64) -> Result<String, AppError> {
         // Try looking for explicit map
-        if let Some(urls) = &self.rpc_urls
+        if let Some(urls) = &self.http_providers
             && let Some(url) = urls.get(&chain_id.to_string())
         {
             return Ok(url.clone());
         }
 
-        // Fallback to env var convention: RPC_URL_1, RPC_URL_137, then generic RPC_URL
-        let candidates = [format!("RPC_URL_{}", chain_id), "RPC_URL".to_string()];
+        // Fallback to env var convention: http_provider_1, http_provider_137, then generic http_provider
+        let candidates = [
+            format!("http_provider_{}", chain_id),
+            "http_provider".to_string(),
+        ];
         for key in candidates {
             if let Ok(v) = std::env::var(&key) {
                 let trimmed = v.trim();
@@ -370,17 +377,17 @@ impl GlobalSettings {
     }
 
     /// Helper to get WS URL for a specific chain
-    pub fn get_ws_url(&self, chain_id: u64) -> Result<String, AppError> {
-        if let Some(urls) = &self.ws_urls
+    pub fn get_websocket_provider(&self, chain_id: u64) -> Result<String, AppError> {
+        if let Some(urls) = &self.websocket_providers
             && let Some(url) = urls.get(&chain_id.to_string())
         {
             return Ok(url.clone());
         }
 
         let candidates = [
-            format!("WS_URL_{}", chain_id),
+            format!("WEBSOCKET_PROVIDER_{}", chain_id),
             format!("WEBSOCKET_URL_{}", chain_id),
-            "WS_URL".to_string(),
+            "WEBSOCKET_PROVIDER".to_string(),
             "WEBSOCKET_URL".to_string(),
         ];
 
@@ -400,17 +407,17 @@ impl GlobalSettings {
     }
 
     /// Optional IPC URL for a specific chain, preferring explicit config and then env.
-    pub fn get_ipc_url(&self, chain_id: u64) -> Option<String> {
-        if let Some(urls) = &self.ipc_urls
+    pub fn get_ipc_provider(&self, chain_id: u64) -> Option<String> {
+        if let Some(urls) = &self.ipc_providers
             && let Some(url) = urls.get(&chain_id.to_string())
         {
             return Some(url.clone());
         }
 
         let candidates = [
-            format!("IPC_URL_{}", chain_id),
+            format!("IPC_PROVIDER_{}", chain_id),
             format!("IPC_PATH_{}", chain_id),
-            "IPC_URL".to_string(),
+            "IPC_PROVIDER".to_string(),
             "IPC_PATH".to_string(),
         ];
 
@@ -1064,9 +1071,9 @@ mod tests {
             flashloan_provider: default_flashloan_provider(),
             executor_address: None,
             sandwich_attacks_enabled: default_true(),
-            rpc_urls: None,
-            ws_urls: None,
-            ipc_urls: None,
+            http_providers: None,
+            websocket_providers: None,
+            ipc_providers: None,
             chainlink_feeds: None,
             chainlink_feeds_path: None,
             flashbots_relay_url: None,
@@ -1125,47 +1132,50 @@ mod tests {
     }
 
     #[test]
-    fn ipc_url_prefers_configured_map() {
+    fn ipc_provider_prefers_configured_map() {
         let mut settings = base_settings();
-        settings.ipc_urls = Some(HashMap::from([(
+        settings.ipc_providers = Some(HashMap::from([(
             "1".to_string(),
             "/tmp/test.ipc".to_string(),
         )]));
-        assert_eq!(settings.get_ipc_url(1).as_deref(), Some("/tmp/test.ipc"));
+        assert_eq!(
+            settings.get_ipc_provider(1).as_deref(),
+            Some("/tmp/test.ipc")
+        );
     }
 
     #[test]
     fn ws_lookup_does_not_use_ipc_entries() {
         let _env_lock = env_lock_guard();
-        let old_ws_1 = std::env::var("WS_URL_1").ok();
-        let old_ws = std::env::var("WS_URL").ok();
+        let old_ws_1 = std::env::var("WEBSOCKET_PROVIDER_1").ok();
+        let old_ws = std::env::var("WEBSOCKET_PROVIDER").ok();
         let old_websocket_1 = std::env::var("WEBSOCKET_URL_1").ok();
         let old_websocket = std::env::var("WEBSOCKET_URL").ok();
         unsafe {
-            std::env::remove_var("WS_URL_1");
-            std::env::remove_var("WS_URL");
+            std::env::remove_var("WEBSOCKET_PROVIDER_1");
+            std::env::remove_var("WEBSOCKET_PROVIDER");
             std::env::remove_var("WEBSOCKET_URL_1");
             std::env::remove_var("WEBSOCKET_URL");
         }
 
         let mut settings = base_settings();
-        settings.ipc_urls = Some(HashMap::from([(
+        settings.ipc_providers = Some(HashMap::from([(
             "1".to_string(),
             "/tmp/socket.ipc".to_string(),
         )]));
-        settings.ws_urls = None;
+        settings.websocket_providers = None;
 
-        let err = settings.get_ws_url(1).unwrap_err();
+        let err = settings.get_websocket_provider(1).unwrap_err();
         match err {
             AppError::Config(msg) => assert!(msg.contains("No WS URL")),
             other => panic!("Unexpected error variant: {other:?}"),
         }
 
         if let Some(v) = old_ws_1 {
-            unsafe { std::env::set_var("WS_URL_1", v) };
+            unsafe { std::env::set_var("WEBSOCKET_PROVIDER_1", v) };
         }
         if let Some(v) = old_ws {
-            unsafe { std::env::set_var("WS_URL", v) };
+            unsafe { std::env::set_var("WEBSOCKET_PROVIDER", v) };
         }
         if let Some(v) = old_websocket_1 {
             unsafe { std::env::set_var("WEBSOCKET_URL_1", v) };
@@ -1206,16 +1216,16 @@ mod tests {
     }
 
     #[test]
-    fn ipc_url_requires_explicit_config_or_env() {
+    fn ipc_provider_requires_explicit_config_or_env() {
         let _env_lock = env_lock_guard();
         unsafe {
-            std::env::remove_var("IPC_URL_1");
+            std::env::remove_var("IPC_PROVIDER_1");
             std::env::remove_var("IPC_PATH_1");
-            std::env::remove_var("IPC_URL");
+            std::env::remove_var("IPC_PROVIDER");
             std::env::remove_var("IPC_PATH");
         }
         let settings = base_settings();
-        assert!(settings.get_ipc_url(1).is_none());
+        assert!(settings.get_ipc_provider(1).is_none());
     }
 
     #[test]

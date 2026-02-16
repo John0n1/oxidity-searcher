@@ -68,12 +68,10 @@ interface IAaveFlashLoanSimpleReceiver {
 
 contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleReceiver {
     // --- Constants & State ---
-    // Mainnet Balancer vault; change on non-mainnet deployments.
-    address private constant BALANCER_VAULT = 0xBA12222222228d8Ba445958a75a0704d566BF2C8;
-    
     address public immutable owner;
-    // Mainnet WETH (hardcoded to avoid misconfiguration). Change and redeploy if using another chain.
-    address public constant WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
+    address public immutable WETH;
+    address private immutable BALANCER_VAULT;
+    
     address public profitReceiver;
     bool public sweepProfitToEth;
     address private activeAavePool;
@@ -108,13 +106,17 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
     error BalancerLoanContextMismatch();
 
     /// @param _profitReceiver address to receive residual profits/ETH sweeps.
-    constructor(address _profitReceiver) {
+    /// @param _weth address of Wrapped Ether (WETH) on this chain.
+    /// @param _balancerVault address of the Balancer V2 Vault on this chain.
+    constructor(address _profitReceiver, address _weth, address _balancerVault) {
         if (_profitReceiver == address(0)) revert InvalidProfitReceiver();
-        // Harden WETH check: ensure hardcoded WETH is actually a contract
-        if (WETH == address(0) || WETH.code.length == 0) revert InvalidWETHAddress();
+        // Harden WETH check: ensure WETH is actually a contract
+        if (_weth == address(0) || _weth.code.length == 0) revert InvalidWETHAddress();
         
         owner = msg.sender;
         profitReceiver = _profitReceiver;
+        WETH = _weth;
+        BALANCER_VAULT = _balancerVault;
         sweepProfitToEth = true; 
     }
 

@@ -141,7 +141,7 @@ struct ReplayWindowInput<'a> {
 #[derive(Clone, Debug, Serialize)]
 struct ReplaySummary {
     chain_id: u64,
-    rpc_url: String,
+    http_provider: String,
     start_block: u64,
     end_block: u64,
     window_size: u64,
@@ -249,16 +249,19 @@ struct TraceConfig {
 #[derive(Clone)]
 struct JsonRpcClient {
     client: Client,
-    rpc_url: String,
+    http_provider: String,
 }
 
 impl JsonRpcClient {
-    fn new(rpc_url: String) -> Result<Self, AppError> {
+    fn new(http_provider: String) -> Result<Self, AppError> {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| AppError::Initialization(format!("RPC client init failed: {e}")))?;
-        Ok(Self { client, rpc_url })
+        Ok(Self {
+            client,
+            http_provider,
+        })
     }
 
     async fn request(
@@ -274,7 +277,7 @@ impl JsonRpcClient {
         });
         let resp = self
             .client
-            .post(&self.rpc_url)
+            .post(&self.http_provider)
             .json(&payload)
             .send()
             .await
@@ -409,8 +412,8 @@ async fn main() -> Result<(), AppError> {
     setup_logging(if settings.debug { "debug" } else { "info" }, false);
 
     let chain_id = resolve_chain_id(&settings, cli.chain_id)?;
-    let rpc_url = settings.get_rpc_url(chain_id)?;
-    let rpc = JsonRpcClient::new(rpc_url.clone())?;
+    let http_provider = settings.get_http_provider(chain_id)?;
+    let rpc = JsonRpcClient::new(http_provider.clone())?;
 
     let latest = rpc.block_number().await?;
     let (start_block, end_block) = resolve_range(&cli, latest)?;
@@ -475,7 +478,7 @@ async fn main() -> Result<(), AppError> {
 
     let summary = summarize(
         chain_id,
-        &rpc_url,
+        &http_provider,
         start_block,
         end_block,
         cli.window_size,
@@ -739,7 +742,7 @@ async fn replay_window(
 
 fn summarize(
     chain_id: u64,
-    rpc_url: &str,
+    http_provider: &str,
     start_block: u64,
     end_block: u64,
     window_size: u64,
@@ -793,7 +796,7 @@ fn summarize(
 
     ReplaySummary {
         chain_id,
-        rpc_url: rpc_url.to_string(),
+        http_provider: http_provider.to_string(),
         start_block,
         end_block,
         window_size,

@@ -17,7 +17,9 @@ use tokio::sync::RwLock;
 
 const CACHE_TTL: u64 = 60; // Cache prices for 60 seconds
 const CHAINLINK_STALENESS_SECS: u64 = 600;
-const CHAINLINK_STALENESS_SECS_MAINNET_CRITICAL: u64 = 180;
+const CHAINLINK_STALENESS_SECS_MAINNET_CRITICAL_ETH: u64 = 3_600;
+const CHAINLINK_STALENESS_SECS_MAINNET_CRITICAL_BTC: u64 = 3_600;
+const CHAINLINK_STALENESS_SECS_MAINNET_CRITICAL_STABLE: u64 = 86_400;
 const STALE_CACHE_GRACE_SECS: u64 = 900; // Accept up to 15m old cache on failures
 const PROVIDER_WINDOW_SECS: u64 = 60; // per-provider RPM window
 const SOURCE_CRYPTOCOMPARE: &str = "cryptocompare";
@@ -29,6 +31,18 @@ fn is_mainnet_critical_symbol(symbol: &str) -> bool {
         symbol.to_uppercase().as_str(),
         "ETH" | "BTC" | "USDC" | "USDT"
     )
+}
+
+fn chainlink_staleness_threshold_secs(chain_id: u64, symbol: &str) -> u64 {
+    if chain_id != MAINNET_CHAIN_ID {
+        return CHAINLINK_STALENESS_SECS;
+    }
+    match symbol.to_uppercase().as_str() {
+        "ETH" => CHAINLINK_STALENESS_SECS_MAINNET_CRITICAL_ETH,
+        "BTC" => CHAINLINK_STALENESS_SECS_MAINNET_CRITICAL_BTC,
+        "USDC" | "USDT" => CHAINLINK_STALENESS_SECS_MAINNET_CRITICAL_STABLE,
+        _ => CHAINLINK_STALENESS_SECS,
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -187,11 +201,7 @@ impl PriceFeed {
             let age = now.saturating_sub(updated_at_secs);
             let is_critical_mainnet =
                 self.chain_id == MAINNET_CHAIN_ID && is_mainnet_critical_symbol(&symbol);
-            let threshold = if is_critical_mainnet {
-                CHAINLINK_STALENESS_SECS_MAINNET_CRITICAL
-            } else {
-                CHAINLINK_STALENESS_SECS
-            };
+            let threshold = chainlink_staleness_threshold_secs(self.chain_id, &symbol);
             if age > threshold {
                 let row = format!(
                     "{symbol}@{:#x}:age={}s threshold={}s critical_mainnet={}",
@@ -233,7 +243,6 @@ impl PriceFeed {
                     strict,
                     chain_id = self.chain_id,
                     issue = %row,
-                    critical_stale_threshold_secs = CHAINLINK_STALENESS_SECS_MAINNET_CRITICAL,
                     "Chainlink feed audit stale critical feed"
                 );
             }
@@ -739,11 +748,7 @@ impl PriceFeed {
             let age = now.saturating_sub(ts);
             let is_critical_mainnet =
                 self.chain_id == MAINNET_CHAIN_ID && is_mainnet_critical_symbol(&key);
-            let threshold = if is_critical_mainnet {
-                CHAINLINK_STALENESS_SECS_MAINNET_CRITICAL
-            } else {
-                CHAINLINK_STALENESS_SECS
-            };
+            let threshold = chainlink_staleness_threshold_secs(self.chain_id, &key);
             if age > threshold {
                 stale = true;
                 critical_stale = is_critical_mainnet;

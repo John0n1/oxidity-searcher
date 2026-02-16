@@ -36,7 +36,7 @@ const INGEST_QUEUE_BOUND: usize = 2048;
 
 pub struct Engine {
     http_provider: HttpProvider,
-    ws_provider: WsProvider,
+    websocket_provider: WsProvider,
     db: Database,
     nonce_manager: NonceManager,
     portfolio: Arc<PortfolioManager>,
@@ -94,7 +94,7 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         http_provider: HttpProvider,
-        ws_provider: WsProvider,
+        websocket_provider: WsProvider,
         db: Database,
         nonce_manager: NonceManager,
         portfolio: Arc<PortfolioManager>,
@@ -149,7 +149,7 @@ impl Engine {
     ) -> Self {
         Self {
             http_provider,
-            ws_provider,
+            websocket_provider,
             db,
             nonce_manager,
             portfolio,
@@ -269,7 +269,8 @@ impl Engine {
         }
         self.log_rpc_modules("http", &self.http_provider, false)
             .await;
-        self.log_rpc_modules("ws", &self.ws_provider, true).await;
+        self.log_rpc_modules("ws", &self.websocket_provider, true)
+            .await;
         client_version
     }
 
@@ -394,14 +395,14 @@ impl Engine {
             BundleSender::canonicalize_mevshare_builders(self.mevshare_builders.clone()).await;
 
         let mempool = MempoolScanner::new(
-            self.ws_provider.clone(),
+            self.websocket_provider.clone(),
             work_queue.clone(),
             stats.clone(),
             INGEST_QUEUE_BOUND,
             shutdown.clone(),
         );
         let block_listener = BlockListener::new(
-            self.ws_provider.clone(),
+            self.websocket_provider.clone(),
             block_sender.clone(),
             self.nonce_manager.clone(),
             shutdown.clone(),
@@ -533,7 +534,7 @@ impl Engine {
         }
         let reserve_listener = {
             let cache = reserve_cache.clone();
-            let ws_for_cache = self.ws_provider.clone();
+            let ws_for_cache = self.websocket_provider.clone();
             let reserve_shutdown = shutdown.clone();
             async move {
                 cache

@@ -15,8 +15,8 @@ struct RpcErrorBody {
     message: String,
 }
 
-fn nethermind_rpc_url() -> Option<String> {
-    std::env::var("NETHERMIND_RPC_URL")
+fn nethermind_http_provider() -> Option<String> {
+    std::env::var("NETHERMIND_http_provider")
         .ok()
         .filter(|v| !v.trim().is_empty())
 }
@@ -75,8 +75,8 @@ fn assert_shape_compatible(method: &str, resp: &RpcResponse) {
 
 #[tokio::test]
 async fn eth_simulate_v1_shape_matches_nethermind_expectations() {
-    let Some(url) = nethermind_rpc_url() else {
-        eprintln!("skipping eth_simulateV1 compat test: NETHERMIND_RPC_URL is not set");
+    let Some(url) = nethermind_http_provider() else {
+        eprintln!("skipping eth_simulateV1 compat test: NETHERMIND_http_provider is not set");
         return;
     };
     let client = Client::builder()
@@ -89,7 +89,7 @@ async fn eth_simulate_v1_shape_matches_nethermind_expectations() {
     assert_eq!(
         chain_id.as_deref(),
         Some("0x1"),
-        "NETHERMIND_RPC_URL must point to Ethereum mainnet"
+        "NETHERMIND_http_provider must point to Ethereum mainnet"
     );
 
     let params = json!([
@@ -118,8 +118,8 @@ async fn eth_simulate_v1_shape_matches_nethermind_expectations() {
 
 #[tokio::test]
 async fn debug_trace_call_many_shape_matches_nethermind_expectations() {
-    let Some(url) = nethermind_rpc_url() else {
-        eprintln!("skipping debug_traceCallMany compat test: NETHERMIND_RPC_URL is not set");
+    let Some(url) = nethermind_http_provider() else {
+        eprintln!("skipping debug_traceCallMany compat test: NETHERMIND_http_provider is not set");
         return;
     };
     let client = Client::builder()
@@ -132,7 +132,7 @@ async fn debug_trace_call_many_shape_matches_nethermind_expectations() {
     assert_eq!(
         chain_id.as_deref(),
         Some("0x1"),
-        "NETHERMIND_RPC_URL must point to Ethereum mainnet"
+        "NETHERMIND_http_provider must point to Ethereum mainnet"
     );
 
     let params = json!([

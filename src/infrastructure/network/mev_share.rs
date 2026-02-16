@@ -222,16 +222,19 @@ impl MevShareClient {
             };
             let chunk =
                 chunk.map_err(|e| AppError::Connection(format!("SSE chunk error: {}", e)))?;
-            let normalized = String::from_utf8_lossy(&chunk);
-            buffer.push_str(&normalized.replace("\r\n", "\n"));
+            
+            // Append chunk to buffer, being lossy with UTF-8 to prevent crashes on garbage data
+            let chunk_str = String::from_utf8_lossy(&chunk);
+            buffer.push_str(&chunk_str);
 
             while let Some(idx) = buffer.find("\n\n") {
-                let event = buffer[..idx].to_string();
-                buffer = buffer[idx + 2..].to_string();
+                let event_str = buffer[..idx].to_string();
+                // Advance buffer past the double newline
+                buffer.drain(..idx + 2);
 
                 let mut data_lines = Vec::new();
-                for line in event.lines() {
-                    let line = line.trim_end_matches('\r');
+                for line in event_str.lines() {
+                    let line = line.trim();
                     if line.starts_with(':') {
                         continue;
                     }
@@ -255,6 +258,12 @@ impl MevShareClient {
                         tracing::warn!(target: "mev_share", error=%e, "Failed to parse SSE data");
                     }
                 }
+            }
+            
+            // Safety cap: if buffer grows too large without finding \n\n, clear it to prevent OOM.
+            if buffer.len() > 1024 * 1024 {
+                tracing::warn!(target: "mev_share", len=buffer.len(), "Buffer too large without delimiter; clearing");
+                buffer.clear();
             }
         }
 
@@ -316,12 +325,15 @@ impl MevShareClient {
     fn convert_hint(&self, raw: RawTx) -> Option<MevShareHint> {
         let tx_hash = raw.hash.as_deref().and_then(parse_b256)?;
         let router = raw.to.as_deref().and_then(parse_address)?;
+        
+        // Fix: If chain_id is missing, assume it matches our stream (unwrap_or(true)).
         let chain_ok = raw
             .chain_id
             .as_deref()
             .and_then(parse_u64_hex)
             .map(|cid| cid == self.chain_id)
-            .unwrap_or(false);
+            .unwrap_or(true);
+            
         if !chain_ok {
             return None;
         }

@@ -32,10 +32,10 @@ use url::Url;
 async fn mev_share_v3_pipeline_manual() {
     use std::env;
 
-    let rpc = match env::var("RPC_URL_1") {
+    let rpc = match env::var("http_provider_1") {
         Ok(v) => v,
         Err(_) => {
-            eprintln!("skipping: set RPC_URL_1 / WEBSOCKET_URL_1 (Nethermind/Anvil)");
+            eprintln!("skipping: set http_provider_1 / WEBSOCKET_URL_1 (Nethermind/Anvil)");
             return;
         }
     };

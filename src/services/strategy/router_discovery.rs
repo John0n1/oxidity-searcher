@@ -26,7 +26,7 @@ pub struct RouterDiscovery {
     allowlist: Arc<DashSet<Address>>,
     db: Database,
     client: Client,
-    rpc_url: Option<String>,
+    http_provider: Option<String>,
     etherscan_api_key: Option<String>,
     enabled: bool,
     auto_allow: bool,
@@ -60,7 +60,7 @@ impl RouterDiscovery {
         chain_id: u64,
         allowlist: Arc<DashSet<Address>>,
         db: Database,
-        rpc_url: Option<String>,
+        http_provider: Option<String>,
         etherscan_api_key: Option<String>,
         enabled: bool,
         auto_allow: bool,
@@ -81,7 +81,7 @@ impl RouterDiscovery {
             allowlist,
             db,
             client,
-            rpc_url,
+            http_provider,
             etherscan_api_key,
             enabled,
             auto_allow,
@@ -613,7 +613,7 @@ impl RouterDiscovery {
         if candidates.is_empty() {
             return Ok(HashMap::new());
         }
-        let Some(_) = &self.rpc_url else {
+        let Some(_) = &self.http_provider else {
             return Ok(HashMap::new());
         };
 
@@ -670,7 +670,7 @@ impl RouterDiscovery {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, AppError> {
-        let Some(rpc_url) = &self.rpc_url else {
+        let Some(http_provider) = &self.http_provider else {
             return Err(AppError::Config(
                 "Router discovery RPC URL is not configured".into(),
             ));
@@ -683,7 +683,7 @@ impl RouterDiscovery {
         });
         let resp = self
             .client
-            .post(rpc_url)
+            .post(http_provider)
             .json(&payload)
             .send()
             .await
