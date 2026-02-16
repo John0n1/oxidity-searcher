@@ -2,6 +2,8 @@
 
 Mainnet-first MEV search and execution engine in Rust, designed to run against a locally synced **Ethereum mainnet Nethermind node**.
 
+[![CI](https://github.com/John0n1/oxidity-searcher/actions/workflows/ci.yml/badge.svg)](https://github.com/John0n1/oxidity-searcher/actions/workflows/ci.yml)
+
 `Mitander Search` ingests mempool and MEV-Share flow, decodes router interactions, applies risk/profit gates, simulates execution paths, and submits private bundles through Flashbots-compatible relays.
 
 ## Table of Contents
