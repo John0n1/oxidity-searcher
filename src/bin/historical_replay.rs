@@ -3,11 +3,11 @@
 
 use alloy::primitives::{Address, U256};
 use clap::Parser;
-use mitander_search::app::config::GlobalSettings;
-use mitander_search::app::logging::setup_logging;
-use mitander_search::domain::error::AppError;
-use mitander_search::infrastructure::data::db::Database;
-use mitander_search::services::strategy::decode::{RouterKind, decode_swap_input};
+use oxidity_searcher::app::config::GlobalSettings;
+use oxidity_searcher::app::logging::setup_logging;
+use oxidity_searcher::domain::error::AppError;
+use oxidity_searcher::infrastructure::data::db::Database;
+use oxidity_searcher::services::strategy::decode::{RouterKind, decode_swap_input};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;

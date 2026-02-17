@@ -1,11 +1,11 @@
 [package]
-name = "mitander-search"
+name = "oxidity-searcher"
 version = "0.1.1-delta"
 edition = "2024"
-authors = ["mitander.dev | John Hauger Mitander"]
-description = "mitander - MEV search"
-homepage = "https://build.mitander.dev/"
-repository = "https://github.com/John0n1/mitander-search"
+authors = ["https://mitander.dev | John Hauger Mitander"]
+description = "oxidity searcher"
+homepage = "https://searcher.mitander.dev/"
+repository = "https://github.com/John0n1/oxidity-searcher"
 license = "MIT"
 
 [dependencies]
@@ -42,7 +42,7 @@ crypto-common = "0.2.0"
 regex = "1.12.3"
 
 [package.metadata.deb]
-name = "mitander-search"
+name = "oxidity-searcher"
 
 [package.metadata.wix]
-product-name = "mitander-search"
+product-name = "oxidity-searcher"

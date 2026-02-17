@@ -8,21 +8,21 @@ use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolType;
 use alloy_sol_types::SolCall;
 use dashmap::DashSet;
-use mitander_search::common::constants::{CHAIN_ETHEREUM, wrapped_native_for_chain};
-use mitander_search::common::error::AppError;
-use mitander_search::core::executor::BundleSender;
-use mitander_search::core::portfolio::PortfolioManager;
-use mitander_search::core::safety::SafetyGuard;
-use mitander_search::core::simulation::{SimulationBackend, Simulator};
-use mitander_search::core::strategy::{FlashloanProvider, StrategyExecutor, StrategyStats};
-use mitander_search::data::db::Database;
-use mitander_search::data::executor::{FlashCallbackData, UnifiedHardenedExecutor};
-use mitander_search::network::gas::GasFees;
-use mitander_search::network::nonce::NonceManager;
-use mitander_search::network::price_feed::PriceFeed;
-use mitander_search::network::provider::HttpProvider;
-use mitander_search::network::reserves::ReserveCache;
-use mitander_search::services::strategy::execution::work_queue::WorkQueue;
+use oxidity_searcher::common::constants::{CHAIN_ETHEREUM, wrapped_native_for_chain};
+use oxidity_searcher::common::error::AppError;
+use oxidity_searcher::core::executor::BundleSender;
+use oxidity_searcher::core::portfolio::PortfolioManager;
+use oxidity_searcher::core::safety::SafetyGuard;
+use oxidity_searcher::core::simulation::{SimulationBackend, Simulator};
+use oxidity_searcher::core::strategy::{FlashloanProvider, StrategyExecutor, StrategyStats};
+use oxidity_searcher::data::db::Database;
+use oxidity_searcher::data::executor::{FlashCallbackData, UnifiedHardenedExecutor};
+use oxidity_searcher::network::gas::GasFees;
+use oxidity_searcher::network::nonce::NonceManager;
+use oxidity_searcher::network::price_feed::PriceFeed;
+use oxidity_searcher::network::provider::HttpProvider;
+use oxidity_searcher::network::reserves::ReserveCache;
+use oxidity_searcher::services::strategy::execution::work_queue::WorkQueue;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use url::Url;
@@ -54,17 +54,17 @@ async fn flashloan_builder_encodes_callbacks() {
     ));
     let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), bundle_signer.address()));
-    let gas_oracle = mitander_search::network::gas::GasOracle::new(http.clone(), 1);
+    let gas_oracle = oxidity_searcher::network::gas::GasOracle::new(http.clone(), 1);
     let price_feed = PriceFeed::new(
         http.clone(),
         1,
         std::collections::HashMap::new(),
-        mitander_search::network::price_feed::PriceApiKeys::default(),
+        oxidity_searcher::network::price_feed::PriceApiKeys::default(),
     )
     .expect("price feed");
     let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
     let token_manager =
-        Arc::new(mitander_search::infrastructure::data::token_manager::TokenManager::default());
+        Arc::new(oxidity_searcher::infrastructure::data::token_manager::TokenManager::default());
     let nonce_manager = NonceManager::new(http.clone(), bundle_signer.address());
     let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
     let router_allowlist = Arc::new(DashSet::<Address>::new());
@@ -210,17 +210,17 @@ async fn flashloan_builder_uses_aave_selector() {
     ));
     let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), bundle_signer.address()));
-    let gas_oracle = mitander_search::network::gas::GasOracle::new(http.clone(), 1);
+    let gas_oracle = oxidity_searcher::network::gas::GasOracle::new(http.clone(), 1);
     let price_feed = PriceFeed::new(
         http.clone(),
         1,
         std::collections::HashMap::new(),
-        mitander_search::network::price_feed::PriceApiKeys::default(),
+        oxidity_searcher::network::price_feed::PriceApiKeys::default(),
     )
     .expect("price feed");
     let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
     let token_manager =
-        Arc::new(mitander_search::infrastructure::data::token_manager::TokenManager::default());
+        Arc::new(oxidity_searcher::infrastructure::data::token_manager::TokenManager::default());
     let nonce_manager = NonceManager::new(http.clone(), bundle_signer.address());
     let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
     let router_allowlist = Arc::new(DashSet::<Address>::new());
@@ -348,17 +348,17 @@ async fn flashloan_builder_rejects_when_no_provider_available() {
     ));
     let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), bundle_signer.address()));
-    let gas_oracle = mitander_search::network::gas::GasOracle::new(http.clone(), 1);
+    let gas_oracle = oxidity_searcher::network::gas::GasOracle::new(http.clone(), 1);
     let price_feed = PriceFeed::new(
         http.clone(),
         1,
         std::collections::HashMap::new(),
-        mitander_search::network::price_feed::PriceApiKeys::default(),
+        oxidity_searcher::network::price_feed::PriceApiKeys::default(),
     )
     .expect("price feed");
     let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
     let token_manager =
-        Arc::new(mitander_search::infrastructure::data::token_manager::TokenManager::default());
+        Arc::new(oxidity_searcher::infrastructure::data::token_manager::TokenManager::default());
     let nonce_manager = NonceManager::new(http.clone(), bundle_signer.address());
     let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
     let router_allowlist = Arc::new(DashSet::<Address>::new());

@@ -162,7 +162,7 @@ Provider env key conventions in current code:
 
 ### Optional Runtime Paths and Persistence
 
-- `DATABASE_URL` (default `sqlite://mitander_search.db`)
+- `DATABASE_URL` (default `sqlite://oxidity_searcher.db`)
 - `TOKENLIST_PATH` (default `data/tokenlist.json`)
 - `ADDRESS_REGISTRY_PATH` (default `data/address_registry.json`)
 - `CHAINLINK_FEEDS_PATH` (default `data/chainlink_feeds.json`)

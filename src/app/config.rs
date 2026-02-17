@@ -460,7 +460,7 @@ impl GlobalSettings {
         std::env::var("DATABASE_URL")
             .ok()
             .or_else(|| self.database_url.clone())
-            .unwrap_or_else(|| "sqlite://mitander_search.db".to_string())
+            .unwrap_or_else(|| "sqlite://oxidity_searcher.db".to_string())
     }
 
     pub fn flashbots_relay_url(&self) -> String {
