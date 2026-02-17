@@ -1,10 +1,10 @@
-# Mitander Search
+# Oxidity Searcher
 
 Mainnet-first MEV search and execution engine in Rust, designed to run against a locally synced **Ethereum mainnet Nethermind node**.
 
 [![CI](https://github.com/John0n1/oxidity-searcher/actions/workflows/ci.yml/badge.svg)](https://github.com/John0n1/oxidity-searcher/actions/workflows/ci.yml)
 
-`Mitander Search` ingests mempool and MEV-Share flow, decodes router interactions, applies risk/profit gates, simulates execution paths, and submits private bundles through Flashbots-compatible relays.
+`Oxidity Searcher` ingests mempool and MEV-Share flow, decodes router interactions, applies risk/profit gates, simulates execution paths, and submits private bundles through Flashbots-compatible relays.
 
 ## Table of Contents
 
@@ -119,13 +119,13 @@ cp .env.example .env
 4. Dry-run first:
 
 ```bash
-cargo run --bin mitander-search -- --dry-run
+cargo run --bin oxidity-searcher -- --dry-run
 ```
 
 5. Run with selected config profile:
 
 ```bash
-cargo run --bin mitander-search -- --config config.prod.toml
+cargo run --bin oxidity-searcher -- --config config.prod.toml
 ```
 
 ## Configuration
@@ -228,20 +228,20 @@ Provider env key conventions in current code:
 Main runtime help:
 
 ```bash
-cargo run --bin mitander-search -- --help
+cargo run --bin oxidity-searcher -- --help
 ```
 
 Common runtime examples:
 
 ```bash
 # Dry-run (simulate and log only)
-cargo run --bin mitander-search -- --dry-run
+cargo run --bin oxidity-searcher -- --dry-run
 
 # Override slippage for one run
-cargo run --bin mitander-search -- --slippage-bps 30
+cargo run --bin oxidity-searcher -- --slippage-bps 30
 
 # Disable strategy execution (ingest-only mode)
-cargo run --bin mitander-search -- --no-strategy
+cargo run --bin oxidity-searcher --no-strategy
 ```
 
 Historical replay help:
@@ -348,7 +348,7 @@ Metrics server starts only when `METRICS_TOKEN` is non-empty.
 Use explicit binary selection:
 
 ```bash
-cargo run --bin mitander-search -- --help
+cargo run --bin oxidity-searcher -- --help
 cargo run --bin historical_replay -- --help
 ```
 
