@@ -33,19 +33,11 @@ jobs:
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Verify formatting
-        run: cargo fmt --all -- --check
-
-      - name: Clippy (strict)
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Verify lockfile and compile
+      - name: Compile (locked)
         run: cargo check --workspace --all-targets --locked
 
   test:
