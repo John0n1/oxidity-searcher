@@ -19,7 +19,6 @@ env:
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
 
-  # isolate cargo/rustup per job to avoid "file changed as we read it" during cache save
   CARGO_HOME: ${{ github.workspace }}/.cargo-home
   RUSTUP_HOME: ${{ github.workspace }}/.rustup
 
@@ -29,8 +28,18 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - name: Install rustup into workspace
+        run: |
+          set -euo pipefail
+          mkdir -p "$CARGO_HOME/bin"
+          if [ ! -x "$CARGO_HOME/bin/rustup" ]; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --no-modify-path --profile minimal
+          fi
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+          rustup --version
+          cargo -V
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -50,8 +59,19 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+
+      - name: Install rustup into workspace
+        run: |
+          set -euo pipefail
+          mkdir -p "$CARGO_HOME/bin"
+          if [ ! -x "$CARGO_HOME/bin/rustup" ]; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --no-modify-path --profile minimal
+          fi
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+          rustup --version
+          cargo -V
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
