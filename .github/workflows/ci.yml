@@ -19,6 +19,10 @@ env:
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
 
+  # isolate cargo/rustup per job to avoid "file changed as we read it" during cache save
+  CARGO_HOME: ${{ github.workspace }}/.cargo-home
+  RUSTUP_HOME: ${{ github.workspace }}/.rustup
+
 jobs:
   check:
     runs-on: [self-hosted, Linux, X64]
@@ -33,6 +37,9 @@ jobs:
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+        continue-on-error: true
 
       - name: Compile (locked)
         run: cargo check --workspace --all-targets --locked
@@ -51,6 +58,9 @@ jobs:
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+        continue-on-error: true
 
       - name: Run tests
         run: cargo test --workspace --locked --all-targets --all-features
