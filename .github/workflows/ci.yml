@@ -21,7 +21,7 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 20
 
     steps:
@@ -41,7 +41,7 @@ jobs:
         run: cargo check --workspace --all-targets --locked
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     needs: check
     timeout-minutes: 30
 
