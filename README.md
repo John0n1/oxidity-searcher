@@ -3,7 +3,6 @@
 Mainnet-first MEV search and execution engine in Rust, designed to run against a locally synced **Ethereum mainnet Nethermind node**.
 
 [![CI](https://github.com/John0n1/oxidity-searcher/actions/workflows/ci.yml/badge.svg)](https://github.com/John0n1/oxidity-searcher/actions/workflows/ci.yml)
-[![Tests](https://github.com/John0n1/oxidity-searcher/actions/workflows/ci.yml/badge.svg)](https://github.com/John0n1/oxidity-searcher/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/language-rust-orange?logo=rust\&style=flat-square)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
 
