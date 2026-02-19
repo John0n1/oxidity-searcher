@@ -965,12 +965,12 @@ impl StrategyExecutor {
             nonce_manager,
             slippage_bps,
             profit_guard_base_floor_multiplier_bps: profit_guard_base_floor_multiplier_bps
-                .clamp(1_000, 20_000),
+                .clamp(75, 20_000),
             profit_guard_cost_multiplier_bps: profit_guard_cost_multiplier_bps
-                .clamp(10_000, 20_000),
-            profit_guard_min_margin_bps: profit_guard_min_margin_bps.clamp(200, 5_000),
-            liquidity_ratio_floor_ppm: liquidity_ratio_floor_ppm.clamp(50, 10_000),
-            sell_min_native_out_wei: sell_min_native_out_wei.max(1_000_000_000_000),
+                .clamp(1_000, 20_000),
+            profit_guard_min_margin_bps: profit_guard_min_margin_bps.clamp(35, 5_000),
+            liquidity_ratio_floor_ppm: liquidity_ratio_floor_ppm.clamp(35, 10_000),
+            sell_min_native_out_wei: sell_min_native_out_wei.max(500_000_000_000),
             http_provider,
             dry_run,
             router_allowlist,
@@ -1625,7 +1625,7 @@ mod tests {
             floor_large > floor_small,
             "profit floor should scale with balance"
         );
-        assert!(floor_small >= U256::from(10_000_000_000_000_000u64));
+        assert!(floor_small >= U256::from(2_000_000_000_000_000u64));
     }
 
     #[test]

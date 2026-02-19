@@ -902,6 +902,27 @@ pub fn decode_flashloan_revert(revert_data: &[u8]) -> String {
             UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::InvalidAsset(_) => {
                 "🚫 Invalid flashloan asset".to_string()
             }
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::InvalidBalancerVault(_) => {
+                "🚫 Invalid Balancer vault address".to_string()
+            }
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::BalancerTokensNotSorted(e) => {
+                format!(
+                    "🚫 Balancer tokens must be sorted ascending (idx {}, prev {:?}, current {:?})",
+                    e.index, e.previous, e.current
+                )
+            }
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::BalancerLoanNotActive(_) => {
+                "🚫 Balancer callback without active loan".to_string()
+            }
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::BalancerLoanContextMismatch(
+                _,
+            ) => "🚫 Balancer callback context mismatch".to_string(),
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::BalancerCallbackNotReceived(
+                _,
+            ) => "🚫 Balancer callback not received (bad vault or no-op call)".to_string(),
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::AaveCallbackNotReceived(_) => {
+                "🚫 Aave callback not received (bad pool or no-op call)".to_string()
+            }
             _ => "Reverted with known custom error".to_string(),
         };
     }

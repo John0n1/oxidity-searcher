@@ -219,50 +219,50 @@ impl StrategyExecutor {
                 .saturating_mul(congestion)
                 / 10_000u64;
             let floor = match stress {
-                StressProfile::UltraLow => 9_500,
-                StressProfile::Low => 10_000,
-                StressProfile::Normal => 10_500,
-                StressProfile::Elevated => 11_250,
-                StressProfile::High => 12_000,
+                StressProfile::UltraLow => 9_000,
+                StressProfile::Low => 9_500,
+                StressProfile::Normal => 10_000,
+                StressProfile::Elevated => 10_750,
+                StressProfile::High => 11_500,
             };
-            dynamic.max(floor).clamp(8_500, 14_000)
+            dynamic.max(floor).clamp(8_000, 14_000)
         };
         let cost_floor_bps = {
             let extra = match stress {
-                StressProfile::UltraLow => 10_000,
-                StressProfile::Low => 10_100,
-                StressProfile::Normal => 10_300,
-                StressProfile::Elevated => 10_700,
-                StressProfile::High => 11_000,
+                StressProfile::UltraLow => 9_800,
+                StressProfile::Low => 9_950,
+                StressProfile::Normal => 10_150,
+                StressProfile::Elevated => 10_550,
+                StressProfile::High => 10_900,
             };
             let dynamic = self
                 .profit_guard_cost_multiplier_bps
-                .max(10_000)
+                .max(9_500)
                 .saturating_mul(extra)
                 / 10_000u64;
-            dynamic.clamp(10_000, 16_000)
+            dynamic.clamp(9_500, 16_000)
         };
         let min_margin_bps = {
             let dynamic = self.profit_guard_min_margin_bps.saturating_mul(congestion) / 10_000u64;
             let floor = match stress {
-                StressProfile::UltraLow => 600,
-                StressProfile::Low => 700,
-                StressProfile::Normal => 900,
-                StressProfile::Elevated => 1_100,
-                StressProfile::High => 1_300,
+                StressProfile::UltraLow => 450,
+                StressProfile::Low => 550,
+                StressProfile::Normal => 750,
+                StressProfile::Elevated => 950,
+                StressProfile::High => 1_150,
             };
-            dynamic.max(floor).clamp(300, 3_000)
+            dynamic.max(floor).clamp(200, 3_000)
         };
         let liquidity_ratio_floor_ppm = {
             let dynamic = self.liquidity_ratio_floor_ppm.saturating_mul(congestion) / 10_000u64;
             let floor = match stress {
-                StressProfile::UltraLow => 650,
-                StressProfile::Low => 700,
-                StressProfile::Normal => 850,
-                StressProfile::Elevated => 1_000,
-                StressProfile::High => 1_150,
+                StressProfile::UltraLow => 450,
+                StressProfile::Low => 550,
+                StressProfile::Normal => 700,
+                StressProfile::Elevated => 850,
+                StressProfile::High => 1_000,
             };
-            dynamic.max(floor).clamp(300, 1_800)
+            dynamic.max(floor).clamp(220, 1_800)
         };
         CalibratedRiskProfile {
             stress,
@@ -312,7 +312,7 @@ impl StrategyExecutor {
             );
         let gas_ref = U256::from(170_000u64).saturating_mul(U256::from(fee));
         let dynamic_floor = gas_ref
-            .saturating_mul(U256::from(30u64))
+            .saturating_mul(U256::from(25u64))
             .checked_div(U256::from(100u64))
             .unwrap_or(gas_ref);
         scaled_base.max(dynamic_floor)
@@ -615,6 +615,15 @@ impl StrategyExecutor {
 
     pub(crate) fn backrun_divisors(wallet_balance: U256) -> (u64, u64) {
         let eth_balance = Self::balance_to_eth_f64(wallet_balance).max(0.0001);
+        // Low-balance wallets were previously over-capped (often wallet/6), producing
+        // tiny opportunities that fail the gas-vs-gross gate. Relax divisors so backrun
+        // sizing can reach profitable notional while still reserving gas headroom.
+        if eth_balance < 0.01 {
+            return (3, 4);
+        }
+        if eth_balance < 0.03 {
+            return (3, 5);
+        }
         let raw = 6.0 - 2.0 * (eth_balance * 100.0 + 1.0).log10();
         let max_div = raw.round().clamp(2.0, 6.0) as u64;
         let gas_div = if max_div <= 2 {

@@ -576,23 +576,23 @@ impl GlobalSettings {
 
     pub fn profit_guard_base_floor_multiplier_bps_value(&self) -> u64 {
         self.profit_guard_base_floor_multiplier_bps
-            .clamp(1_000, 20_000)
+            .clamp(75, 20_000)
     }
 
     pub fn profit_guard_cost_multiplier_bps_value(&self) -> u64 {
-        self.profit_guard_cost_multiplier_bps.clamp(10_000, 20_000)
+        self.profit_guard_cost_multiplier_bps.clamp(1_000, 20_000)
     }
 
     pub fn profit_guard_min_margin_bps_value(&self) -> u64 {
-        self.profit_guard_min_margin_bps.clamp(200, 5_000)
+        self.profit_guard_min_margin_bps.clamp(35, 5_000)
     }
 
     pub fn liquidity_ratio_floor_ppm_value(&self) -> u64 {
-        self.liquidity_ratio_floor_ppm.clamp(50, 10_000)
+        self.liquidity_ratio_floor_ppm.clamp(35, 10_000)
     }
 
     pub fn sell_min_native_out_wei_value(&self) -> u64 {
-        self.sell_min_native_out_wei.max(1_000_000_000_000)
+        self.sell_min_native_out_wei.max(500_000_000_000)
     }
 
     pub fn skip_log_every_value(&self) -> u64 {

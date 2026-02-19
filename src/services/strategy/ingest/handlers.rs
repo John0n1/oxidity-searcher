@@ -4,12 +4,14 @@
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
 use crate::core::executor::BundleItem;
+use crate::data::executor::UnifiedHardenedExecutor;
 use crate::network::gas::GasFees;
 use crate::network::mev_share::MevShareHint;
 use crate::network::price_feed::PriceQuote;
 use crate::services::strategy::bundles::BundlePlan;
 use crate::services::strategy::decode::{
     ObservedSwap, RouterKind, SwapDirection, decode_swap, decode_swap_input, direction,
+    extract_swap_deadline,
     target_token,
 };
 use crate::services::strategy::planning::bundles::NonceLease;
@@ -25,6 +27,7 @@ use alloy::primitives::TxKind;
 use alloy::primitives::{Address, B256, U256};
 use alloy::rpc::types::eth::state::StateOverridesBuilder;
 use alloy::rpc::types::eth::{Transaction, TransactionInput, TransactionRequest};
+use alloy_sol_types::SolCall;
 
 impl StrategyExecutor {
     fn required_wallet_upfront_wei(
@@ -82,21 +85,21 @@ impl StrategyExecutor {
         // Start from both external hint and local rolling probe stats.
         let mut estimate = gas_limit_hint.max(self.probe_gas_limit(observed_swap.router));
         let router_floor = match observed_swap.router_kind {
-            RouterKind::V2Like => 170_000u64,
-            RouterKind::V3Like => 200_000u64,
+            RouterKind::V2Like => 130_000u64,
+            RouterKind::V3Like => 150_000u64,
         };
         estimate = estimate.max(router_floor);
         if allow_front_run {
-            estimate = estimate.saturating_add(90_000);
+            estimate = estimate.saturating_add(60_000);
         }
         if has_wrapped && self.flashloan_enabled && self.has_usable_flashloan_provider() {
-            estimate = estimate.saturating_add(70_000);
+            estimate = estimate.saturating_add(45_000);
         }
         let with_headroom = estimate
-            .saturating_mul(110)
+            .saturating_mul(105)
             .checked_div(100)
             .unwrap_or(estimate);
-        with_headroom.clamp(140_000, 650_000)
+        with_headroom.clamp(120_000, 500_000)
     }
 
     fn adaptive_min_bundle_gas_from_plan(
@@ -115,7 +118,7 @@ impl StrategyExecutor {
                 .request
                 .gas
                 .unwrap_or(70_000)
-                .clamp(45_000, 130_000);
+                .clamp(40_000, 90_000);
             planned = planned.saturating_add(gas);
         }
 
@@ -124,24 +127,24 @@ impl StrategyExecutor {
                 .request
                 .gas
                 .unwrap_or(gas_limit_hint)
-                .clamp(80_000, 380_000);
+                .clamp(70_000, 280_000);
             planned = planned.saturating_add(gas);
         }
 
         let main_req = executor_request.as_ref().unwrap_or(&backrun.request);
         let main_default = gas_limit_hint.max(self.probe_gas_limit(backrun.to));
-        let main_gas = main_req.gas.unwrap_or(main_default).clamp(120_000, 750_000);
+        let main_gas = main_req.gas.unwrap_or(main_default).clamp(100_000, 500_000);
         planned = planned.saturating_add(main_gas);
 
         if backrun.uses_flashloan {
-            planned = planned.saturating_add(backrun.flashloan_overhead_gas.max(80_000));
+            planned = planned.saturating_add(backrun.flashloan_overhead_gas.max(50_000));
         }
 
         let with_headroom = planned
-            .saturating_mul(110)
+            .saturating_mul(105)
             .checked_div(100)
             .unwrap_or(planned);
-        with_headroom.max(baseline_gas).clamp(150_000, 900_000)
+        with_headroom.max(baseline_gas).clamp(120_000, 650_000)
     }
 
     pub async fn process_work(self: std::sync::Arc<Self>, work: StrategyWork) {
@@ -377,6 +380,11 @@ impl StrategyExecutor {
                 ("non_wrapped_balance", skip_non_wrapped_balance),
                 ("unsupported_router", skip_unsupported_router),
             ];
+            let categorized_skips = skip_rows.iter().map(|(_, value)| *value).sum::<u64>();
+            let uncategorized_skips = skipped.saturating_sub(categorized_skips);
+            if uncategorized_skips > 0 {
+                skip_rows.push(("uncategorized_none", uncategorized_skips));
+            }
             skip_rows.sort_by(|a, b| b.1.cmp(&a.1));
 
             let submit_rate = pct_of(submitted, processed);
@@ -546,7 +554,7 @@ impl StrategyExecutor {
         observed_swap: &ObservedSwap,
     ) -> Option<(SwapDirection, Address)> {
         let has_wrapped = observed_swap.path.contains(&self.wrapped_native);
-        if observed_swap.amount_in.is_zero() || !has_wrapped {
+        if observed_swap.amount_in.is_zero() || (!has_wrapped && !self.allow_non_wrapped_swaps) {
             self.log_skip(
                 SkipReason::MissingWrappedOrZeroAmount,
                 "path missing wrapped native or zero amount",
@@ -577,24 +585,49 @@ impl StrategyExecutor {
         tx: &Transaction,
         received_at: std::time::Instant,
     ) -> Result<Option<String>, AppError> {
+        if let Some(deadline) = extract_swap_deadline(tx.input()) {
+            let now = crate::services::strategy::time_utils::current_unix();
+            if deadline <= now.saturating_add(2) {
+                self.log_skip(
+                    SkipReason::SimulationFailed,
+                    &format!("victim_deadline_passed deadline={deadline} now={now}"),
+                );
+                return Ok(None);
+            }
+        }
         let to_addr = match tx.kind() {
             TxKind::Call(addr) => addr,
-            TxKind::Create => return Ok(None),
+            TxKind::Create => {
+                self.log_skip(
+                    SkipReason::DecodeFailed,
+                    "tx_create_not_strategy_candidate",
+                );
+                return Ok(None);
+            }
         };
+        let observed_swap = decode_swap(tx);
 
         if !self.router_allowlist.contains(&to_addr) {
             if Self::is_common_token_call(tx.input()) {
-                self.log_skip(SkipReason::TokenCall, "erc20 transfer/approve");
+                // Plain ERC20 transfer/approve noise is not a strategy candidate.
+                self.log_skip(SkipReason::TokenCall, "erc20_transfer_or_approve_noise");
                 return Ok(None);
             }
             if let Some(discovery) = &self.router_discovery {
                 discovery.record_unknown_router(to_addr, "mempool");
             }
-            self.log_skip(SkipReason::UnknownRouter, &format!("to={to_addr:#x}"));
-            return Ok(None);
+            if observed_swap.is_none() {
+                self.log_skip(SkipReason::UnknownRouter, &format!("to={to_addr:#x}"));
+                return Ok(None);
+            }
+            tracing::debug!(
+                target: "strategy",
+                router = %format!("{to_addr:#x}"),
+                "Decoded swap on non-allowlisted router; evaluating opportunistically"
+            );
         }
 
-        let Some(observed_swap) = decode_swap(tx) else {
+        let Some(observed_swap) = observed_swap else {
             self.log_skip(SkipReason::DecodeFailed, "unable to decode swap input");
             return Ok(None);
         };
@@ -870,16 +903,34 @@ impl StrategyExecutor {
         hint: &MevShareHint,
         received_at: std::time::Instant,
     ) -> Result<Option<String>, AppError> {
+        if let Some(deadline) = extract_swap_deadline(&hint.call_data) {
+            let now = crate::services::strategy::time_utils::current_unix();
+            if deadline <= now.saturating_add(2) {
+                self.log_skip(
+                    SkipReason::SimulationFailed,
+                    &format!("hint_deadline_passed deadline={deadline} now={now}"),
+                );
+                return Ok(None);
+            }
+        }
+        let observed_swap = decode_swap_input(hint.router, &hint.call_data, hint.value);
+
         if !self.router_allowlist.contains(&hint.router) {
             if let Some(discovery) = &self.router_discovery {
                 discovery.record_unknown_router(hint.router, "mev_share");
             }
-            self.log_skip(SkipReason::UnknownRouter, &format!("to={:#x}", hint.router));
-            return Ok(None);
+            if observed_swap.is_none() {
+                self.log_skip(SkipReason::UnknownRouter, &format!("to={:#x}", hint.router));
+                return Ok(None);
+            }
+            tracing::debug!(
+                target: "strategy",
+                router = %format!("{:#x}", hint.router),
+                "Decoded MEV-Share swap on non-allowlisted router; evaluating opportunistically"
+            );
         }
 
-        let Some(observed_swap) = decode_swap_input(hint.router, &hint.call_data, hint.value)
-        else {
+        let Some(observed_swap) = observed_swap else {
             self.log_skip(SkipReason::DecodeFailed, "unable to decode swap input");
             return Ok(None);
         };
@@ -1265,7 +1316,7 @@ impl StrategyExecutor {
         }
 
         let has_wrapped = observed_swap.path.contains(&self.wrapped_native);
-        if !has_wrapped {
+        if !has_wrapped && !self.allow_non_wrapped_swaps {
             self.log_skip(
                 SkipReason::MissingWrappedOrZeroAmount,
                 "strict atomic mode requires wrapped-native path",
@@ -1311,7 +1362,8 @@ impl StrategyExecutor {
                 Ok(None) => {}
                 Err(e) => {
                     self.log_skip(SkipReason::FrontRunBuildFailed, &e.to_string());
-                    return Ok(None);
+                    // Keep candidate alive as backrun-only when sandwich leg cannot be built.
+                    front_run = None;
                 }
             }
         }
@@ -1379,9 +1431,12 @@ impl StrategyExecutor {
                 );
         }
         let use_flashloan = has_wrapped && flashloan_needed_for_plan && front_run.is_none();
-        // For sizing, flashloans can extend to wallet balance plus victim value instead of a fixed 10k override.
+        // Keep flashloan sizing near observed victim flow to reduce quote/build failures.
         let trade_balance = if use_flashloan {
-            wallet_chain_balance.saturating_add(victim_value)
+            let flashloan_floor = U256::from(5_000_000_000_000_000u128); // 0.005 ETH
+            wallet_chain_balance
+                .saturating_add(victim_value)
+                .max(flashloan_floor)
         } else {
             trade_balance
         };
@@ -1556,10 +1611,11 @@ impl StrategyExecutor {
             self.populate_access_list(req).await;
         }
         let override_state = overrides.build();
+        let simulation_requests = bundle_requests.clone();
         let bundle_sims = retry_async(
             move |_| {
                 let simulator = self.simulator.clone();
-                let requests = bundle_requests.clone();
+                let requests = simulation_requests.clone();
                 let overrides = override_state.clone();
                 async move {
                     simulator
@@ -1571,13 +1627,92 @@ impl StrategyExecutor {
             std::time::Duration::from_millis(100),
         )
         .await?;
-        if let Some(failure) = bundle_sims.iter().find(|o| !o.success) {
+        if let Some((failed_idx, failure)) =
+            bundle_sims.iter().enumerate().find(|(_, o)| !o.success)
+        {
             self.record_router_sim(router, false);
             let detail = failure
                 .reason
                 .clone()
                 .unwrap_or_else(|| "bundle sim returned failure".to_string());
+            let (
+                failed_to,
+                failed_gas,
+                failed_value,
+                failed_selector,
+                failed_flashloan_asset,
+                failed_flashloan_amount,
+                failed_is_last,
+            ) =
+                if let Some(req) = bundle_requests.get(failed_idx) {
+                    let to = match req.to.as_ref() {
+                        Some(alloy::primitives::TxKind::Call(addr)) => format!("{addr:#x}"),
+                        Some(alloy::primitives::TxKind::Create) => "create".to_string(),
+                        None => "none".to_string(),
+                    };
+                    let input = req.input.clone().into_input().unwrap_or_default();
+                    let selector = if input.len() >= 4 {
+                        format!("0x{}", hex::encode(&input[..4]))
+                    } else {
+                        "0x".to_string()
+                    };
+                    let mut flashloan_asset = "n/a".to_string();
+                    let mut flashloan_amount = U256::ZERO;
+                    if selector == "0x76ec49ba" {
+                        if let Ok(decoded) =
+                            UnifiedHardenedExecutor::executeFlashLoanCall::abi_decode(&input)
+                        {
+                            if let Some(asset) = decoded.assets.first().copied() {
+                                flashloan_asset = format!("{asset:#x}");
+                            }
+                            if let Some(amount) = decoded.amounts.first().copied() {
+                                flashloan_amount = amount;
+                            }
+                        }
+                    } else if selector == "0xba0eef35"
+                        && let Ok(decoded) = UnifiedHardenedExecutor::executeAaveFlashLoanSimpleCall::abi_decode(&input)
+                    {
+                        flashloan_asset = format!("{:#x}", decoded.asset);
+                        flashloan_amount = decoded.amount;
+                    }
+                    (
+                        to,
+                        req.gas.unwrap_or_default(),
+                        req.value.unwrap_or(U256::ZERO),
+                        selector,
+                        flashloan_asset,
+                        flashloan_amount,
+                        failed_idx + 1 == bundle_requests.len(),
+                    )
+                } else {
+                    (
+                        "unknown".to_string(),
+                        0u64,
+                        U256::ZERO,
+                        "0x".to_string(),
+                        "n/a".to_string(),
+                        U256::ZERO,
+                        false,
+                    )
+                };
             self.log_skip(SkipReason::SimulationFailed, &detail);
+            tracing::debug!(
+                target: "simulation",
+                fail_idx = failed_idx,
+                fail_to = %failed_to,
+                fail_gas = failed_gas,
+                fail_value = %failed_value,
+                fail_selector = %failed_selector,
+                flashloan_asset = %failed_flashloan_asset,
+                flashloan_amount = %failed_flashloan_amount,
+                fail_is_last = failed_is_last,
+                uses_flashloan = backrun.uses_flashloan,
+                exec_to = %format!("{:#x}", backrun.to),
+                router = %format!("{:#x}", router),
+                out_token = %format!("{:#x}", backrun.expected_out_token),
+                out_amount = %backrun.expected_out,
+                "bundle_sim_failure_context"
+            );
             return Ok(None);
         }
         self.record_router_sim(router, true);
@@ -1633,7 +1768,10 @@ impl StrategyExecutor {
         else {
             self.log_skip(
                 SkipReason::ProfitOrGasGuard,
-                "unpriced_settlement_token_out",
+                &format!(
+                    "unpriced_settlement_token_out token={:#x} amount={}",
+                    backrun.expected_out_token, backrun.expected_out
+                ),
             );
             return Ok(None);
         };

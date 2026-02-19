@@ -4,8 +4,8 @@
 // and transaction envelope we generate for the UnifiedHardenedExecutor.
 
 use alloy::primitives::{Address, Bytes, TxKind, U256};
+use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
-use alloy::sol_types::SolType;
 use alloy_sol_types::SolCall;
 use dashmap::DashSet;
 use oxidity_searcher::common::constants::{CHAIN_ETHEREUM, wrapped_native_for_chain};
@@ -176,7 +176,8 @@ async fn flashloan_builder_encodes_callbacks() {
     )
     .expect("decode envelope");
 
-    let inner = FlashCallbackData::abi_decode(&decoded.params).expect("decode params");
+    let inner = <FlashCallbackData as alloy_sol_types::SolValue>::abi_decode_params(&decoded.params)
+        .expect("decode params");
     assert_eq!(inner.targets.len(), callbacks.len());
     assert_eq!(inner.targets[0], callbacks[0].0);
     assert_eq!(inner.values[1], callbacks[1].2);
@@ -322,6 +323,107 @@ async fn flashloan_builder_uses_aave_selector() {
         selector,
         UnifiedHardenedExecutor::executeAaveFlashLoanSimpleCall::SELECTOR
     );
+}
+
+/// Live smoke check against a deployed executor on mainnet RPC.
+/// Run manually with:
+/// `cargo test live_executor_flashloan_smoke_mainnet -- --ignored --nocapture`
+#[tokio::test]
+#[ignore]
+async fn live_executor_flashloan_smoke_mainnet() {
+    let http = HttpProvider::new_http(Url::parse("http://127.0.0.1:8545").expect("rpc url"));
+    let owner: Address = "0x3Fe744D63be96C0081960D5d191F1f3BFE3a3bd8"
+        .parse()
+        .expect("owner");
+    let executor: Address = "0x019223bd084590c474fecdd45779b202b20c2b98"
+        .parse()
+        .expect("executor");
+    let weth = wrapped_native_for_chain(CHAIN_ETHEREUM);
+
+    let callback = FlashCallbackData {
+        targets: vec![],
+        values: vec![],
+        payloads: vec![],
+    };
+    let params = <FlashCallbackData as alloy_sol_types::SolValue>::abi_encode_params(&callback);
+
+    let call = UnifiedHardenedExecutor::executeFlashLoanCall {
+        assets: vec![weth],
+        // Minimal non-zero amount; if premium rounds to zero this should repay without swaps.
+        amounts: vec![U256::from(1u64)],
+        params: Bytes::from(params),
+    };
+    let calldata = call.abi_encode();
+    println!("balancer_flashloan_smoke_calldata=0x{}", hex::encode(&calldata));
+
+    let req = alloy::rpc::types::eth::TransactionRequest {
+        from: Some(owner),
+        to: Some(TxKind::Call(executor)),
+        gas: Some(3_000_000),
+        input: alloy::rpc::types::eth::TransactionInput::new(calldata.into()),
+        value: Some(U256::ZERO),
+        ..Default::default()
+    };
+
+    let res: Result<Bytes, _> = http.call(req).await;
+    println!("flashloan_smoke_result={res:?}");
+    assert!(res.is_ok(), "flashloan smoke call reverted");
+}
+
+/// Live smoke check for Aave simple flashloan entry on deployed executor.
+#[tokio::test]
+#[ignore]
+async fn live_executor_aave_smoke_mainnet() {
+    let http = HttpProvider::new_http(Url::parse("http://127.0.0.1:8545").expect("rpc url"));
+    let owner: Address = "0x3Fe744D63be96C0081960D5d191F1f3BFE3a3bd8"
+        .parse()
+        .expect("owner");
+    let executor: Address = "0x019223bd084590c474fecdd45779b202b20c2b98"
+        .parse()
+        .expect("executor");
+    let aave_pool: Address = "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"
+        .parse()
+        .expect("aave pool");
+    let weth = wrapped_native_for_chain(CHAIN_ETHEREUM);
+
+    let callback = FlashCallbackData {
+        targets: vec![],
+        values: vec![],
+        payloads: vec![],
+    };
+    let params = <FlashCallbackData as alloy_sol_types::SolValue>::abi_encode_params(&callback);
+    let call = UnifiedHardenedExecutor::executeAaveFlashLoanSimpleCall {
+        pool: aave_pool,
+        asset: weth,
+        amount: U256::from(1u64),
+        params: Bytes::from(params),
+    };
+    let calldata = call.abi_encode();
+    println!("aave_flashloan_smoke_calldata=0x{}", hex::encode(&calldata));
+
+    let req = alloy::rpc::types::eth::TransactionRequest {
+        from: Some(owner),
+        to: Some(TxKind::Call(executor)),
+        gas: Some(3_000_000),
+        input: alloy::rpc::types::eth::TransactionInput::new(calldata.into()),
+        value: Some(U256::ZERO),
+        ..Default::default()
+    };
+
+    let res: Result<Bytes, _> = http.call(req).await;
+    println!("aave_flashloan_smoke_result={res:?}");
+    match res {
+        Ok(_) => {}
+        Err(e) => {
+            // This smoke uses amount=1 and empty callbacks; Aave premium can make
+            // repayment impossible. That should surface as InsufficientFundsForRepayment.
+            let msg = format!("{e:?}");
+            assert!(
+                msg.contains("0x6756dd0a"),
+                "unexpected aave smoke revert: {msg}"
+            );
+        }
+    }
 }
 
 #[tokio::test]

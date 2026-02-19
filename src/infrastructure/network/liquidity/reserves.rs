@@ -759,7 +759,8 @@ impl ReserveCache {
         use_flashloan: bool,
         wrapped_native: Address,
     ) -> Vec<u8> {
-        let deadline = U256::from(current_unix().saturating_add(60));
+        // Give bundled execution enough time across relay delays and node clock drift.
+        let deadline = U256::from(current_unix().saturating_add(3600));
 
         let starts_with_wrapped = path.first().copied() == Some(wrapped_native);
         let ends_with_wrapped = path.last().copied() == Some(wrapped_native);

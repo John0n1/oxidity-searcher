@@ -78,6 +78,69 @@ sol! {
         bytes path;
         bool payerIsUser;
     }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
+    contract GenericMulticall {
+        function multicall(bytes[] calldata data) external payable returns (bytes[] memory results);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
+    contract GenericMulticallDeadline {
+        function multicall(uint256 deadline, bytes[] calldata data) external payable returns (bytes[] memory results);
+    }
+
+    struct AggregateCall {
+        address target;
+        bytes callData;
+    }
+
+    struct AggregateCall3 {
+        address target;
+        bool allowFailure;
+        bytes callData;
+    }
+
+    struct AggregateCall3Value {
+        address target;
+        bool allowFailure;
+        uint256 value;
+        bytes callData;
+    }
+
+    struct AggregateResult {
+        bool success;
+        bytes returnData;
+    }
+
+    #[sol(rpc)]
+    contract GenericAggregateMulticall {
+        function aggregate(AggregateCall[] calldata calls)
+            external
+            payable
+            returns (uint256 blockNumber, bytes[] memory returnData);
+        function tryAggregate(bool requireSuccess, AggregateCall[] calldata calls)
+            external
+            payable
+            returns (AggregateResult[] memory returnData);
+        function aggregate3(AggregateCall3[] calldata calls)
+            external
+            payable
+            returns (AggregateResult[] memory returnData);
+        function aggregate3Value(AggregateCall3Value[] calldata calls)
+            external
+            payable
+            returns (AggregateResult[] memory returnData);
+        function blockAndAggregate(AggregateCall[] calldata calls)
+            external
+            payable
+            returns (uint256 blockNumber, bytes32 blockHash, AggregateResult[] memory returnData);
+        function tryBlockAndAggregate(bool requireSuccess, AggregateCall[] calldata calls)
+            external
+            payable
+            returns (uint256 blockNumber, bytes32 blockHash, AggregateResult[] memory returnData);
+    }
 }
 
 pub fn decode_swap(tx: &Transaction) -> Option<ObservedSwap> {
@@ -90,6 +153,200 @@ pub fn decode_swap(tx: &Transaction) -> Option<ObservedSwap> {
 
 pub fn decode_swap_input(router: Address, input: &[u8], eth_value: U256) -> Option<ObservedSwap> {
     decode_swap_input_inner(router, input, eth_value, 0)
+}
+
+pub fn extract_swap_deadline(input: &[u8]) -> Option<u64> {
+    if input.len() < 4 {
+        return None;
+    }
+    let selector: [u8; 4] = input[..4].try_into().ok()?;
+    let as_u64 = |value: U256| -> Option<u64> {
+        if value > U256::from(u64::MAX) {
+            None
+        } else {
+            Some(value.to::<u64>())
+        }
+    };
+    match selector {
+        UniV2Router::swapExactETHForTokensCall::SELECTOR => {
+            let decoded = UniV2Router::swapExactETHForTokensCall::abi_decode(input).ok()?;
+            as_u64(decoded.deadline)
+        }
+        UniV2Router::swapETHForExactTokensCall::SELECTOR => {
+            let decoded = UniV2Router::swapETHForExactTokensCall::abi_decode(input).ok()?;
+            as_u64(decoded.deadline)
+        }
+        UniV2Router::swapExactTokensForETHCall::SELECTOR => {
+            let decoded = UniV2Router::swapExactTokensForETHCall::abi_decode(input).ok()?;
+            as_u64(decoded.deadline)
+        }
+        UniV2Router::swapTokensForExactETHCall::SELECTOR => {
+            let decoded = UniV2Router::swapTokensForExactETHCall::abi_decode(input).ok()?;
+            as_u64(decoded.deadline)
+        }
+        UniV2Router::swapExactTokensForTokensCall::SELECTOR => {
+            let decoded = UniV2Router::swapExactTokensForTokensCall::abi_decode(input).ok()?;
+            as_u64(decoded.deadline)
+        }
+        UniV2Router::swapTokensForExactTokensCall::SELECTOR => {
+            let decoded = UniV2Router::swapTokensForExactTokensCall::abi_decode(input).ok()?;
+            as_u64(decoded.deadline)
+        }
+        UniV2Router::swapExactETHForTokensSupportingFeeOnTransferTokensCall::SELECTOR => {
+            let decoded =
+                UniV2Router::swapExactETHForTokensSupportingFeeOnTransferTokensCall::abi_decode(
+                    input,
+                )
+                .ok()?;
+            as_u64(decoded.deadline)
+        }
+        UniV2Router::swapExactTokensForETHSupportingFeeOnTransferTokensCall::SELECTOR => {
+            let decoded =
+                UniV2Router::swapExactTokensForETHSupportingFeeOnTransferTokensCall::abi_decode(
+                    input,
+                )
+                .ok()?;
+            as_u64(decoded.deadline)
+        }
+        UniV2Router::swapExactTokensForTokensSupportingFeeOnTransferTokensCall::SELECTOR => {
+            let decoded =
+                UniV2Router::swapExactTokensForTokensSupportingFeeOnTransferTokensCall::abi_decode(
+                    input,
+                )
+                .ok()?;
+            as_u64(decoded.deadline)
+        }
+        UniV3Router::exactInputSingleCall::SELECTOR => {
+            let decoded = UniV3Router::exactInputSingleCall::abi_decode(input).ok()?;
+            as_u64(decoded.params.deadline)
+        }
+        UniV3Router::exactOutputSingleCall::SELECTOR => {
+            let decoded = UniV3Router::exactOutputSingleCall::abi_decode(input).ok()?;
+            as_u64(decoded.params.deadline)
+        }
+        UniV3Router::exactInputCall::SELECTOR => {
+            let decoded = UniV3Router::exactInputCall::abi_decode(input).ok()?;
+            as_u64(decoded.params.deadline)
+        }
+        UniV3Router::exactOutputCall::SELECTOR => {
+            let decoded = UniV3Router::exactOutputCall::abi_decode(input).ok()?;
+            as_u64(decoded.params.deadline)
+        }
+        UniV3MulticallDeadline::multicallCall::SELECTOR => {
+            let decoded = UniV3MulticallDeadline::multicallCall::abi_decode(input).ok()?;
+            as_u64(decoded.deadline)
+        }
+        UniversalRouterDeadline::executeCall::SELECTOR => {
+            let decoded = UniversalRouterDeadline::executeCall::abi_decode(input).ok()?;
+            as_u64(decoded.deadline)
+        }
+        _ => None,
+    }
+}
+
+fn decode_generic_multicall(
+    router: Address,
+    input: &[u8],
+    eth_value: U256,
+    depth: usize,
+) -> Option<ObservedSwap> {
+    if depth >= MAX_DECODE_RECURSION {
+        return None;
+    }
+
+    if let Ok(decoded) = GenericMulticall::multicallCall::abi_decode(input) {
+        for nested in decoded.data {
+            if let Some(observed) =
+                decode_swap_input_inner(router, nested.as_ref(), eth_value, depth + 1)
+            {
+                return Some(observed);
+            }
+        }
+    }
+
+    if let Ok(decoded) = GenericMulticallDeadline::multicallCall::abi_decode(input) {
+        for nested in decoded.data {
+            if let Some(observed) =
+                decode_swap_input_inner(router, nested.as_ref(), eth_value, depth + 1)
+            {
+                return Some(observed);
+            }
+        }
+    }
+
+    None
+}
+
+fn decode_generic_aggregate_multicall(
+    input: &[u8],
+    eth_value: U256,
+    depth: usize,
+) -> Option<ObservedSwap> {
+    if depth >= MAX_DECODE_RECURSION {
+        return None;
+    }
+
+    if let Ok(decoded) = GenericAggregateMulticall::aggregateCall::abi_decode(input) {
+        for call in decoded.calls {
+            if let Some(observed) =
+                decode_swap_input_inner(call.target, call.callData.as_ref(), eth_value, depth + 1)
+            {
+                return Some(observed);
+            }
+        }
+    }
+
+    if let Ok(decoded) = GenericAggregateMulticall::tryAggregateCall::abi_decode(input) {
+        for call in decoded.calls {
+            if let Some(observed) =
+                decode_swap_input_inner(call.target, call.callData.as_ref(), eth_value, depth + 1)
+            {
+                return Some(observed);
+            }
+        }
+    }
+
+    if let Ok(decoded) = GenericAggregateMulticall::aggregate3Call::abi_decode(input) {
+        for call in decoded.calls {
+            if let Some(observed) =
+                decode_swap_input_inner(call.target, call.callData.as_ref(), eth_value, depth + 1)
+            {
+                return Some(observed);
+            }
+        }
+    }
+
+    if let Ok(decoded) = GenericAggregateMulticall::aggregate3ValueCall::abi_decode(input) {
+        for call in decoded.calls {
+            if let Some(observed) =
+                decode_swap_input_inner(call.target, call.callData.as_ref(), call.value, depth + 1)
+            {
+                return Some(observed);
+            }
+        }
+    }
+
+    if let Ok(decoded) = GenericAggregateMulticall::blockAndAggregateCall::abi_decode(input) {
+        for call in decoded.calls {
+            if let Some(observed) =
+                decode_swap_input_inner(call.target, call.callData.as_ref(), eth_value, depth + 1)
+            {
+                return Some(observed);
+            }
+        }
+    }
+
+    if let Ok(decoded) = GenericAggregateMulticall::tryBlockAndAggregateCall::abi_decode(input) {
+        for call in decoded.calls {
+            if let Some(observed) =
+                decode_swap_input_inner(call.target, call.callData.as_ref(), eth_value, depth + 1)
+            {
+                return Some(observed);
+            }
+        }
+    }
+
+    None
 }
 
 const MAX_DECODE_RECURSION: usize = 4;
@@ -557,7 +814,8 @@ fn decode_swap_input_inner(
             let decoded = UniversalRouterDeadline::executeCall::abi_decode(input).ok()?;
             decode_universal_router(router, decoded.commands, decoded.inputs)
         }
-        _ => None,
+        _ => decode_generic_multicall(router, input, eth_value, depth)
+            .or_else(|| decode_generic_aggregate_multicall(input, eth_value, depth)),
     }
 }
 
@@ -1143,6 +1401,123 @@ mod tests {
         let observed =
             decode_swap_input(router, &input, U256::ZERO).expect("decode nested multicall");
         assert_eq!(observed.path, vec![weth, usdc]);
+        assert_eq!(observed.v3_fees, vec![500u32]);
+        assert_eq!(observed.router_kind, RouterKind::V3Like);
+    }
+
+    #[test]
+    fn decodes_generic_multicall_nested_v2_swap() {
+        let wrapper = Address::from([0xba; 20]);
+        let token_in = Address::from([0xab; 20]);
+        let token_out = Address::from([0xac; 20]);
+        let inner = UniV2Router::swapExactTokensForTokensCall {
+            amountIn: U256::from(777u64),
+            amountOutMin: U256::from(123u64),
+            path: vec![token_in, token_out],
+            to: Address::from([0xad; 20]),
+            deadline: U256::from(999u64),
+        };
+        let wrapped = GenericMulticall::multicallCall {
+            data: vec![Bytes::from(inner.abi_encode())],
+        };
+        let input = wrapped.abi_encode();
+        let observed =
+            decode_swap_input(wrapper, &input, U256::ZERO).expect("decode generic multicall");
+        assert_eq!(observed.router, wrapper);
+        assert_eq!(observed.path, vec![token_in, token_out]);
+        assert_eq!(observed.amount_in, U256::from(777u64));
+        assert_eq!(observed.min_out, U256::from(123u64));
+        assert_eq!(observed.router_kind, RouterKind::V2Like);
+    }
+
+    #[test]
+    fn decodes_generic_multicall_deadline_nested_v3_swap() {
+        let wrapper = Address::from([0xbe; 20]);
+        let token_in = Address::from([0xbf; 20]);
+        let token_out = Address::from([0xc0; 20]);
+        let inner = UniV3Router::exactInputSingleCall {
+            params: UniV3Router::ExactInputSingleParams {
+                tokenIn: token_in,
+                tokenOut: token_out,
+                fee: U24::from(500u32),
+                recipient: Address::from([0xc1; 20]),
+                deadline: U256::from(100u64),
+                amountIn: U256::from(5_000u64),
+                amountOutMinimum: U256::from(1u64),
+                sqrtPriceLimitX96: U160::ZERO,
+            },
+        };
+        let wrapped = GenericMulticallDeadline::multicallCall {
+            deadline: U256::from(777u64),
+            data: vec![Bytes::from(inner.abi_encode())],
+        };
+        let input = wrapped.abi_encode();
+        let observed = decode_swap_input(wrapper, &input, U256::ZERO)
+            .expect("decode generic multicall deadline");
+        assert_eq!(observed.router, wrapper);
+        assert_eq!(observed.path, vec![token_in, token_out]);
+        assert_eq!(observed.v3_fees, vec![500u32]);
+        assert_eq!(observed.router_kind, RouterKind::V3Like);
+    }
+
+    #[test]
+    fn decodes_generic_aggregate_multicall_nested_v2_swap() {
+        let wrapper = Address::from([0xc2; 20]);
+        let router = Address::from([0xc3; 20]);
+        let token_in = Address::from([0xc4; 20]);
+        let token_out = Address::from([0xc5; 20]);
+        let inner = UniV2Router::swapExactTokensForTokensCall {
+            amountIn: U256::from(444u64),
+            amountOutMin: U256::from(111u64),
+            path: vec![token_in, token_out],
+            to: Address::from([0xc6; 20]),
+            deadline: U256::from(1_234u64),
+        };
+        let wrapped = GenericAggregateMulticall::aggregateCall {
+            calls: vec![AggregateCall {
+                target: router,
+                callData: Bytes::from(inner.abi_encode()),
+            }],
+        };
+        let observed = decode_swap_input(wrapper, &wrapped.abi_encode(), U256::ZERO)
+            .expect("decode aggregate nested v2");
+        // For aggregate wrappers, router should reflect the nested target.
+        assert_eq!(observed.router, router);
+        assert_eq!(observed.path, vec![token_in, token_out]);
+        assert_eq!(observed.amount_in, U256::from(444u64));
+        assert_eq!(observed.min_out, U256::from(111u64));
+    }
+
+    #[test]
+    fn decodes_generic_aggregate3value_nested_v3_swap() {
+        let wrapper = Address::from([0xc7; 20]);
+        let router = Address::from([0xc8; 20]);
+        let token_in = Address::from([0xc9; 20]);
+        let token_out = Address::from([0xca; 20]);
+        let inner = UniV3Router::exactInputSingleCall {
+            params: UniV3Router::ExactInputSingleParams {
+                tokenIn: token_in,
+                tokenOut: token_out,
+                fee: U24::from(500u32),
+                recipient: Address::from([0xcb; 20]),
+                deadline: U256::from(100u64),
+                amountIn: U256::from(9_999u64),
+                amountOutMinimum: U256::from(1u64),
+                sqrtPriceLimitX96: U160::ZERO,
+            },
+        };
+        let wrapped = GenericAggregateMulticall::aggregate3ValueCall {
+            calls: vec![AggregateCall3Value {
+                target: router,
+                allowFailure: false,
+                value: U256::ZERO,
+                callData: Bytes::from(inner.abi_encode()),
+            }],
+        };
+        let observed = decode_swap_input(wrapper, &wrapped.abi_encode(), U256::ZERO)
+            .expect("decode aggregate3Value nested v3");
+        assert_eq!(observed.router, router);
+        assert_eq!(observed.path, vec![token_in, token_out]);
         assert_eq!(observed.v3_fees, vec![500u32]);
         assert_eq!(observed.router_kind, RouterKind::V3Like);
     }

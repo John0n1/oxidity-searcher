@@ -49,6 +49,12 @@ sol! {
         error OnlyPool();
         error InvalidPool();
         error InvalidAsset();
+        error InvalidBalancerVault();
+        error BalancerTokensNotSorted(uint256 index, address previous, address current);
+        error BalancerLoanNotActive();
+        error BalancerLoanContextMismatch();
+        error BalancerCallbackNotReceived();
+        error AaveCallbackNotReceived();
     }
 
     // Matches abi.decode(userData, (address[], uint256[], bytes[])) in receiveFlashLoan
@@ -90,6 +96,34 @@ mod tests {
                 .collect::<Vec<_>>(),
             payloads
         );
+
+        // Solidity callback decodes userData as tuple:
+        // abi.decode(userData, (address[], uint256[], bytes[])).
+        // So we must encode/decode as function params (no outer wrapper).
+        let tuple_params_encoded = (
+            targets.clone(),
+            values.clone(),
+            data.payloads.clone(),
+        )
+            .abi_encode_params();
+        let params_encoded = data.abi_encode_params();
+        assert_eq!(params_encoded, tuple_params_encoded);
+
+        let decoded_params = <FlashCallbackData as SolValue>::abi_decode_params(&params_encoded)
+            .expect("decode callback params");
+        assert_eq!(decoded_params.targets, targets);
+        assert_eq!(decoded_params.values, values);
+        assert_eq!(
+            decoded_params
+                .payloads
+                .iter()
+                .map(|b: &alloy::primitives::Bytes| b.clone().to_vec())
+                .collect::<Vec<_>>(),
+            payloads
+        );
+
+        // Guard against accidentally using value encoding for callback params.
+        assert_ne!(encoded, params_encoded);
     }
 
     #[test]
@@ -128,5 +162,25 @@ mod tests {
         assert_eq!(decoded.bribeAmount, call.bribeAmount);
         assert_eq!(decoded.allowPartial, call.allowPartial);
         assert_eq!(decoded.balanceCheckToken, call.balanceCheckToken);
+    }
+
+    #[test]
+    fn flashloan_entry_call_selectors() {
+        let bal = UnifiedHardenedExecutor::executeFlashLoanCall {
+            assets: vec![Address::from([1u8; 20])],
+            amounts: vec![U256::from(1u64)],
+            params: vec![0x01u8].into(),
+        }
+        .abi_encode();
+        let aave = UnifiedHardenedExecutor::executeAaveFlashLoanSimpleCall {
+            pool: Address::from([2u8; 20]),
+            asset: Address::from([3u8; 20]),
+            amount: U256::from(1u64),
+            params: vec![0x02u8].into(),
+        }
+        .abi_encode();
+
+        assert_eq!(hex::encode(&bal[..4]), "76ec49ba");
+        assert_eq!(hex::encode(&aave[..4]), "ba0eef35");
     }
 }

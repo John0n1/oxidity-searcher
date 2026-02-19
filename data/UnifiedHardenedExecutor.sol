@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
-pragma solidity ^0.8.33;
+pragma solidity ^0.8.34;
 
 // ==========================================
 // INTERFACES
@@ -102,8 +102,12 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
     error OnlyPool();
     error InvalidPool();
     error InvalidAsset();
+    error InvalidBalancerVault();
+    error BalancerTokensNotSorted(uint256 index, address previous, address current);
     error BalancerLoanNotActive();
     error BalancerLoanContextMismatch();
+    error BalancerCallbackNotReceived();
+    error AaveCallbackNotReceived();
 
     /// @param _profitReceiver address to receive residual profits/ETH sweeps.
     /// @param _weth address of Wrapped Ether (WETH) on this chain.
@@ -112,6 +116,7 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
         if (_profitReceiver == address(0)) revert InvalidProfitReceiver();
         // Harden WETH check: ensure WETH is actually a contract
         if (_weth == address(0) || _weth.code.length == 0) revert InvalidWETHAddress();
+        if (_balancerVault == address(0) || _balancerVault.code.length == 0) revert InvalidBalancerVault();
         
         owner = msg.sender;
         profitReceiver = _profitReceiver;
@@ -222,6 +227,13 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
         for (uint256 i = 0; i < amounts.length; i++) {
             if (amounts[i] == 0) revert ZeroAssets();
         }
+        for (uint256 i = 1; i < assets.length; i++) {
+            address previous = address(assets[i - 1]);
+            address current = address(assets[i]);
+            if (current <= previous) {
+                revert BalancerTokensNotSorted(i, previous, current);
+            }
+        }
 
         // Guard callback execution to this owner-initiated flashloan session only.
         balancerLoanActive = true;
@@ -234,9 +246,10 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
             params
         );
 
-        // Callback is synchronous; clear session guard after vault returns.
-        balancerLoanActive = false;
-        balancerLoanContextHash = bytes32(0);
+        // Callback is synchronous and must clear the session guard.
+        if (balancerLoanActive || balancerLoanContextHash != bytes32(0)) {
+            revert BalancerCallbackNotReceived();
+        }
     }
 
     /// @notice Initiate an Aave V3 simple flashloan. Params encoding matches Balancer path.
@@ -252,11 +265,12 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
         bytes calldata params
     ) external onlyOwner {
         if (pool == address(0)) revert InvalidPool();
+        if (pool.code.length == 0) revert InvalidPool();
         if (asset == address(0)) revert InvalidAsset();
         if (amount == 0) revert ZeroAssets();
         activeAavePool = pool;
         IAavePool(pool).flashLoanSimple(address(this), asset, amount, params, 0);
-        activeAavePool = address(0);
+        if (activeAavePool != address(0)) revert AaveCallbackNotReceived();
     }
 
     /// @inheritdoc IFlashLoanRecipient
@@ -339,6 +353,7 @@ contract UnifiedHardenedExecutor is IFlashLoanRecipient, IAaveFlashLoanSimpleRec
     ) external override returns (bool) {
         if (msg.sender != activeAavePool) revert OnlyPool();
         if (initiator != address(this)) revert OnlyOwner();
+        activeAavePool = address(0);
 
         (address[] memory targets, uint256[] memory values, bytes[] memory payloads) =
             abi.decode(params, (address[], uint256[], bytes[]));

@@ -99,7 +99,8 @@ impl StrategyExecutor {
         amount_out_min: U256,
         recipient: Address,
     ) -> Vec<u8> {
-        let deadline = current_unix().saturating_add(60);
+        // Align with V2 payload horizon and tolerate timestamp drift across simulators.
+        let deadline = current_unix().saturating_add(3600);
         UniV3Router::new(router, self.http_provider.clone())
             .exactInput(UniV3Router::ExactInputParams {
                 path: path.into(),
@@ -152,12 +153,25 @@ impl StrategyExecutor {
                 .ok_or_else(|| AppError::Strategy("V2 quote missing amounts".into()))?
         };
 
-        let ratio_ppm = Self::price_ratio_ppm(expected_out, amount_in);
-        if ratio_ppm < U256::from(self.adaptive_liquidity_ratio_floor_ppm(gas_fees)) {
+        if expected_out.is_zero() {
             if strict_liquidity {
-                return Err(AppError::Strategy("V2 liquidity too low".into()));
+                return Err(AppError::Strategy("V2 quote returned zero output".into()));
             } else {
                 return Ok(None);
+            }
+        }
+
+        // Do not apply raw ratio checks across heterogeneous token units
+        // (e.g. WETH wei vs USDC 6 decimals), as that produces false negatives.
+        // Liquidity/impact safety is handled by reserve depth checks + simulation.
+        if path.first() == path.last() {
+            let ratio_ppm = Self::price_ratio_ppm(expected_out, amount_in);
+            if ratio_ppm < U256::from(self.adaptive_liquidity_ratio_floor_ppm(gas_fees)) {
+                if strict_liquidity {
+                    return Err(AppError::Strategy("V2 liquidity too low".into()));
+                } else {
+                    return Ok(None);
+                }
             }
         }
 
