@@ -112,22 +112,55 @@ impl MevShareClient {
 
     pub async fn run(mut self) -> Result<(), AppError> {
         self.backfill_history().await?;
+        let mut reconnect_backoff_secs: u64 = 2;
         loop {
             if self.shutdown.is_cancelled() {
                 tracing::info!(target: "mev_share", "Shutdown requested; stopping MEV-Share client");
                 return Ok(());
             }
             match self.stream_once().await {
-                Ok(_) => {}
+                Ok(_) => {
+                    reconnect_backoff_secs = 2;
+                }
                 Err(e) => {
-                    tracing::warn!(target: "mev_share", error=%e, "Stream error, reconnecting");
+                    let msg = e.to_string();
+                    let lower = msg.to_ascii_lowercase();
+                    let is_transient = lower.contains("sse chunk error")
+                        || lower.contains("sse stream ended unexpectedly");
+
+                    if is_transient {
+                        tracing::info!(
+                            target: "mev_share",
+                            error = %msg,
+                            backoff_secs = reconnect_backoff_secs,
+                            "Transient SSE disconnect; reconnecting"
+                        );
+                    } else {
+                        tracing::warn!(
+                            target: "mev_share",
+                            error = %msg,
+                            backoff_secs = reconnect_backoff_secs,
+                            "Stream error, reconnecting"
+                        );
+                    }
+
+                    // Best-effort gap fill after disconnect so we don't lose hints during reconnects.
+                    if let Err(history_err) = self.backfill_history().await {
+                        tracing::warn!(
+                            target: "mev_share",
+                            error = %history_err,
+                            "History backfill during reconnect failed"
+                        );
+                    }
+
                     tokio::select! {
                         _ = self.shutdown.cancelled() => {
                             tracing::info!(target: "mev_share", "Shutdown requested during reconnect backoff");
                             return Ok(());
                         }
-                        _ = sleep(Duration::from_secs(2)) => {}
+                        _ = sleep(Duration::from_secs(reconnect_backoff_secs)) => {}
                     }
+                    reconnect_backoff_secs = (reconnect_backoff_secs.saturating_mul(2)).min(30);
                 }
             }
         }
@@ -222,7 +255,7 @@ impl MevShareClient {
             };
             let chunk =
                 chunk.map_err(|e| AppError::Connection(format!("SSE chunk error: {}", e)))?;
-            
+
             // Append chunk to buffer, being lossy with UTF-8 to prevent crashes on garbage data
             let chunk_str = String::from_utf8_lossy(&chunk);
             buffer.push_str(&chunk_str);
@@ -259,7 +292,7 @@ impl MevShareClient {
                     }
                 }
             }
-            
+
             // Safety cap: if buffer grows too large without finding \n\n, clear it to prevent OOM.
             if buffer.len() > 1024 * 1024 {
                 tracing::warn!(target: "mev_share", len=buffer.len(), "Buffer too large without delimiter; clearing");
@@ -325,7 +358,7 @@ impl MevShareClient {
     fn convert_hint(&self, raw: RawTx) -> Option<MevShareHint> {
         let tx_hash = raw.hash.as_deref().and_then(parse_b256)?;
         let router = raw.to.as_deref().and_then(parse_address)?;
-        
+
         // Fix: If chain_id is missing, assume it matches our stream (unwrap_or(true)).
         let chain_ok = raw
             .chain_id
@@ -333,7 +366,7 @@ impl MevShareClient {
             .and_then(parse_u64_hex)
             .map(|cid| cid == self.chain_id)
             .unwrap_or(true);
-            
+
         if !chain_ok {
             return None;
         }

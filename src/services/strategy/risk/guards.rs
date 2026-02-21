@@ -262,17 +262,19 @@ impl StrategyExecutor {
                 .saturating_mul(congestion)
                 / 10_000u64;
             let floor = match stress {
-                StressProfile::UltraLow => self
-                    .profit_guard_base_floor_multiplier_bps
-                    .saturating_mul(70)
-                    / 100,
+                StressProfile::UltraLow => {
+                    self.profit_guard_base_floor_multiplier_bps
+                        .saturating_mul(70)
+                        / 100
+                }
                 StressProfile::Low => self.profit_guard_base_floor_multiplier_bps * 8 / 10,
                 StressProfile::Normal => self.profit_guard_base_floor_multiplier_bps * 9 / 10,
                 StressProfile::Elevated => self.profit_guard_base_floor_multiplier_bps,
-                StressProfile::High => self
-                    .profit_guard_base_floor_multiplier_bps
-                    .saturating_mul(110)
-                    / 100,
+                StressProfile::High => {
+                    self.profit_guard_base_floor_multiplier_bps
+                        .saturating_mul(110)
+                        / 100
+                }
             };
             dynamic.max(floor).clamp(3_500, 14_000)
         };
@@ -284,10 +286,7 @@ impl StrategyExecutor {
                 StressProfile::Elevated => 10_550,
                 StressProfile::High => 10_900,
             };
-            let dynamic = self
-                .profit_guard_cost_multiplier_bps
-                .saturating_mul(extra)
-                / 10_000u64;
+            let dynamic = self.profit_guard_cost_multiplier_bps.saturating_mul(extra) / 10_000u64;
             let floor = match stress {
                 StressProfile::UltraLow => self.profit_guard_cost_multiplier_bps * 8 / 10,
                 StressProfile::Low => self.profit_guard_cost_multiplier_bps * 85 / 100,
@@ -295,8 +294,7 @@ impl StrategyExecutor {
                 StressProfile::Elevated => self.profit_guard_cost_multiplier_bps * 95 / 100,
                 StressProfile::High => self.profit_guard_cost_multiplier_bps,
             };
-            dynamic.clamp(5_000, 16_000)
-                .max(floor.clamp(5_000, 16_000))
+            dynamic.clamp(5_000, 16_000).max(floor.clamp(5_000, 16_000))
         };
         let min_margin_bps = {
             let dynamic = self.profit_guard_min_margin_bps.saturating_mul(congestion) / 10_000u64;

@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
+use crate::app::logging::{
+    ansi_tables_enabled, format_framed_table, format_framed_table_with_blue_title,
+};
 use crate::common::error::AppError;
 use crate::core::executor::SharedBundleSender;
 use crate::core::portfolio::PortfolioManager;
 use crate::core::safety::SafetyGuard;
 use crate::core::simulation::Simulator;
 use crate::data::db::Database;
-use crate::app::logging::{
-    ansi_tables_enabled, format_framed_table, format_framed_table_with_blue_title,
-};
 use crate::domain::constants;
 use crate::infrastructure::data::token_manager::TokenManager;
 use crate::network::gas::{GasFees, GasOracle};
@@ -178,6 +178,7 @@ pub(crate) const TOXIC_PROBE_FAILURE_WINDOW_SECS: u64 = 1_800;
 const DEFAULT_FALLBACK_GAS_CAP_GWEI: u64 = 500;
 const DEFAULT_ROUTER_RISK_MIN_SAMPLES: u64 = 20;
 const DEFAULT_ROUTER_RISK_FAIL_RATE_BPS: u64 = 4_000;
+const DEFAULT_ROUTER_RISK_HARD_BLOCK: bool = false;
 const DEFAULT_SANDWICH_RISK_MAX_VICTIM_SLIPPAGE_BPS: u64 = 1_500;
 const DEFAULT_SANDWICH_RISK_SMALL_WALLET_WEI: u128 = 100_000_000_000_000_000u128; // 0.1 ETH
 
@@ -441,8 +442,23 @@ impl StrategyExecutor {
             .clamp(min, max)
     }
 
+    fn env_bool(key: &str, default: bool) -> bool {
+        std::env::var(key)
+            .ok()
+            .map(|v| {
+                let t = v.trim().to_ascii_lowercase();
+                matches!(t.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(default)
+    }
+
     pub(in crate::services::strategy) fn router_risk_min_samples(&self) -> u64 {
-        Self::env_u64_bounded("ROUTER_RISK_MIN_SAMPLES", DEFAULT_ROUTER_RISK_MIN_SAMPLES, 1, 500)
+        Self::env_u64_bounded(
+            "ROUTER_RISK_MIN_SAMPLES",
+            DEFAULT_ROUTER_RISK_MIN_SAMPLES,
+            1,
+            500,
+        )
     }
 
     pub(in crate::services::strategy) fn router_risk_fail_rate_bps(&self) -> u64 {
@@ -452,6 +468,10 @@ impl StrategyExecutor {
             500,
             10_000,
         )
+    }
+
+    pub(in crate::services::strategy) fn router_risk_hard_block(&self) -> bool {
+        Self::env_bool("ROUTER_RISK_HARD_BLOCK", DEFAULT_ROUTER_RISK_HARD_BLOCK)
     }
 
     pub(in crate::services::strategy) fn sandwich_risk_max_victim_slippage_bps(&self) -> u64 {
@@ -467,8 +487,8 @@ impl StrategyExecutor {
         U256::from(Self::env_u128_bounded(
             "SANDWICH_RISK_SMALL_WALLET_WEI",
             DEFAULT_SANDWICH_RISK_SMALL_WALLET_WEI,
-            1_000_000_000_000_000u128,      // 0.001 ETH
-            5_000_000_000_000_000_000u128,  // 5 ETH
+            1_000_000_000_000_000u128,     // 0.001 ETH
+            5_000_000_000_000_000_000u128, // 5 ETH
         ))
     }
 
@@ -969,13 +989,7 @@ impl StrategyExecutor {
     }
 
     pub(in crate::services::strategy) fn allow_unknown_router_decode(&self) -> bool {
-        std::env::var("ALLOW_UNKNOWN_ROUTER_DECODE")
-            .ok()
-            .map(|v| {
-                let t = v.trim().to_ascii_lowercase();
-                matches!(t.as_str(), "1" | "true" | "yes" | "on")
-            })
-            .unwrap_or(true)
+        Self::env_bool("ALLOW_UNKNOWN_ROUTER_DECODE", true)
     }
 
     pub(in crate::services::strategy) fn canonical_exec_router_for_kind(
@@ -1275,7 +1289,8 @@ impl StrategyExecutor {
             ),
         ];
         if ansi_tables_enabled() {
-            let framed = format_framed_table_with_blue_title(panel_lines.iter().map(String::as_str));
+            let framed =
+                format_framed_table_with_blue_title(panel_lines.iter().map(String::as_str));
             eprintln!("{framed}");
         } else {
             let framed = format_framed_table(panel_lines.iter().map(String::as_str));

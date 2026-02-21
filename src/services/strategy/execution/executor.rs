@@ -10,11 +10,11 @@ use alloy::primitives::keccak256;
 use alloy::providers::Provider;
 use alloy::signers::SignerSync;
 use alloy::signers::local::PrivateKeySigner;
+use futures::future::join_all;
 use reqwest::header::HeaderValue;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
-use futures::future::join_all;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -358,7 +358,11 @@ impl BundleSender {
 
         let relays: Vec<(String, bool, String)> = vec![
             (self.relay_url.clone(), true, "flashbots".to_string()),
-            ("https://rpc.beaverbuild.org".to_string(), false, "beaver".to_string()),
+            (
+                "https://rpc.beaverbuild.org".to_string(),
+                false,
+                "beaver".to_string(),
+            ),
             (
                 "https://rpc.titanbuilder.xyz".to_string(),
                 true,

@@ -23,12 +23,344 @@ use alloy::consensus::Transaction as ConsensusTx;
 use alloy::eips::eip2718::Encodable2718;
 use alloy::network::TransactionResponse;
 use alloy::primitives::TxKind;
-use alloy::primitives::{Address, B256, U256};
+use alloy::primitives::{Address, B256, U256, keccak256};
 use alloy::rpc::types::eth::state::StateOverridesBuilder;
 use alloy::rpc::types::eth::{Transaction, TransactionInput, TransactionRequest};
 use alloy_sol_types::SolCall;
 
+const DEFAULT_ATOMIC_ARB_SCAN_COOLDOWN_SECS: u64 = 10;
+const DEFAULT_LIQUIDATION_SCAN_COOLDOWN_SECS: u64 = 4;
+const DEFAULT_ATOMIC_ARB_MAX_CANDIDATES: usize = 10;
+const DEFAULT_ATOMIC_ARB_MAX_ATTEMPTS: usize = 2;
+const DEFAULT_ATOMIC_ARB_GAS_HINT: u64 = 260_000;
+const DEFAULT_ATOMIC_ARB_SEED_WEI: u128 = 3_000_000_000_000_000u128; // 0.003 ETH
+
+static LAST_ATOMIC_ARB_SCAN_UNIX: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static LAST_LIQUIDATION_SCAN_UNIX: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 impl StrategyExecutor {
+    fn env_usize_bounded(key: &str, default: usize, min: usize, max: usize) -> usize {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(default)
+            .clamp(min, max)
+    }
+
+    fn env_u64_bounded_local(key: &str, default: u64, min: u64, max: u64) -> u64 {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(default)
+            .clamp(min, max)
+    }
+
+    fn strategy_flag_enabled(key: &str, default: bool) -> bool {
+        std::env::var(key)
+            .ok()
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                matches!(v.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(default)
+    }
+
+    fn selector(input: &[u8]) -> Option<[u8; 4]> {
+        input
+            .get(..4)
+            .and_then(|slice| <[u8; 4]>::try_from(slice).ok())
+    }
+
+    fn sig_selector(signature: &str) -> [u8; 4] {
+        let h = keccak256(signature.as_bytes());
+        [h[0], h[1], h[2], h[3]]
+    }
+
+    fn liquidation_selectors() -> &'static [[u8; 4]] {
+        static SELECTORS: std::sync::OnceLock<Vec<[u8; 4]>> = std::sync::OnceLock::new();
+        SELECTORS.get_or_init(|| {
+            vec![
+                Self::sig_selector("liquidationCall(address,address,address,uint256,bool)"),
+                Self::sig_selector("liquidateBorrow(address,uint256,address)"),
+                Self::sig_selector("liquidateBorrow(address,address,uint256,bool)"),
+                Self::sig_selector("absorb(address,address[])"),
+                Self::sig_selector("absorb(address,address)"),
+            ]
+        })
+    }
+
+    fn is_liquidation_signal_tx(&self, tx: &Transaction, to_addr: Address) -> bool {
+        if self.aave_pool.map(|pool| pool == to_addr).unwrap_or(false) {
+            return true;
+        }
+        let Some(selector) = Self::selector(tx.input()) else {
+            return false;
+        };
+        Self::liquidation_selectors().contains(&selector)
+    }
+
+    fn should_run_signal_scan(&self, liquidation: bool, now_unix: u64) -> bool {
+        let cooldown_key = if liquidation {
+            "LIQUIDATION_SCAN_COOLDOWN_SECS"
+        } else {
+            "ATOMIC_ARB_SCAN_COOLDOWN_SECS"
+        };
+        let default_cooldown = if liquidation {
+            DEFAULT_LIQUIDATION_SCAN_COOLDOWN_SECS
+        } else {
+            DEFAULT_ATOMIC_ARB_SCAN_COOLDOWN_SECS
+        };
+        let cooldown = Self::env_u64_bounded_local(cooldown_key, default_cooldown, 1, 120);
+        let counter = if liquidation {
+            &LAST_LIQUIDATION_SCAN_UNIX
+        } else {
+            &LAST_ATOMIC_ARB_SCAN_UNIX
+        };
+        let last = counter.load(std::sync::atomic::Ordering::Relaxed);
+        if now_unix < last.saturating_add(cooldown) {
+            return false;
+        }
+        counter
+            .compare_exchange(
+                last,
+                now_unix,
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+            )
+            .is_ok()
+    }
+
+    async fn try_signal_driven_arb(
+        &self,
+        tx: &Transaction,
+        to_addr: Address,
+        received_at: std::time::Instant,
+        reason: &str,
+    ) -> Result<Option<String>, AppError> {
+        if !Self::strategy_flag_enabled("STRATEGY_ATOMIC_ARB_ENABLED", true) {
+            return Ok(None);
+        }
+        let liquidation_signal = Self::strategy_flag_enabled("STRATEGY_LIQUIDATION_ENABLED", true)
+            && self.is_liquidation_signal_tx(tx, to_addr);
+        let now_unix = crate::services::strategy::time_utils::current_unix();
+        if !self.should_run_signal_scan(liquidation_signal, now_unix) {
+            return Ok(None);
+        }
+        let Some(router) = self.exec_router_v2 else {
+            return Ok(None);
+        };
+
+        let gas_hint = Self::env_u64_bounded_local(
+            "ATOMIC_ARB_GAS_HINT",
+            DEFAULT_ATOMIC_ARB_GAS_HINT,
+            120_000,
+            700_000,
+        );
+        let max_candidates = Self::env_usize_bounded(
+            "ATOMIC_ARB_MAX_CANDIDATES",
+            DEFAULT_ATOMIC_ARB_MAX_CANDIDATES,
+            2,
+            64,
+        );
+        let max_attempts = Self::env_usize_bounded(
+            "ATOMIC_ARB_MAX_ATTEMPTS",
+            DEFAULT_ATOMIC_ARB_MAX_ATTEMPTS,
+            1,
+            8,
+        );
+        let seed_floor = U256::from(
+            std::env::var("ATOMIC_ARB_SEED_WEI")
+                .ok()
+                .and_then(|v| v.trim().parse::<u128>().ok())
+                .unwrap_or(DEFAULT_ATOMIC_ARB_SEED_WEI),
+        );
+
+        let mut candidates = self
+            .reserve_cache
+            .top_v2_tokens_by_connectivity(max_candidates)
+            .into_iter()
+            .filter(|token| *token != self.wrapped_native)
+            .collect::<Vec<_>>();
+
+        if liquidation_signal {
+            candidates.sort_by_key(|token| {
+                self.token_manager
+                    .info(self.chain_id, *token)
+                    .map(|info| {
+                        let symbol = info.symbol.to_ascii_uppercase();
+                        if symbol.contains("USDC")
+                            || symbol.contains("USDT")
+                            || symbol.contains("DAI")
+                            || symbol.contains("WBTC")
+                            || symbol.contains("CBBTC")
+                        {
+                            0usize
+                        } else {
+                            1usize
+                        }
+                    })
+                    .unwrap_or(2usize)
+            });
+        }
+
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+
+        for token in candidates.into_iter().take(max_attempts) {
+            let observed = ObservedSwap {
+                router,
+                path: vec![self.wrapped_native, token],
+                v3_fees: Vec::new(),
+                v3_path: None,
+                amount_in: seed_floor.max(U256::from(1u64)),
+                min_out: U256::from(1u64),
+                recipient: self.signer.address(),
+                router_kind: RouterKind::V2Like,
+            };
+            let Some(parts) = self
+                .build_components(
+                    &observed,
+                    SwapDirection::Other,
+                    token,
+                    gas_hint,
+                    U256::ZERO,
+                    (None, None),
+                )
+                .await?
+            else {
+                continue;
+            };
+
+            let needed_nonces = 1u64 + parts.approvals.len() as u64;
+            let lease = self.lease_nonces(needed_nonces).await?;
+            let mut approvals = parts.approvals;
+            let backrun = parts.backrun;
+            let mut main_request = parts
+                .executor_request
+                .clone()
+                .unwrap_or_else(|| backrun.request.clone());
+            Self::apply_nonce_plan(
+                &lease,
+                &mut None,
+                approvals.as_mut_slice(),
+                &mut main_request,
+            )?;
+
+            let mut bundle_requests = Vec::new();
+            for approval in &approvals {
+                bundle_requests.push(approval.request.clone());
+            }
+            bundle_requests.push(main_request.clone());
+
+            let overrides = StateOverridesBuilder::default()
+                .with_balance(self.signer.address(), parts.sim_balance)
+                .with_nonce(self.signer.address(), lease.base);
+            let Some(profit) = self
+                .simulate_and_score(
+                    bundle_requests,
+                    overrides,
+                    &backrun,
+                    parts.attack_value_eth,
+                    parts.bribe_wei,
+                    parts.wallet_balance,
+                    gas_hint,
+                    &parts.gas_fees,
+                    observed.router,
+                )
+                .await?
+            else {
+                continue;
+            };
+
+            let plan = BundlePlan {
+                front_run: None,
+                approvals: approvals.iter().map(|a| a.request.clone()).collect(),
+                main: main_request.clone(),
+                victims: Vec::new(),
+            };
+            let touched_pools = self.reserve_cache.pairs_for_v2_path(&observed.path);
+            let Some(plan_hashes) = self
+                .merge_and_send_bundle(plan, touched_pools, lease)
+                .await?
+            else {
+                continue;
+            };
+            let submitted_hash = plan_hashes.main;
+
+            let strategy_label = if liquidation_signal {
+                "strategy_liquidation"
+            } else {
+                "strategy_atomic_arb"
+            };
+            self.db
+                .save_transaction(
+                    &format!("{submitted_hash:#x}"),
+                    self.chain_id,
+                    &format!("{:#x}", self.signer.address()),
+                    main_request
+                        .to
+                        .as_ref()
+                        .and_then(|k| match k {
+                            TxKind::Call(addr) => Some(format!("{addr:#x}")),
+                            _ => None,
+                        })
+                        .as_deref(),
+                    main_request
+                        .value
+                        .unwrap_or(U256::ZERO)
+                        .to_string()
+                        .as_str(),
+                    Some(strategy_label),
+                )
+                .await?;
+            self.db
+                .save_profit_record(
+                    &format!("{submitted_hash:#x}"),
+                    self.chain_id,
+                    strategy_label,
+                    profit.profit_eth_f64,
+                    profit.gas_cost_eth_f64,
+                    profit.net_profit_eth_f64,
+                    &profit.gross_profit_wei.to_string(),
+                    &profit.gas_cost_wei.to_string(),
+                    &profit.net_profit_wei.to_string(),
+                    &profit.bribe_wei.to_string(),
+                    &profit.flashloan_premium_wei.to_string(),
+                    &profit.effective_cost_wei.to_string(),
+                )
+                .await?;
+            self.stats.record_bundle(BundleTelemetry {
+                tx_hash: format!("{submitted_hash:#x}"),
+                source: if liquidation_signal {
+                    "liquidation"
+                } else {
+                    "atomic_arb"
+                }
+                .to_string(),
+                profit_eth: profit.profit_eth_f64,
+                gas_cost_eth: profit.gas_cost_eth_f64,
+                net_eth: profit.net_profit_eth_f64,
+                timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            });
+            tracing::info!(
+                target: "strategy",
+                strategy = if liquidation_signal { "liquidation" } else { "atomic_arb" },
+                trigger = reason,
+                tx_hash = %format!("{submitted_hash:#x}"),
+                token = %format!("{token:#x}"),
+                net_profit_eth = profit.net_profit_eth_f64,
+                elapsed_ms = received_at.elapsed().as_millis() as u64,
+                "Signal-driven strategy submitted"
+            );
+            return Ok(Some(format!("{submitted_hash:#x}")));
+        }
+
+        Ok(None)
+    }
+
     fn simulation_failure_is_router_attributable(
         detail: &str,
         failed_to: Option<Address>,
@@ -704,6 +1036,14 @@ impl StrategyExecutor {
                 return Ok(None);
             }
         };
+        if Self::strategy_flag_enabled("STRATEGY_LIQUIDATION_ENABLED", true)
+            && self.is_liquidation_signal_tx(tx, to_addr)
+            && let Some(submitted) = self
+                .try_signal_driven_arb(tx, to_addr, received_at, "liquidation_signal")
+                .await?
+        {
+            return Ok(Some(submitted));
+        }
         let mut predecoded_unknown_router: Option<ObservedSwap> = None;
         let mut decode_recorded = false;
         let category = self.allowlist_category_for(to_addr);
@@ -759,6 +1099,12 @@ impl StrategyExecutor {
                         discovery.record_unknown_router(to_addr, "mempool");
                     }
                     self.log_skip(SkipReason::UnknownRouter, &format!("to={to_addr:#x}"));
+                    if let Some(submitted) = self
+                        .try_signal_driven_arb(tx, to_addr, received_at, "unknown_router")
+                        .await?
+                    {
+                        return Ok(Some(submitted));
+                    }
                     return Ok(None);
                 }
             }
@@ -775,6 +1121,12 @@ impl StrategyExecutor {
         }
         let Some(observed_swap) = observed_swap else {
             self.log_skip(SkipReason::DecodeFailed, "unable to decode swap input");
+            if let Some(submitted) = self
+                .try_signal_driven_arb(tx, to_addr, received_at, "decode_failed")
+                .await?
+            {
+                return Ok(Some(submitted));
+            }
             return Ok(None);
         };
         let (direction, target_token) = match self.validate_swap(to_addr, &observed_swap) {
@@ -939,12 +1291,12 @@ impl StrategyExecutor {
                 Some("strategy_v1"),
             )
             .await?;
-        let recorded_hash = plan_hashes.main;
+        let submitted_hash = plan_hashes.main;
         let recorded_to = main_request.to.or(Some(TxKind::Call(backrun.to)));
         let recorded_value = main_request.value.unwrap_or(backrun.value);
         self.db
             .save_transaction(
-                &format!("{:#x}", recorded_hash),
+                &format!("{:#x}", submitted_hash),
                 self.chain_id,
                 &format!("{:#x}", self.signer.address()),
                 recorded_to
@@ -1011,7 +1363,7 @@ impl StrategyExecutor {
             )
             .await;
 
-        let receipt_target = plan_hashes.main;
+        let receipt_target = submitted_hash;
         match self.await_receipt(&receipt_target).await? {
             ReceiptStatus::ConfirmedSuccess => {}
             ReceiptStatus::ConfirmedRevert => {
@@ -1033,7 +1385,7 @@ impl StrategyExecutor {
         }
 
         self.stats.record_bundle(BundleTelemetry {
-            tx_hash: format!("{tx_hash:#x}"),
+            tx_hash: format!("{submitted_hash:#x}"),
             source: "mempool".to_string(),
             profit_eth: profit.profit_eth_f64,
             gas_cost_eth: profit.gas_cost_eth_f64,
@@ -1041,7 +1393,7 @@ impl StrategyExecutor {
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
         });
 
-        Ok(Some(format!("{tx_hash:#x}")))
+        Ok(Some(format!("{submitted_hash:#x}")))
     }
 
     async fn evaluate_mev_share_hint(
@@ -1259,12 +1611,12 @@ impl StrategyExecutor {
             "MEV-Share strategy evaluation"
         );
 
-        let tx_hash = format!("{:#x}", hint.tx_hash);
+        let victim_tx_hash = format!("{:#x}", hint.tx_hash);
 
         if self.dry_run {
             tracing::info!(
                 target: "strategy_dry_run",
-                tx_hash = %tx_hash,
+                tx_hash = %victim_tx_hash,
                 net_profit_eth = profit.net_profit_eth_f64,
                 gross_profit_eth = profit.profit_eth_f64,
                 gas_cost_eth = profit.gas_cost_eth_f64,
@@ -1277,12 +1629,12 @@ impl StrategyExecutor {
                 sandwich = false,
                 "Dry-run only: simulated profitable MEV-Share bundle (not sent)"
             );
-            return Ok(Some(tx_hash));
+            return Ok(Some(victim_tx_hash));
         }
 
         let mut bundle_body: Vec<BundleItem> = Vec::new();
         bundle_body.push(BundleItem::Hash {
-            hash: tx_hash.clone(),
+            hash: victim_tx_hash.clone(),
         });
 
         let mut executor_hash: Option<B256> = None;
@@ -1308,7 +1660,10 @@ impl StrategyExecutor {
             });
         }
 
-        let _ = self.db.update_status(&tx_hash, None, Some(false)).await;
+        let _ = self
+            .db
+            .update_status(&victim_tx_hash, None, Some(false))
+            .await;
 
         self.bundle_sender
             .send_mev_share_bundle(&bundle_body)
@@ -1317,7 +1672,7 @@ impl StrategyExecutor {
         let from_addr = hint.from.unwrap_or(Address::ZERO);
         self.db
             .save_transaction(
-                &tx_hash,
+                &victim_tx_hash,
                 self.chain_id,
                 &format!("{:#x}", from_addr),
                 Some(format!("{:#x}", hint.router)).as_deref(),
@@ -1326,9 +1681,10 @@ impl StrategyExecutor {
             )
             .await?;
 
+        let submitted_hash = executor_hash.unwrap_or(backrun.hash);
         self.db
             .save_transaction(
-                &format!("{:#x}", executor_hash.unwrap_or(backrun.hash)),
+                &format!("{:#x}", submitted_hash),
                 self.chain_id,
                 &format!("{:#x}", self.signer.address()),
                 main_request
@@ -1350,7 +1706,7 @@ impl StrategyExecutor {
 
         self.db
             .save_profit_record(
-                &tx_hash,
+                &victim_tx_hash,
                 self.chain_id,
                 "strategy_mev_share",
                 profit.profit_eth_f64,
@@ -1388,7 +1744,7 @@ impl StrategyExecutor {
             )
             .await;
 
-        let receipt_target = executor_hash.unwrap_or(backrun.hash);
+        let receipt_target = submitted_hash;
         match self.await_receipt(&receipt_target).await? {
             ReceiptStatus::ConfirmedSuccess => {}
             ReceiptStatus::ConfirmedRevert => {
@@ -1410,7 +1766,7 @@ impl StrategyExecutor {
         }
 
         self.stats.record_bundle(BundleTelemetry {
-            tx_hash: tx_hash.clone(),
+            tx_hash: format!("{submitted_hash:#x}"),
             source: "mev_share".to_string(),
             profit_eth: profit.profit_eth_f64,
             gas_cost_eth: profit.gas_cost_eth_f64,
@@ -1418,7 +1774,7 @@ impl StrategyExecutor {
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
         });
 
-        Ok(Some(tx_hash))
+        Ok(Some(format!("{submitted_hash:#x}")))
     }
 
     async fn build_components(
@@ -1447,7 +1803,14 @@ impl StrategyExecutor {
 
         if self.router_is_risky(observed_swap.router) {
             self.log_skip(SkipReason::RouterRevertRate, "router failure rate too high");
-            return Ok(None);
+            if self.router_risk_hard_block() {
+                return Ok(None);
+            }
+            tracing::warn!(
+                target: "strategy",
+                router = %format!("{:#x}", observed_swap.router),
+                "Router marked risky, but continuing (ROUTER_RISK_HARD_BLOCK=false)"
+            );
         }
         if !self.liquidity_depth_ok(observed_swap, wallet_chain_balance) {
             self.log_skip(SkipReason::LiquidityDepth, "price impact too high");

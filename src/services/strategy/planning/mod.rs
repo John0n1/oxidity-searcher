@@ -84,8 +84,7 @@ impl StrategyExecutor {
     fn flashloan_prefer_wallet_max_wei() -> U256 {
         // Default: if signer wallet is <= 0.05 ETH, prefer gas-only flashloan mode.
         U256::from(
-            Self::env_u128("FLASHLOAN_PREFER_WALLET_MAX_WEI")
-                .unwrap_or(50_000_000_000_000_000u128),
+            Self::env_u128("FLASHLOAN_PREFER_WALLET_MAX_WEI").unwrap_or(50_000_000_000_000_000u128),
         )
     }
 
@@ -610,8 +609,7 @@ impl StrategyExecutor {
         if !self.has_usable_flashloan_provider() {
             return false;
         }
-        if Self::env_flag_true("FLASHLOAN_FORCE") || Self::env_flag_true("FLASHLOAN_AGGRESSIVE")
-        {
+        if Self::env_flag_true("FLASHLOAN_FORCE") || Self::env_flag_true("FLASHLOAN_AGGRESSIVE") {
             return true;
         }
         if wallet_balance <= Self::flashloan_prefer_wallet_max_wei() {
@@ -1188,7 +1186,8 @@ impl StrategyExecutor {
                             gas_fees,
                         )
                         .await;
-                    let (tokens_out, access_list, mut calldata, mut gas_limit) = match swap_attempt {
+                    let (tokens_out, access_list, mut calldata, mut gas_limit) = match swap_attempt
+                    {
                         Ok(Some(swap)) => (
                             swap.expected_out,
                             swap.access_list.clone(),
@@ -1196,7 +1195,8 @@ impl StrategyExecutor {
                             swap.gas_limit,
                         ),
                         Ok(None) | Err(_) => {
-                            let token_in_hint = path.first().copied().unwrap_or(self.wrapped_native);
+                            let token_in_hint =
+                                path.first().copied().unwrap_or(self.wrapped_native);
                             let token_out_hint = path.last().copied().unwrap_or(target_token);
                             let proportional_hint = if observed.amount_in.is_zero() {
                                 U256::ZERO
@@ -1213,9 +1213,8 @@ impl StrategyExecutor {
                                 .await
                                 .map(|p| p.expected_out)
                                 .unwrap_or(U256::ZERO);
-                            let fallback_expected_out = proportional_hint
-                                .max(route_hint)
-                                .max(U256::from(1u64));
+                            let fallback_expected_out =
+                                proportional_hint.max(route_hint).max(U256::from(1u64));
                             tracing::debug!(
                                 target: "strategy",
                                 router = %format!("{:#x}", exec_router),
@@ -1281,22 +1280,18 @@ impl StrategyExecutor {
                                 "V2 reverse quote missing; using best-effort reverse with minOut=1"
                             );
                         }
-                        let reverse_expected_out =
-                            reverse_expected_out.unwrap_or_else(|| {
-                                // Keep fallback near break-even to avoid systematically
-                                // rejecting otherwise executable paths when cache+RPC quotes
-                                // are temporarily unavailable.
-                                value
-                                    .saturating_mul(U256::from(9_980u64))
-                                    / U256::from(10_000u64)
-                            });
+                        let reverse_expected_out = reverse_expected_out.unwrap_or_else(|| {
+                            // Keep fallback near break-even to avoid systematically
+                            // rejecting otherwise executable paths when cache+RPC quotes
+                            // are temporarily unavailable.
+                            value.saturating_mul(U256::from(9_980u64)) / U256::from(10_000u64)
+                        });
                         let reverse_min_out = if reverse_quote_missing {
                             U256::from(1u64)
                         } else {
                             // Keep reverse leg executable under volatile/taxed paths; profitability
                             // is still enforced after simulation by risk/profit guards.
-                            reverse_expected_out
-                                .saturating_mul(U256::from(7_000u64))
+                            reverse_expected_out.saturating_mul(U256::from(7_000u64))
                                 / U256::from(10_000u64)
                         };
                         let reverse_calldata = self.reserve_cache.build_v2_swap_payload(

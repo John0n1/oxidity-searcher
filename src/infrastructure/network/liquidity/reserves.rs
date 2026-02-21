@@ -751,6 +751,27 @@ impl ReserveCache {
         pairs
     }
 
+    /// Returns V2 tokens ranked by observed pair connectivity (highest first).
+    /// Useful for bounded opportunity scans that should focus on liquid hubs.
+    pub fn top_v2_tokens_by_connectivity(&self, limit: usize) -> Vec<Address> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let mut counts: HashMap<Address, usize> = HashMap::new();
+        for entry in self.v2_pairs_by_tokens.iter() {
+            let (a, b) = *entry.key();
+            *counts.entry(a).or_insert(0) += 1;
+            *counts.entry(b).or_insert(0) += 1;
+        }
+        let mut ranked: Vec<(Address, usize)> = counts.into_iter().collect();
+        ranked.sort_by(|x, y| y.1.cmp(&x.1).then_with(|| x.0.cmp(&y.0)));
+        ranked
+            .into_iter()
+            .take(limit)
+            .map(|(addr, _)| addr)
+            .collect()
+    }
+
     pub fn reserves_for_pair(&self, from: Address, to: Address) -> Option<V2Reserves> {
         let key = Self::token_pair_key(from, to);
         let mut best: Option<(V2Reserves, U256)> = None;

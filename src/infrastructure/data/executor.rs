@@ -100,12 +100,8 @@ mod tests {
         // Solidity callback decodes userData as tuple:
         // abi.decode(userData, (address[], uint256[], bytes[])).
         // So we must encode/decode as function params (no outer wrapper).
-        let tuple_params_encoded = (
-            targets.clone(),
-            values.clone(),
-            data.payloads.clone(),
-        )
-            .abi_encode_params();
+        let tuple_params_encoded =
+            (targets.clone(), values.clone(), data.payloads.clone()).abi_encode_params();
         let params_encoded = data.abi_encode_params();
         assert_eq!(params_encoded, tuple_params_encoded);
 

@@ -751,7 +751,9 @@ impl Simulator {
 }
 
 fn non_stateful_eth_call_bundle_outcomes(count: usize) -> Vec<SimulationOutcome> {
-    let reason = "eth_call fallback is non-stateful for multi-tx bundles; treating as failed simulation".to_string();
+    let reason =
+        "eth_call fallback is non-stateful for multi-tx bundles; treating as failed simulation"
+            .to_string();
     tracing::warn!(
         target: "simulation",
         tx_count = count,

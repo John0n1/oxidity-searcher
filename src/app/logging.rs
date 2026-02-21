@@ -103,7 +103,11 @@ where
     if lines.is_empty() {
         return String::new();
     }
-    let width = lines.iter().map(|line| visible_len(line)).max().unwrap_or(0);
+    let width = lines
+        .iter()
+        .map(|line| visible_len(line))
+        .max()
+        .unwrap_or(0);
     let border = format!("+{}+", "-".repeat(width + 2));
     let mut framed = String::new();
     framed.push_str(&border);
