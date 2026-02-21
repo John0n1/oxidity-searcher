@@ -7,7 +7,7 @@ use clap::Parser;
 use dashmap::DashSet;
 use futures::future::try_join_all;
 use oxidity_searcher::app::config::GlobalSettings;
-use oxidity_searcher::app::logging::setup_logging;
+use oxidity_searcher::app::logging::{format_framed_table, setup_logging};
 use oxidity_searcher::domain::error::AppError;
 use oxidity_searcher::infrastructure::data::address_registry::validate_address_map;
 use oxidity_searcher::infrastructure::data::db::Database;
@@ -81,14 +81,14 @@ fn log_chainlink_feed_summary(chain_id: u64, feeds: &HashMap<String, alloy::prim
         .collect::<Vec<_>>()
         .join(",");
 
-    tracing::info!(
-        target: "config",
-        chain_id,
-        feed_count,
-        critical = %critical_summary,
-        sample = %sample,
-        "Selected canonical Chainlink feeds"
-    );
+    let framed = format_framed_table(vec![
+        "Selected canonical Chainlink feeds".to_string(),
+        format!("chain_id={chain_id}"),
+        format!("feed_count={feed_count}"),
+        format!("critical={critical_summary}"),
+        format!("sample={sample}"),
+    ]);
+    tracing::info!(target: "config", "\n{framed}");
     if !missing_critical.is_empty() {
         tracing::warn!(
             target: "config",

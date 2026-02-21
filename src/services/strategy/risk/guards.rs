@@ -717,6 +717,9 @@ impl StrategyExecutor {
         } else if pnl > pos_0_2 {
             base = (base * 105 / 100).min(9500);
         }
+        if let Some(floor_bps) = self.gas_ratio_limit_floor_bps {
+            base = base.max(floor_bps).min(9500);
+        }
         base
     }
 }

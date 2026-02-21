@@ -409,7 +409,7 @@ impl ReserveCache {
             let key = Self::token_pair_key(token0, token1);
             let seen = seen_by_key.entry(key).or_default();
             if seen.iter().any(|existing| existing == &metadata) {
-                tracing::warn!(
+                tracing::debug!(
                     target: "reserves",
                     pair = %format!("{:#x}", pair),
                     token0 = %format!("{:#x}", token0),

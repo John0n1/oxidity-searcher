@@ -7,6 +7,7 @@ use crate::core::portfolio::PortfolioManager;
 use crate::core::safety::SafetyGuard;
 use crate::core::simulation::Simulator;
 use crate::data::db::Database;
+use crate::app::logging::format_framed_table;
 use crate::domain::constants;
 use crate::infrastructure::data::token_manager::TokenManager;
 use crate::network::gas::{GasFees, GasOracle};
@@ -407,6 +408,7 @@ pub struct StrategyExecutor {
     pub(in crate::services::strategy) profit_floor_abs_wei: U256,
     pub(in crate::services::strategy) profit_floor_mult_gas: u64,
     pub(in crate::services::strategy) profit_floor_min_usd: Option<f64>,
+    pub(in crate::services::strategy) gas_ratio_limit_floor_bps: Option<u64>,
 }
 
 impl StrategyExecutor {
@@ -1129,6 +1131,10 @@ impl StrategyExecutor {
             .ok()
             .and_then(|v| v.trim().parse::<f64>().ok())
             .filter(|v| v.is_finite() && *v > 0.0);
+        let gas_ratio_limit_floor_bps = std::env::var("GAS_RATIO_LIMIT_FLOOR_BPS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .map(|v| v.clamp(3_500, 9_500));
         let universal_router = constants::default_uniswap_universal_router(chain_id);
         let mut universal_routers: HashSet<Address> =
             constants::default_uniswap_universal_routers(chain_id)
@@ -1219,27 +1225,41 @@ impl StrategyExecutor {
             profit_floor_abs_wei,
             profit_floor_mult_gas,
             profit_floor_min_usd,
+            gas_ratio_limit_floor_bps,
         }
     }
 
     pub async fn run(self) -> Result<(), AppError> {
         tracing::info!("StrategyExecutor: waiting for pending transactions");
-        tracing::info!(
-            target: "strategy",
-            chain = self.chain_id,
-            backend = %self.simulation_backend,
-            sandwiches_enabled = self.sandwich_attacks_enabled,
-            strict_atomic_mode = !self.allow_non_wrapped_swaps,
-            profit_base_floor_bps = self.profit_guard_base_floor_multiplier_bps,
-            profit_cost_bps = self.profit_guard_cost_multiplier_bps,
-            profit_min_margin_bps = self.profit_guard_min_margin_bps,
-            liquidity_ratio_floor_ppm = self.liquidity_ratio_floor_ppm,
-            sell_min_native_out_wei = self.sell_min_native_out_wei,
-            profit_floor_abs_wei = %self.profit_floor_abs_wei,
-            profit_floor_mult_gas = self.profit_floor_mult_gas,
-            profit_floor_min_usd = ?self.profit_floor_min_usd,
-            "Strategy configured"
-        );
+        let framed = format_framed_table(vec![
+            "Strategy configured".to_string(),
+            format!(
+                "chain={} backend={} sandwiches_enabled={} strict_atomic_mode={}",
+                self.chain_id,
+                self.simulation_backend,
+                self.sandwich_attacks_enabled,
+                !self.allow_non_wrapped_swaps
+            ),
+            format!(
+                "profit_base_floor_bps={} profit_cost_bps={} profit_min_margin_bps={}",
+                self.profit_guard_base_floor_multiplier_bps,
+                self.profit_guard_cost_multiplier_bps,
+                self.profit_guard_min_margin_bps
+            ),
+            format!(
+                "liquidity_ratio_floor_ppm={} sell_min_native_out_wei={}",
+                self.liquidity_ratio_floor_ppm, self.sell_min_native_out_wei
+            ),
+            format!(
+                "profit_floor_abs_wei={} profit_floor_mult_gas={} profit_floor_min_usd={:?}",
+                self.profit_floor_abs_wei, self.profit_floor_mult_gas, self.profit_floor_min_usd
+            ),
+            format!(
+                "gas_ratio_limit_floor_bps={:?}",
+                self.gas_ratio_limit_floor_bps
+            ),
+        ]);
+        tracing::info!(target: "strategy", "\n{framed}");
 
         let executor = Arc::new(self);
 
