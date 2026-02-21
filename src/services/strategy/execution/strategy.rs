@@ -100,6 +100,45 @@ impl SkipReason {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AllowlistCategory {
+    Routers,
+    Wrappers,
+    Infra,
+}
+
+impl AllowlistCategory {
+    pub fn metric_label(self) -> &'static str {
+        match self {
+            AllowlistCategory::Routers => "routers",
+            AllowlistCategory::Wrappers => "wrappers",
+            AllowlistCategory::Infra => "infra",
+        }
+    }
+}
+
+pub fn classify_allowlist_entry(name: &str) -> AllowlistCategory {
+    let lower = name.trim().to_ascii_lowercase();
+    if lower.contains("wrapped_native")
+        || lower.contains("weth")
+        || lower.contains("wsteth")
+        || lower.contains("steth")
+        || lower.contains("cbeth")
+        || lower.contains("reth")
+    {
+        return AllowlistCategory::Wrappers;
+    }
+    if lower.contains("permit2")
+        || lower.contains("multicall")
+        || lower.contains("quoter")
+        || lower.contains("approval_proxy")
+        || lower.contains("addresses_provider")
+    {
+        return AllowlistCategory::Infra;
+    }
+    AllowlistCategory::Routers
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReceiptStatus {
     ConfirmedSuccess,
@@ -131,6 +170,10 @@ pub(crate) const V3_QUOTE_CACHE_TTL_MS: u64 = 250;
 pub(crate) const TOXIC_PROBE_FAILURE_THRESHOLD: u32 = 3;
 pub(crate) const TOXIC_PROBE_FAILURE_WINDOW_SECS: u64 = 1_800;
 const DEFAULT_FALLBACK_GAS_CAP_GWEI: u64 = 500;
+const DEFAULT_ROUTER_RISK_MIN_SAMPLES: u64 = 20;
+const DEFAULT_ROUTER_RISK_FAIL_RATE_BPS: u64 = 4_000;
+const DEFAULT_SANDWICH_RISK_MAX_VICTIM_SLIPPAGE_BPS: u64 = 1_500;
+const DEFAULT_SANDWICH_RISK_SMALL_WALLET_WEI: u128 = 100_000_000_000_000_000u128; // 0.1 ETH
 
 #[derive(Clone, Copy, Debug)]
 pub struct DynamicGasCap {
@@ -170,6 +213,12 @@ pub struct StrategyStats {
     pub skip_sandwich_risk: AtomicU64,
     pub skip_front_run_build_failed: AtomicU64,
     pub skip_backrun_build_failed: AtomicU64,
+    pub decode_attempts_router: AtomicU64,
+    pub decode_success_router: AtomicU64,
+    pub decode_attempts_wrapper: AtomicU64,
+    pub decode_success_wrapper: AtomicU64,
+    pub decode_attempts_infra: AtomicU64,
+    pub decode_success_infra: AtomicU64,
     pub ingest_queue_depth: AtomicU64,
     pub ingest_queue_dropped: AtomicU64,
     pub ingest_queue_full: AtomicU64,
@@ -207,6 +256,22 @@ pub(in crate::services::strategy) struct PerBlockInputs {
 }
 
 impl StrategyStats {
+    pub fn record_decode_attempt(&self, category: AllowlistCategory, success: bool) {
+        let (attempts, successes) = match category {
+            AllowlistCategory::Routers => {
+                (&self.decode_attempts_router, &self.decode_success_router)
+            }
+            AllowlistCategory::Wrappers => {
+                (&self.decode_attempts_wrapper, &self.decode_success_wrapper)
+            }
+            AllowlistCategory::Infra => (&self.decode_attempts_infra, &self.decode_success_infra),
+        };
+        attempts.fetch_add(1, Ordering::Relaxed);
+        if success {
+            successes.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     pub fn record_bundle(&self, entry: BundleTelemetry) {
         let mut guard = self.bundles.lock().unwrap_or_else(|e| e.into_inner());
         guard.push(entry);
@@ -304,6 +369,8 @@ pub struct StrategyExecutor {
     pub(in crate::services::strategy) http_provider: HttpProvider,
     pub(in crate::services::strategy) dry_run: bool,
     pub(in crate::services::strategy) router_allowlist: Arc<DashSet<Address>>,
+    pub(in crate::services::strategy) wrapper_allowlist: Arc<DashSet<Address>>,
+    pub(in crate::services::strategy) infra_allowlist: Arc<DashSet<Address>>,
     pub(in crate::services::strategy) router_discovery:
         Option<Arc<crate::services::strategy::router_discovery::RouterDiscovery>>,
     pub(in crate::services::strategy) skip_log_every: u64,
@@ -337,9 +404,80 @@ pub struct StrategyExecutor {
     pub(in crate::services::strategy) receipt_timeout_ms: u64,
     pub(in crate::services::strategy) receipt_confirm_blocks: u64,
     pub(in crate::services::strategy) emergency_exit_on_unknown_receipt: bool,
+    pub(in crate::services::strategy) profit_floor_abs_wei: U256,
+    pub(in crate::services::strategy) profit_floor_mult_gas: u64,
+    pub(in crate::services::strategy) profit_floor_min_usd: Option<f64>,
 }
 
 impl StrategyExecutor {
+    fn env_u64_bounded(key: &str, default: u64, min: u64, max: u64) -> u64 {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(default)
+            .clamp(min, max)
+    }
+
+    fn env_u32_bounded(key: &str, default: u32, min: u32, max: u32) -> u32 {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .unwrap_or(default)
+            .clamp(min, max)
+    }
+
+    fn env_u128_bounded(key: &str, default: u128, min: u128, max: u128) -> u128 {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<u128>().ok())
+            .unwrap_or(default)
+            .clamp(min, max)
+    }
+
+    pub(in crate::services::strategy) fn router_risk_min_samples(&self) -> u64 {
+        Self::env_u64_bounded("ROUTER_RISK_MIN_SAMPLES", DEFAULT_ROUTER_RISK_MIN_SAMPLES, 1, 500)
+    }
+
+    pub(in crate::services::strategy) fn router_risk_fail_rate_bps(&self) -> u64 {
+        Self::env_u64_bounded("ROUTER_RISK_FAIL_RATE_BPS", DEFAULT_ROUTER_RISK_FAIL_RATE_BPS, 500, 9_500)
+    }
+
+    pub(in crate::services::strategy) fn sandwich_risk_max_victim_slippage_bps(&self) -> u64 {
+        Self::env_u64_bounded(
+            "SANDWICH_RISK_MAX_VICTIM_SLIPPAGE_BPS",
+            DEFAULT_SANDWICH_RISK_MAX_VICTIM_SLIPPAGE_BPS,
+            100,
+            9_500,
+        )
+    }
+
+    pub(in crate::services::strategy) fn sandwich_risk_small_wallet_wei(&self) -> U256 {
+        U256::from(Self::env_u128_bounded(
+            "SANDWICH_RISK_SMALL_WALLET_WEI",
+            DEFAULT_SANDWICH_RISK_SMALL_WALLET_WEI,
+            1_000_000_000_000_000u128,      // 0.001 ETH
+            5_000_000_000_000_000_000u128,  // 5 ETH
+        ))
+    }
+
+    pub(in crate::services::strategy) fn toxic_probe_failure_threshold(&self) -> u32 {
+        Self::env_u32_bounded(
+            "TOXIC_PROBE_FAILURE_THRESHOLD",
+            TOXIC_PROBE_FAILURE_THRESHOLD,
+            1,
+            20,
+        )
+    }
+
+    pub(in crate::services::strategy) fn toxic_probe_failure_window_secs(&self) -> u64 {
+        Self::env_u64_bounded(
+            "TOXIC_PROBE_FAILURE_WINDOW_SECS",
+            TOXIC_PROBE_FAILURE_WINDOW_SECS,
+            30,
+            86_400,
+        )
+    }
+
     pub(crate) fn has_usable_flashloan_provider(&self) -> bool {
         if !self.flashloan_enabled || self.executor.is_none() {
             return false;
@@ -519,11 +657,14 @@ impl StrategyExecutor {
     pub(in crate::services::strategy) fn router_is_risky(&self, router: Address) -> bool {
         if let Some(entry) = self.router_sim_stats.get(&router) {
             let (fails, total) = *entry;
-            if total < 20 {
+            let min_samples = self.router_risk_min_samples();
+            if total < min_samples {
                 return false;
             }
-            let rate = fails as f64 / total as f64;
-            return rate >= 0.40;
+            let fail_rate_bps = ((fails as u128).saturating_mul(10_000u128))
+                .checked_div((total as u128).max(1))
+                .unwrap_or(10_000u128) as u64;
+            return fail_rate_bps >= self.router_risk_fail_rate_bps();
         }
         false
     }
@@ -783,6 +924,33 @@ impl StrategyExecutor {
         }
     }
 
+    pub(in crate::services::strategy) fn allowlist_category_for(
+        &self,
+        address: Address,
+    ) -> Option<AllowlistCategory> {
+        if self.router_allowlist.contains(&address) {
+            return Some(AllowlistCategory::Routers);
+        }
+        if self.wrapper_allowlist.contains(&address) {
+            return Some(AllowlistCategory::Wrappers);
+        }
+        if self.infra_allowlist.contains(&address) {
+            return Some(AllowlistCategory::Infra);
+        }
+        None
+    }
+
+    pub(in crate::services::strategy) fn min_usd_floor_wei(
+        &self,
+        native_price_usd: f64,
+    ) -> Option<U256> {
+        let min_usd = self.profit_floor_min_usd?;
+        if !native_price_usd.is_finite() || native_price_usd <= 0.0 {
+            return None;
+        }
+        f64_native_to_wei(min_usd / native_price_usd)
+    }
+
     pub(in crate::services::strategy) async fn estimate_native_out(
         &self,
         amount: U256,
@@ -899,6 +1067,8 @@ impl StrategyExecutor {
         http_provider: HttpProvider,
         dry_run: bool,
         router_allowlist: Arc<DashSet<Address>>,
+        wrapper_allowlist: Arc<DashSet<Address>>,
+        infra_allowlist: Arc<DashSet<Address>>,
         router_discovery: Option<Arc<crate::services::strategy::router_discovery::RouterDiscovery>>,
         skip_log_every: u64,
         wrapped_native: Address,
@@ -920,6 +1090,25 @@ impl StrategyExecutor {
         emergency_exit_on_unknown_receipt: bool,
     ) -> Self {
         let semaphore_size = worker_limit.max(1);
+        let profit_floor_abs_wei = std::env::var("PROFIT_FLOOR_ABS_ETH")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .and_then(f64_native_to_wei)
+            .unwrap_or(*constants::MIN_PROFIT_THRESHOLD_WEI);
+        let default_mult_gas = if chain_id == constants::CHAIN_ETHEREUM {
+            15u64
+        } else {
+            10u64
+        };
+        let profit_floor_mult_gas = std::env::var("PROFIT_FLOOR_MULT_GAS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(default_mult_gas)
+            .clamp(1, 100);
+        let profit_floor_min_usd = std::env::var("PROFIT_FLOOR_MIN_USD")
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v > 0.0);
         let universal_router = constants::default_uniswap_universal_router(chain_id);
         let mut universal_routers: HashSet<Address> =
             constants::default_uniswap_universal_routers(chain_id)
@@ -966,14 +1155,15 @@ impl StrategyExecutor {
             slippage_bps,
             profit_guard_base_floor_multiplier_bps: profit_guard_base_floor_multiplier_bps
                 .clamp(75, 20_000),
-            profit_guard_cost_multiplier_bps: profit_guard_cost_multiplier_bps
-                .clamp(1_000, 20_000),
+            profit_guard_cost_multiplier_bps: profit_guard_cost_multiplier_bps.clamp(1_000, 20_000),
             profit_guard_min_margin_bps: profit_guard_min_margin_bps.clamp(35, 5_000),
             liquidity_ratio_floor_ppm: liquidity_ratio_floor_ppm.clamp(35, 10_000),
             sell_min_native_out_wei: sell_min_native_out_wei.max(500_000_000_000),
             http_provider,
             dry_run,
             router_allowlist,
+            wrapper_allowlist,
+            infra_allowlist,
             router_discovery,
             skip_log_every: skip_log_every.max(1),
             wrapped_native,
@@ -1006,6 +1196,9 @@ impl StrategyExecutor {
             receipt_timeout_ms: receipt_timeout_ms.max(receipt_poll_ms.max(100)),
             receipt_confirm_blocks: receipt_confirm_blocks.max(1),
             emergency_exit_on_unknown_receipt,
+            profit_floor_abs_wei,
+            profit_floor_mult_gas,
+            profit_floor_min_usd,
         }
     }
 
@@ -1022,6 +1215,9 @@ impl StrategyExecutor {
             profit_min_margin_bps = self.profit_guard_min_margin_bps,
             liquidity_ratio_floor_ppm = self.liquidity_ratio_floor_ppm,
             sell_min_native_out_wei = self.sell_min_native_out_wei,
+            profit_floor_abs_wei = %self.profit_floor_abs_wei,
+            profit_floor_mult_gas = self.profit_floor_mult_gas,
+            profit_floor_min_usd = ?self.profit_floor_min_usd,
             "Strategy configured"
         );
 
@@ -1625,7 +1821,10 @@ mod tests {
             floor_large > floor_small,
             "profit floor should scale with balance"
         );
-        assert!(floor_small >= U256::from(2_000_000_000_000_000u64));
+        assert!(
+            floor_large >= floor_small.saturating_mul(U256::from(10u64)),
+            "scaled floor should grow by a meaningful multiple"
+        );
     }
 
     #[test]
@@ -2086,6 +2285,8 @@ mod tests {
         let nonce_manager = NonceManager::new(http.clone(), Address::ZERO);
         let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
         let router_allowlist = Arc::new(DashSet::new());
+        let wrapper_allowlist = Arc::new(DashSet::new());
+        let infra_allowlist = Arc::new(DashSet::new());
 
         StrategyExecutor::new(
             work_queue,
@@ -2113,6 +2314,8 @@ mod tests {
             http.clone(),
             true,
             router_allowlist,
+            wrapper_allowlist,
+            infra_allowlist,
             None,
             500,
             weth_mainnet(),

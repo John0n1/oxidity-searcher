@@ -104,6 +104,12 @@ pub struct PriceApiKeys {
     pub coindesk: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ChainlinkFeedAuditOptions {
+    pub strict: bool,
+    pub allow_stale_critical: bool,
+}
+
 impl PriceFeed {
     pub fn new(
         provider: HttpProvider,
@@ -133,6 +139,18 @@ impl PriceFeed {
     }
 
     pub async fn audit_chainlink_feeds(&self, strict: bool) -> Result<(), AppError> {
+        self.audit_chainlink_feeds_with_options(ChainlinkFeedAuditOptions {
+            strict,
+            allow_stale_critical: false,
+        })
+        .await
+    }
+
+    pub async fn audit_chainlink_feeds_with_options(
+        &self,
+        options: ChainlinkFeedAuditOptions,
+    ) -> Result<(), AppError> {
+        let strict = options.strict;
         if self.chainlink_feeds.is_empty() {
             tracing::warn!(
                 target: "price_feed",
@@ -238,29 +256,44 @@ impl PriceFeed {
         }
         if !stale_critical.is_empty() {
             for row in stale_critical.iter().take(12) {
-                tracing::warn!(
-                    target: "price_feed",
-                    strict,
-                    chain_id = self.chain_id,
-                    issue = %row,
-                    "Chainlink feed audit stale critical feed"
-                );
+                if options.allow_stale_critical {
+                    tracing::warn!(
+                        target: "price_feed",
+                        strict,
+                        allow_stale_critical = options.allow_stale_critical,
+                        chain_id = self.chain_id,
+                        issue = %row,
+                        "Chainlink feed audit stale critical feed (sync-lag override active)"
+                    );
+                } else {
+                    tracing::warn!(
+                        target: "price_feed",
+                        strict,
+                        allow_stale_critical = options.allow_stale_critical,
+                        chain_id = self.chain_id,
+                        issue = %row,
+                        "Chainlink feed audit stale critical feed"
+                    );
+                }
             }
         }
 
-        if !invalid.is_empty() || !stale_critical.is_empty() || (strict && !stale.is_empty()) {
+        let stale_critical_blocking = !options.allow_stale_critical && !stale_critical.is_empty();
+        if !invalid.is_empty() || stale_critical_blocking || (strict && !stale.is_empty()) {
             return Err(AppError::Config(format!(
-                "Chainlink feed audit failed (invalid={}, stale_critical={}, stale={}, strict={})",
+                "Chainlink feed audit failed (invalid={}, stale_critical={}, stale={}, strict={}, allow_stale_critical={})",
                 invalid.len(),
                 stale_critical.len(),
                 stale.len(),
-                strict
+                strict,
+                options.allow_stale_critical
             )));
         }
 
         tracing::info!(
             target: "price_feed",
             strict,
+            allow_stale_critical = options.allow_stale_critical,
             chain_id = self.chain_id,
             stale_critical = stale_critical.len(),
             stale = stale.len(),

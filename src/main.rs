@@ -20,6 +20,7 @@ use oxidity_searcher::services::strategy::engine::Engine;
 use oxidity_searcher::services::strategy::portfolio::PortfolioManager;
 use oxidity_searcher::services::strategy::safety::SafetyGuard;
 use oxidity_searcher::services::strategy::simulation::{SimulationBackend, Simulator};
+use oxidity_searcher::services::strategy::strategy::{AllowlistCategory, classify_allowlist_entry};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -50,6 +51,10 @@ struct Cli {
     /// Slippage basis points for crafted bundles
     #[arg(long)]
     slippage_bps: Option<u64>,
+
+    /// Base directory for data files (tokenlist, address registry, feeds, pairs)
+    #[arg(long)]
+    data_dir: Option<String>,
 }
 
 fn log_chainlink_feed_summary(chain_id: u64, feeds: &HashMap<String, alloy::primitives::Address>) {
@@ -97,8 +102,22 @@ fn log_chainlink_feed_summary(chain_id: u64, feeds: &HashMap<String, alloy::prim
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
     let cli = Cli::parse();
+    if let Some(data_dir) = cli.data_dir.as_deref()
+        && !data_dir.trim().is_empty()
+    {
+        unsafe {
+            std::env::set_var("DATA_DIR", data_dir);
+        }
+    }
 
     let settings = GlobalSettings::load_with_path(cli.config.as_deref())?;
+    if std::env::var("DATA_DIR").is_err()
+        && let Some(data_dir) = settings.data_dir()
+    {
+        unsafe {
+            std::env::set_var("DATA_DIR", data_dir);
+        }
+    }
     setup_logging(if settings.debug { "debug" } else { "info" }, false);
 
     if let Some(bind) = settings.metrics_bind_value() {
@@ -160,7 +179,9 @@ async fn main() -> Result<(), AppError> {
     let strategy_enabled_flag =
         !cli.no_strategy && cli.strategy_enabled && settings.strategy_enabled;
     let worker_limit = settings.strategy_worker_limit();
-    let tokenlist_path = settings.tokenlist_path();
+    let tokenlist_path = settings.tokenlist_path()?;
+    let pairs_path = settings.pairs_path()?;
+    let address_registry_path = settings.address_registry_path()?;
     let token_manager = Arc::new(
         TokenManager::load_from_file(&tokenlist_path).unwrap_or_else(|e| {
             tracing::warn!(
@@ -224,7 +245,8 @@ async fn main() -> Result<(), AppError> {
         } else {
             log_chainlink_feed_summary(chain_id, &chainlink_feeds);
         }
-        let wrapped_native = oxidity_searcher::common::constants::wrapped_native_for_chain(chain_id);
+        let wrapped_native =
+            oxidity_searcher::common::constants::wrapped_native_for_chain(chain_id);
         let price_feed = PriceFeed::new(
             http_provider.clone(),
             chain_id,
@@ -240,8 +262,20 @@ async fn main() -> Result<(), AppError> {
 
         let strategy_enabled = strategy_enabled_flag;
         let router_allowlist = Arc::new(DashSet::new());
-        for addr in settings.routers_for_chain(chain_id)?.values().copied() {
-            router_allowlist.insert(addr);
+        let wrapper_allowlist = Arc::new(DashSet::new());
+        let infra_allowlist = Arc::new(DashSet::new());
+        for (name, addr) in settings.routers_for_chain(chain_id)? {
+            match classify_allowlist_entry(&name) {
+                AllowlistCategory::Routers => {
+                    router_allowlist.insert(addr);
+                }
+                AllowlistCategory::Wrappers => {
+                    wrapper_allowlist.insert(addr);
+                }
+                AllowlistCategory::Infra => {
+                    infra_allowlist.insert(addr);
+                }
+            }
         }
         if let Ok(approved) = db.approved_routers(chain_id).await {
             for addr in approved {
@@ -327,6 +361,8 @@ async fn main() -> Result<(), AppError> {
             settings.liquidity_ratio_floor_ppm_value(),
             settings.sell_min_native_out_wei_value(),
             router_allowlist,
+            wrapper_allowlist,
+            infra_allowlist,
             router_discovery,
             settings.skip_log_every_value(),
             wrapped_native,
@@ -341,7 +377,8 @@ async fn main() -> Result<(), AppError> {
             settings.bundle_use_replacement_uuid_for_chain(chain_id),
             settings.bundle_cancel_previous_for_chain(chain_id),
             worker_limit,
-            settings.address_registry_path(),
+            address_registry_path.clone(),
+            pairs_path.clone(),
             settings.receipt_poll_ms_value(),
             settings.receipt_timeout_ms_value(),
             settings.receipt_confirm_blocks_value(),

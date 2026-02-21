@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
+use crate::common::data_path::resolve_default_data_file;
 use alloy::primitives::{Address, U256};
 use lazy_static::lazy_static;
 use serde::Deserialize;
@@ -37,23 +38,30 @@ pub const DEFAULT_GAS_LIMIT: u64 = 250_000;
 pub const MAX_GAS_LIMIT: u64 = 8_000_000;
 pub const DEFAULT_PRIORITY_FEE_GWEI: u64 = 2;
 
+// Flashbots documented limits.
+pub const FLASHBOTS_MAX_TXS: usize = 100;
+pub const FLASHBOTS_MAX_BYTES: usize = 300_000;
+
 // =============================================================================
 // MEV CONSTANTS (Using U256 for precise Wei math)
 // =============================================================================
 
 lazy_static! {
-    // 0.0012 ETH baseline net profit floor; still conservative, but less likely to choke
-    // valid opportunities in very low-fee conditions.
+    // 0.0009 ETH baseline net profit floor; conservative enough for weak edges while
+    // still allowing low-fee opportunities to pass.
     pub static ref MIN_PROFIT_THRESHOLD_WEI: U256 = U256::from(900_000_000_000_000u64);
 
     // 0.00002 ETH
     pub static ref LOW_BALANCE_THRESHOLD_WEI: U256 = U256::from(20_000_000_000_000u64);
 
-    static ref ADDRESS_REGISTRY_DEFAULTS: AddressRegistryDefaults =
-        load_address_registry_defaults("data/address_registry.json");
+    static ref ADDRESS_REGISTRY_DEFAULTS: AddressRegistryDefaults = {
+        let path = resolve_default_data_file("address_registry.json", None);
+        load_address_registry_defaults(path.as_path())
+    };
 
     static ref WRAPPED_NATIVE_BY_CHAIN: HashMap<u64, Address> = {
-        let mut merged = load_wrapped_native_from_tokenlist("data/tokenlist.json");
+        let tokenlist = resolve_default_data_file("tokenlist.json", None);
+        let mut merged = load_wrapped_native_from_tokenlist(tokenlist.as_path());
         // If registry provides a wrapped-native address per chain, prefer it.
         for (chain_id, addr) in ADDRESS_REGISTRY_DEFAULTS.wrapped_native_by_chain.iter() {
             merged.insert(*chain_id, *addr);
@@ -61,8 +69,10 @@ lazy_static! {
         merged
     };
 
-    static ref NATIVE_SENTINEL_BY_CHAIN: HashMap<u64, Address> =
-        load_native_sentinel_from_tokenlist("data/tokenlist.json");
+    static ref NATIVE_SENTINEL_BY_CHAIN: HashMap<u64, Address> = {
+        let tokenlist = resolve_default_data_file("tokenlist.json", None);
+        load_native_sentinel_from_tokenlist(tokenlist.as_path())
+    };
 }
 
 #[derive(Debug, Clone, Default)]
@@ -105,8 +115,8 @@ fn parse_address(raw: &str) -> Option<Address> {
     Address::from_str(raw).ok()
 }
 
-fn load_address_registry_defaults(path: &str) -> AddressRegistryDefaults {
-    let p = Path::new(path);
+fn load_address_registry_defaults(path: &Path) -> AddressRegistryDefaults {
+    let p = path;
     if !p.exists() {
         return AddressRegistryDefaults::default();
     }
@@ -194,8 +204,8 @@ fn native_symbol_match(chain_id: u64, symbol_upper: &str) -> bool {
     }
 }
 
-fn load_wrapped_native_from_tokenlist(path: &str) -> HashMap<u64, Address> {
-    let p = Path::new(path);
+fn load_wrapped_native_from_tokenlist(path: &Path) -> HashMap<u64, Address> {
+    let p = path;
     if !p.exists() {
         return HashMap::new();
     }
@@ -229,8 +239,8 @@ fn load_wrapped_native_from_tokenlist(path: &str) -> HashMap<u64, Address> {
     out
 }
 
-fn load_native_sentinel_from_tokenlist(path: &str) -> HashMap<u64, Address> {
-    let p = Path::new(path);
+fn load_native_sentinel_from_tokenlist(path: &Path) -> HashMap<u64, Address> {
+    let p = path;
     if !p.exists() {
         return HashMap::new();
     }
@@ -428,5 +438,11 @@ mod tests {
         assert_eq!(native_symbol_for_chain(CHAIN_ETHEREUM), "ETH");
         assert_eq!(native_symbol_for_chain(CHAIN_BSC), "BNB");
         assert_eq!(native_symbol_for_chain(CHAIN_POLYGON), "MATIC");
+    }
+
+    #[test]
+    fn flashbots_limits_match_protocol_spec() {
+        assert_eq!(FLASHBOTS_MAX_TXS, 100);
+        assert_eq!(FLASHBOTS_MAX_BYTES, 300_000);
     }
 }

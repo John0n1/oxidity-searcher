@@ -11,15 +11,14 @@ use crate::network::price_feed::PriceQuote;
 use crate::services::strategy::bundles::BundlePlan;
 use crate::services::strategy::decode::{
     ObservedSwap, RouterKind, SwapDirection, decode_swap, decode_swap_input, direction,
-    extract_swap_deadline,
-    target_token,
+    extract_swap_deadline, target_token,
 };
 use crate::services::strategy::planning::bundles::NonceLease;
 use crate::services::strategy::planning::{ApproveTx, BackrunTx, FrontRunTx};
-use crate::services::strategy::strategy::{BundleTelemetry, PerBlockInputs};
 use crate::services::strategy::strategy::{
-    ReceiptStatus, SkipReason, StrategyExecutor, StrategyWork,
+    AllowlistCategory, ReceiptStatus, SkipReason, StrategyExecutor, StrategyWork,
 };
+use crate::services::strategy::strategy::{BundleTelemetry, PerBlockInputs};
 use alloy::consensus::Transaction as ConsensusTx;
 use alloy::eips::eip2718::Encodable2718;
 use alloy::network::TransactionResponse;
@@ -114,11 +113,7 @@ impl StrategyExecutor {
         let mut planned = 0u64;
 
         for approval in approvals {
-            let gas = approval
-                .request
-                .gas
-                .unwrap_or(70_000)
-                .clamp(40_000, 90_000);
+            let gas = approval.request.gas.unwrap_or(70_000).clamp(40_000, 90_000);
             planned = planned.saturating_add(gas);
         }
 
@@ -580,6 +575,64 @@ impl StrategyExecutor {
         Some((direction, target_token))
     }
 
+    fn is_wrapper_call_selector(selector: &[u8; 4]) -> bool {
+        // Common wrapper operations (WETH-like): deposit()/withdraw(uint256).
+        matches!(
+            selector,
+            [0xd0, 0xe3, 0x0d, 0xb0] | [0x2e, 0x1a, 0x7d, 0x4d]
+        )
+    }
+
+    fn is_infra_call_selector(selector: &[u8; 4]) -> bool {
+        // Common multicall/aggregate selectors used by infra contracts.
+        matches!(
+            selector,
+            [0xac, 0x96, 0x50, 0xd8]
+                | [0x5a, 0xe4, 0x01, 0xdc]
+                | [0x82, 0xad, 0x56, 0xcb]
+                | [0x25, 0x2d, 0xba, 0x42]
+        )
+    }
+
+    fn handle_wrapper_or_infra_noise(
+        &self,
+        router: Address,
+        input: &[u8],
+        category: AllowlistCategory,
+    ) -> bool {
+        let selector = input
+            .get(..4)
+            .and_then(|s| <[u8; 4]>::try_from(s).ok())
+            .unwrap_or([0u8; 4]);
+        let decoded = match category {
+            AllowlistCategory::Wrappers => Self::is_wrapper_call_selector(&selector),
+            AllowlistCategory::Infra => Self::is_infra_call_selector(&selector),
+            AllowlistCategory::Routers => false,
+        };
+        self.stats.record_decode_attempt(category, decoded);
+        let category_label = category.metric_label();
+        if decoded {
+            self.log_skip(
+                SkipReason::TokenCall,
+                &format!(
+                    "decoded_{category_label}_noise router={:#x} selector=0x{}",
+                    router,
+                    hex::encode(selector)
+                ),
+            );
+        } else {
+            self.log_skip(
+                SkipReason::DecodeFailed,
+                &format!(
+                    "unsupported_{category_label}_call router={:#x} selector=0x{}",
+                    router,
+                    hex::encode(selector)
+                ),
+            );
+        }
+        decoded
+    }
+
     async fn evaluate_mempool_tx(
         &self,
         tx: &Transaction,
@@ -598,35 +651,46 @@ impl StrategyExecutor {
         let to_addr = match tx.kind() {
             TxKind::Call(addr) => addr,
             TxKind::Create => {
-                self.log_skip(
-                    SkipReason::DecodeFailed,
-                    "tx_create_not_strategy_candidate",
-                );
+                self.log_skip(SkipReason::DecodeFailed, "tx_create_not_strategy_candidate");
                 return Ok(None);
             }
         };
-        let observed_swap = decode_swap(tx);
-
-        if !self.router_allowlist.contains(&to_addr) {
-            if Self::is_common_token_call(tx.input()) {
-                // Plain ERC20 transfer/approve noise is not a strategy candidate.
-                self.log_skip(SkipReason::TokenCall, "erc20_transfer_or_approve_noise");
+        let category = self.allowlist_category_for(to_addr);
+        match category {
+            Some(AllowlistCategory::Wrappers) => {
+                let _ = self.handle_wrapper_or_infra_noise(
+                    to_addr,
+                    tx.input(),
+                    AllowlistCategory::Wrappers,
+                );
                 return Ok(None);
             }
-            if let Some(discovery) = &self.router_discovery {
-                discovery.record_unknown_router(to_addr, "mempool");
+            Some(AllowlistCategory::Infra) => {
+                let _ = self.handle_wrapper_or_infra_noise(
+                    to_addr,
+                    tx.input(),
+                    AllowlistCategory::Infra,
+                );
+                return Ok(None);
             }
-            if observed_swap.is_none() {
+            Some(AllowlistCategory::Routers) => {}
+            None => {
+                if Self::is_common_token_call(tx.input()) {
+                    // Plain ERC20 transfer/approve noise is not a strategy candidate.
+                    self.log_skip(SkipReason::TokenCall, "erc20_transfer_or_approve_noise");
+                    return Ok(None);
+                }
+                if let Some(discovery) = &self.router_discovery {
+                    discovery.record_unknown_router(to_addr, "mempool");
+                }
                 self.log_skip(SkipReason::UnknownRouter, &format!("to={to_addr:#x}"));
                 return Ok(None);
             }
-            tracing::debug!(
-                target: "strategy",
-                router = %format!("{to_addr:#x}"),
-                "Decoded swap on non-allowlisted router; evaluating opportunistically"
-            );
         }
 
+        let observed_swap = decode_swap(tx);
+        self.stats
+            .record_decode_attempt(AllowlistCategory::Routers, observed_swap.is_some());
         let Some(observed_swap) = observed_swap else {
             self.log_skip(SkipReason::DecodeFailed, "unable to decode swap input");
             return Ok(None);
@@ -913,23 +977,37 @@ impl StrategyExecutor {
                 return Ok(None);
             }
         }
-        let observed_swap = decode_swap_input(hint.router, &hint.call_data, hint.value);
-
-        if !self.router_allowlist.contains(&hint.router) {
-            if let Some(discovery) = &self.router_discovery {
-                discovery.record_unknown_router(hint.router, "mev_share");
+        let category = self.allowlist_category_for(hint.router);
+        match category {
+            Some(AllowlistCategory::Wrappers) => {
+                let _ = self.handle_wrapper_or_infra_noise(
+                    hint.router,
+                    &hint.call_data,
+                    AllowlistCategory::Wrappers,
+                );
+                return Ok(None);
             }
-            if observed_swap.is_none() {
+            Some(AllowlistCategory::Infra) => {
+                let _ = self.handle_wrapper_or_infra_noise(
+                    hint.router,
+                    &hint.call_data,
+                    AllowlistCategory::Infra,
+                );
+                return Ok(None);
+            }
+            Some(AllowlistCategory::Routers) => {}
+            None => {
+                if let Some(discovery) = &self.router_discovery {
+                    discovery.record_unknown_router(hint.router, "mev_share");
+                }
                 self.log_skip(SkipReason::UnknownRouter, &format!("to={:#x}", hint.router));
                 return Ok(None);
             }
-            tracing::debug!(
-                target: "strategy",
-                router = %format!("{:#x}", hint.router),
-                "Decoded MEV-Share swap on non-allowlisted router; evaluating opportunistically"
-            );
         }
 
+        let observed_swap = decode_swap_input(hint.router, &hint.call_data, hint.value);
+        self.stats
+            .record_decode_attempt(AllowlistCategory::Routers, observed_swap.is_some());
         let Some(observed_swap) = observed_swap else {
             self.log_skip(SkipReason::DecodeFailed, "unable to decode swap input");
             return Ok(None);
@@ -1270,8 +1348,8 @@ impl StrategyExecutor {
             let min_ratio =
                 observed_swap.min_out.saturating_mul(U256::from(10_000u64)) / expected_out;
             let slippage_room_bps = 10_000u64.saturating_sub(min_ratio.to::<u64>());
-            if slippage_room_bps > 1_500
-                && wallet_chain_balance < U256::from(100_000_000_000_000_000u128)
+            if slippage_room_bps > self.sandwich_risk_max_victim_slippage_bps()
+                && wallet_chain_balance < self.sandwich_risk_small_wallet_wei()
             {
                 self.log_skip(
                     SkipReason::SandwichRisk,
@@ -1627,6 +1705,25 @@ impl StrategyExecutor {
             std::time::Duration::from_millis(100),
         )
         .await?;
+        if bundle_sims.len() != bundle_requests.len() {
+            self.record_router_sim(router, false);
+            self.log_skip(
+                SkipReason::SimulationFailed,
+                &format!(
+                    "bundle sim outcome count mismatch expected={} got={}",
+                    bundle_requests.len(),
+                    bundle_sims.len()
+                ),
+            );
+            tracing::warn!(
+                target: "simulation",
+                expected = bundle_requests.len(),
+                got = bundle_sims.len(),
+                router = %format!("{:#x}", router),
+                "bundle simulation returned unexpected number of outcomes"
+            );
+            return Ok(None);
+        }
         if let Some((failed_idx, failure)) =
             bundle_sims.iter().enumerate().find(|(_, o)| !o.success)
         {
@@ -1643,58 +1740,58 @@ impl StrategyExecutor {
                 failed_flashloan_asset,
                 failed_flashloan_amount,
                 failed_is_last,
-            ) =
-                if let Some(req) = bundle_requests.get(failed_idx) {
-                    let to = match req.to.as_ref() {
-                        Some(alloy::primitives::TxKind::Call(addr)) => format!("{addr:#x}"),
-                        Some(alloy::primitives::TxKind::Create) => "create".to_string(),
-                        None => "none".to_string(),
-                    };
-                    let input = req.input.clone().into_input().unwrap_or_default();
-                    let selector = if input.len() >= 4 {
-                        format!("0x{}", hex::encode(&input[..4]))
-                    } else {
-                        "0x".to_string()
-                    };
-                    let mut flashloan_asset = "n/a".to_string();
-                    let mut flashloan_amount = U256::ZERO;
-                    if selector == "0x76ec49ba" {
-                        if let Ok(decoded) =
-                            UnifiedHardenedExecutor::executeFlashLoanCall::abi_decode(&input)
-                        {
-                            if let Some(asset) = decoded.assets.first().copied() {
-                                flashloan_asset = format!("{asset:#x}");
-                            }
-                            if let Some(amount) = decoded.amounts.first().copied() {
-                                flashloan_amount = amount;
-                            }
-                        }
-                    } else if selector == "0xba0eef35"
-                        && let Ok(decoded) = UnifiedHardenedExecutor::executeAaveFlashLoanSimpleCall::abi_decode(&input)
-                    {
-                        flashloan_asset = format!("{:#x}", decoded.asset);
-                        flashloan_amount = decoded.amount;
-                    }
-                    (
-                        to,
-                        req.gas.unwrap_or_default(),
-                        req.value.unwrap_or(U256::ZERO),
-                        selector,
-                        flashloan_asset,
-                        flashloan_amount,
-                        failed_idx + 1 == bundle_requests.len(),
-                    )
-                } else {
-                    (
-                        "unknown".to_string(),
-                        0u64,
-                        U256::ZERO,
-                        "0x".to_string(),
-                        "n/a".to_string(),
-                        U256::ZERO,
-                        false,
-                    )
+            ) = if let Some(req) = bundle_requests.get(failed_idx) {
+                let to = match req.to.as_ref() {
+                    Some(alloy::primitives::TxKind::Call(addr)) => format!("{addr:#x}"),
+                    Some(alloy::primitives::TxKind::Create) => "create".to_string(),
+                    None => "none".to_string(),
                 };
+                let input = req.input.clone().into_input().unwrap_or_default();
+                let selector = if input.len() >= 4 {
+                    format!("0x{}", hex::encode(&input[..4]))
+                } else {
+                    "0x".to_string()
+                };
+                let mut flashloan_asset = "n/a".to_string();
+                let mut flashloan_amount = U256::ZERO;
+                if selector == "0x76ec49ba" {
+                    if let Ok(decoded) =
+                        UnifiedHardenedExecutor::executeFlashLoanCall::abi_decode(&input)
+                    {
+                        if let Some(asset) = decoded.assets.first().copied() {
+                            flashloan_asset = format!("{asset:#x}");
+                        }
+                        if let Some(amount) = decoded.amounts.first().copied() {
+                            flashloan_amount = amount;
+                        }
+                    }
+                } else if selector == "0xba0eef35"
+                    && let Ok(decoded) =
+                        UnifiedHardenedExecutor::executeAaveFlashLoanSimpleCall::abi_decode(&input)
+                {
+                    flashloan_asset = format!("{:#x}", decoded.asset);
+                    flashloan_amount = decoded.amount;
+                }
+                (
+                    to,
+                    req.gas.unwrap_or_default(),
+                    req.value.unwrap_or(U256::ZERO),
+                    selector,
+                    flashloan_asset,
+                    flashloan_amount,
+                    failed_idx + 1 == bundle_requests.len(),
+                )
+            } else {
+                (
+                    "unknown".to_string(),
+                    0u64,
+                    U256::ZERO,
+                    "0x".to_string(),
+                    "n/a".to_string(),
+                    U256::ZERO,
+                    false,
+                )
+            };
             self.log_skip(SkipReason::SimulationFailed, &detail);
             tracing::debug!(
                 target: "simulation",
@@ -1786,44 +1883,6 @@ impl StrategyExecutor {
             .saturating_add(bribe_wei)
             .saturating_add(backrun.flashloan_premium);
         let net_profit_wei = gross_profit_wei.saturating_sub(effective_cost_wei);
-        let base_profit_floor = StrategyExecutor::dynamic_profit_floor(wallet_chain_balance);
-        let extra_costs = bribe_wei.saturating_add(backrun.flashloan_premium);
-        let adaptive_base_bps = self.adaptive_base_floor_bps(gas_fees);
-        let adaptive_cost_bps = self.adaptive_cost_floor_bps(gas_fees);
-        let profit_floor = self.tuned_profit_floor_with_costs(
-            wallet_chain_balance,
-            gas_cost_wei,
-            extra_costs,
-            gas_fees,
-        );
-
-        if net_profit_wei < profit_floor {
-            self.log_skip(
-                SkipReason::ProfitOrGasGuard,
-                &format!(
-                    "Net {} < Floor {} (base_floor={} gas_cost={} extra_costs={} base_bps={} cost_bps={})",
-                    net_profit_wei,
-                    profit_floor,
-                    base_profit_floor,
-                    gas_cost_wei,
-                    extra_costs,
-                    adaptive_base_bps,
-                    adaptive_cost_bps
-                ),
-            );
-            return Ok(None);
-        }
-
-        if !self.gas_ratio_ok_with_fees(
-            gas_cost_wei,
-            gross_profit_wei,
-            wallet_chain_balance,
-            gas_fees,
-        ) {
-            self.log_skip(SkipReason::ProfitOrGasGuard, "Bad Risk/Reward");
-            return Ok(None);
-        }
-
         let native_symbol = crate::common::constants::native_symbol_for_chain(self.chain_id);
         let price_symbol = format!("{native_symbol}USD");
         let eth_quote = match self.price_feed.get_price(&price_symbol).await {
@@ -1841,6 +1900,47 @@ impl StrategyExecutor {
                 }
             }
         };
+        let base_profit_floor = StrategyExecutor::dynamic_profit_floor(wallet_chain_balance);
+        let extra_costs = bribe_wei.saturating_add(backrun.flashloan_premium);
+        let min_usd_floor_wei = self.min_usd_floor_wei(eth_quote.price);
+        let adaptive_base_bps = self.adaptive_base_floor_bps(gas_fees);
+        let adaptive_cost_bps = self.adaptive_cost_floor_bps(gas_fees);
+        let profit_floor = self.dynamic_policy_profit_floor_with_costs(
+            wallet_chain_balance,
+            gas_cost_wei,
+            extra_costs,
+            gas_fees,
+            min_usd_floor_wei,
+        );
+
+        if net_profit_wei < profit_floor {
+            self.log_skip(
+                SkipReason::ProfitOrGasGuard,
+                &format!(
+                    "Net {} < Floor {} (base_floor={} gas_cost={} extra_costs={} base_bps={} cost_bps={} min_usd_floor={})",
+                    net_profit_wei,
+                    profit_floor,
+                    base_profit_floor,
+                    gas_cost_wei,
+                    extra_costs,
+                    adaptive_base_bps,
+                    adaptive_cost_bps,
+                    min_usd_floor_wei.unwrap_or(U256::ZERO)
+                ),
+            );
+            return Ok(None);
+        }
+
+        if !self.gas_ratio_ok_with_fees(
+            gas_cost_wei,
+            gross_profit_wei,
+            wallet_chain_balance,
+            gas_fees,
+        ) {
+            self.log_skip(SkipReason::ProfitOrGasGuard, "Bad Risk/Reward");
+            return Ok(None);
+        }
+
         let profit_eth_f64 = self.amount_to_display(gross_profit_wei, self.wrapped_native);
         let gas_cost_eth_f64 = self.amount_to_display(gas_cost_wei, self.wrapped_native);
         let net_profit_eth_f64 = self.amount_to_display(net_profit_wei, self.wrapped_native);

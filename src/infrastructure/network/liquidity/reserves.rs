@@ -16,6 +16,7 @@ use alloy_sol_types::SolCall;
 use dashmap::{DashMap, DashSet};
 use futures::StreamExt;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::fs;
 use std::str::FromStr;
@@ -67,6 +68,50 @@ pub struct BalancerPoolMeta {
     pub amp: Option<U256>,
     pub swap_fee: Option<U256>,
     pub last_change_block: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+struct PairMetadata {
+    dex: Option<String>,
+    factory: Option<Address>,
+    pool_address: Option<Address>,
+    fee: Option<u32>,
+    chain_id: Option<u64>,
+}
+
+impl PairMetadata {
+    fn is_empty(&self) -> bool {
+        self.dex.is_none()
+            && self.factory.is_none()
+            && self.pool_address.is_none()
+            && self.fee.is_none()
+            && self.chain_id.is_none()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PairEntryResolved {
+    pair: Address,
+    token0: Address,
+    token1: Address,
+    metadata: PairMetadata,
+}
+
+#[derive(Deserialize)]
+struct PairEntryRaw {
+    pair: String,
+    token0: String,
+    token1: String,
+    #[serde(default)]
+    dex: Option<String>,
+    #[serde(default)]
+    factory: Option<String>,
+    #[serde(default)]
+    pool_address: Option<String>,
+    #[serde(default)]
+    fee: Option<u32>,
+    #[serde(default)]
+    chain_id: Option<u64>,
 }
 
 impl ReserveCache {
@@ -308,26 +353,103 @@ impl ReserveCache {
         Some((expected_out, meta.pool_id))
     }
 
-    /// Optional preload from a JSON file: [{"pair":"0x...","token0":"0x...","token1":"0x..."}]
-    pub fn load_pairs_from_file(&self, path: &str) -> Result<(), AppError> {
-        let raw = fs::read_to_string(path)
-            .map_err(|e| AppError::Config(format!("pairs.json read failed: {}", e)))?;
-        #[derive(Deserialize)]
-        struct PairEntry {
-            pair: String,
-            token0: String,
-            token1: String,
-        }
-        let entries: Vec<PairEntry> = serde_json::from_str(&raw)
+    fn parse_pairs_entries(raw: &str, chain_id: u64) -> Result<Vec<PairEntryResolved>, AppError> {
+        let entries: Vec<PairEntryRaw> = serde_json::from_str(raw)
             .map_err(|e| AppError::Config(format!("pairs.json parse failed: {}", e)))?;
 
+        let mut out = Vec::new();
+        let mut seen_by_key: HashMap<(Address, Address), Vec<PairMetadata>> = HashMap::new();
+        for (idx, entry) in entries.into_iter().enumerate() {
+            if let Some(entry_chain) = entry.chain_id
+                && entry_chain != chain_id
+            {
+                continue;
+            }
+
+            let pair = Address::from_str(&entry.pair).map_err(|_| {
+                AppError::Config(format!(
+                    "Invalid pair address in pairs.json at index {}",
+                    idx
+                ))
+            })?;
+            let token0 = Address::from_str(&entry.token0).map_err(|_| {
+                AppError::Config(format!("Invalid token0 in pairs.json at index {}", idx))
+            })?;
+            let token1 = Address::from_str(&entry.token1).map_err(|_| {
+                AppError::Config(format!("Invalid token1 in pairs.json at index {}", idx))
+            })?;
+            let metadata = PairMetadata {
+                dex: entry
+                    .dex
+                    .map(|v| v.trim().to_ascii_lowercase())
+                    .filter(|v| !v.is_empty()),
+                factory: entry
+                    .factory
+                    .as_deref()
+                    .map(Address::from_str)
+                    .transpose()
+                    .map_err(|_| {
+                        AppError::Config(format!("Invalid factory in pairs.json at index {}", idx))
+                    })?,
+                pool_address: entry
+                    .pool_address
+                    .as_deref()
+                    .map(Address::from_str)
+                    .transpose()
+                    .map_err(|_| {
+                        AppError::Config(format!(
+                            "Invalid pool_address in pairs.json at index {}",
+                            idx
+                        ))
+                    })?,
+                fee: entry.fee,
+                chain_id: entry.chain_id,
+            };
+
+            let key = Self::token_pair_key(token0, token1);
+            let seen = seen_by_key.entry(key).or_default();
+            if seen.iter().any(|existing| existing == &metadata) {
+                tracing::warn!(
+                    target: "reserves",
+                    pair = %format!("{:#x}", pair),
+                    token0 = %format!("{:#x}", token0),
+                    token1 = %format!("{:#x}", token1),
+                    "Duplicate pairs.json entry with identical metadata; skipping duplicate"
+                );
+                continue;
+            }
+            if metadata.is_empty() && seen.iter().any(PairMetadata::is_empty) {
+                tracing::warn!(
+                    target: "reserves",
+                    pair = %format!("{:#x}", pair),
+                    token0 = %format!("{:#x}", token0),
+                    token1 = %format!("{:#x}", token1),
+                    "Duplicate token pair without disambiguating metadata; skipping ambiguous entry"
+                );
+                continue;
+            }
+            seen.push(metadata.clone());
+            out.push(PairEntryResolved {
+                pair,
+                token0,
+                token1,
+                metadata,
+            });
+        }
+
+        Ok(out)
+    }
+
+    /// Optional preload from a JSON file: [{"pair":"0x...","token0":"0x...","token1":"0x..."}]
+    pub fn load_pairs_from_file(&self, path: &str, chain_id: u64) -> Result<(), AppError> {
+        let raw = fs::read_to_string(path)
+            .map_err(|e| AppError::Config(format!("pairs.json read failed: {}", e)))?;
+        let entries = Self::parse_pairs_entries(&raw, chain_id)?;
+
         for entry in entries {
-            let pair = Address::from_str(&entry.pair)
-                .map_err(|_| AppError::Config("Invalid pair address in pairs.json".into()))?;
-            let token0 = Address::from_str(&entry.token0)
-                .map_err(|_| AppError::Config("Invalid token0 in pairs.json".into()))?;
-            let token1 = Address::from_str(&entry.token1)
-                .map_err(|_| AppError::Config("Invalid token1 in pairs.json".into()))?;
+            let pair = entry.pair;
+            let token0 = entry.token0;
+            let token1 = entry.token1;
             let key = Self::token_pair_key(token0, token1);
             self.register_v2_pair_for_tokens(key, pair);
             self.v2_reserves.insert(
@@ -348,41 +470,19 @@ impl ReserveCache {
         &self,
         path: &str,
         provider: &HttpProvider,
+        chain_id: u64,
     ) -> Result<(), AppError> {
         let raw = fs::read_to_string(path)
             .map_err(|e| AppError::Config(format!("pairs.json read failed: {}", e)))?;
-        #[derive(Deserialize)]
-        struct PairEntry {
-            pair: String,
-            token0: String,
-            token1: String,
-        }
-        let entries: Vec<PairEntry> = serde_json::from_str(&raw)
-            .map_err(|e| AppError::Config(format!("pairs.json parse failed: {}", e)))?;
+        let entries = Self::parse_pairs_entries(&raw, chain_id)?;
 
         let mut kept = 0usize;
+        let mut metadata_kept = 0usize;
         for entry in entries {
-            let pair = match Address::from_str(&entry.pair) {
-                Ok(p) => p,
-                Err(_) => {
-                    tracing::warn!(target: "reserves", "Invalid pair address in pairs.json; skipping");
-                    continue;
-                }
-            };
-            let token0 = match Address::from_str(&entry.token0) {
-                Ok(t) => t,
-                Err(_) => {
-                    tracing::warn!(target: "reserves", "Invalid token0 in pairs.json; skipping");
-                    continue;
-                }
-            };
-            let token1 = match Address::from_str(&entry.token1) {
-                Ok(t) => t,
-                Err(_) => {
-                    tracing::warn!(target: "reserves", "Invalid token1 in pairs.json; skipping");
-                    continue;
-                }
-            };
+            let pair = entry.pair;
+            let token0 = entry.token0;
+            let token1 = entry.token1;
+            let metadata = entry.metadata;
 
             let pair_code = provider.get_code_at(pair).await;
             let t0_code = provider.get_code_at(token0).await;
@@ -413,8 +513,16 @@ impl ReserveCache {
                 },
             );
             kept += 1;
+            if !metadata.is_empty() {
+                metadata_kept = metadata_kept.saturating_add(1);
+            }
         }
-        tracing::info!(target: "reserves", kept, "Validated pairs.json entries loaded");
+        tracing::info!(
+            target: "reserves",
+            kept,
+            metadata_kept,
+            "Validated pairs.json entries loaded"
+        );
         Ok(())
     }
 
@@ -913,5 +1021,41 @@ mod tests {
         let touched = cache.pairs_for_v2_path(&[token0, token1]);
         assert!(touched.contains(&pair_small));
         assert!(touched.contains(&pair_large));
+    }
+
+    #[test]
+    fn pairs_loader_dedupes_ambiguous_duplicates_without_metadata() {
+        let raw = r#"
+[
+  {"pair":"0x1111111111111111111111111111111111111111","token0":"0x2222222222222222222222222222222222222222","token1":"0x3333333333333333333333333333333333333333"},
+  {"pair":"0x4444444444444444444444444444444444444444","token0":"0x2222222222222222222222222222222222222222","token1":"0x3333333333333333333333333333333333333333"}
+]
+"#;
+        let parsed = ReserveCache::parse_pairs_entries(raw, 1).expect("parse");
+        assert_eq!(parsed.len(), 1);
+    }
+
+    #[test]
+    fn pairs_loader_keeps_duplicates_with_disambiguating_metadata() {
+        let raw = r#"
+[
+  {
+    "pair":"0x1111111111111111111111111111111111111111",
+    "token0":"0x2222222222222222222222222222222222222222",
+    "token1":"0x3333333333333333333333333333333333333333",
+    "dex":"uniswap_v3",
+    "fee":500
+  },
+  {
+    "pair":"0x4444444444444444444444444444444444444444",
+    "token0":"0x2222222222222222222222222222222222222222",
+    "token1":"0x3333333333333333333333333333333333333333",
+    "dex":"uniswap_v3",
+    "fee":3000
+  }
+]
+"#;
+        let parsed = ReserveCache::parse_pairs_entries(raw, 1).expect("parse");
+        assert_eq!(parsed.len(), 2);
     }
 }

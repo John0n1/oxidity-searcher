@@ -92,6 +92,8 @@ async fn mev_share_v3_pipeline_manual() {
     let work_queue = Arc::new(WorkQueue::new(4));
     let (_block_tx, block_rx) = broadcast::channel(4);
     let router_allowlist = Arc::new(DashSet::new());
+    let wrapper_allowlist = Arc::new(DashSet::new());
+    let infra_allowlist = Arc::new(DashSet::new());
     let uni_v3_router =
         Address::from_str("E592427A0AEce92De3Edee1F18E0157C05861564").expect("router addr");
     router_allowlist.insert(uni_v3_router);
@@ -122,6 +124,8 @@ async fn mev_share_v3_pipeline_manual() {
         http.clone(),
         true,
         router_allowlist,
+        wrapper_allowlist,
+        infra_allowlist,
         None,
         500,
         wrapped_native_for_chain(CHAIN_ETHEREUM),

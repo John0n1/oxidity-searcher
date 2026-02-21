@@ -16,23 +16,41 @@ use crate::network::gas::GasOracle;
 use crate::network::mempool::MempoolScanner;
 use crate::network::mev_share::MevShareClient;
 use crate::network::nonce::NonceManager;
-use crate::network::price_feed::PriceFeed;
-use crate::network::provider::{HttpProvider, WsProvider};
+use crate::network::price_feed::{ChainlinkFeedAuditOptions, PriceFeed};
+use crate::network::provider::{ConnectionFactory, HttpProvider, WsProvider};
 use crate::network::reserves::ReserveCache;
 use crate::services::strategy::execution::work_queue::WorkQueue;
 use crate::services::strategy::router_discovery::RouterDiscovery;
+use crate::services::strategy::strategy::classify_allowlist_entry;
 use alloy::primitives::Address;
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use alloy_rpc_client::NoParams;
 use dashmap::DashSet;
+use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::broadcast;
+use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 
 const INGEST_QUEUE_BOUND: usize = 2048;
+const DEFAULT_FEED_AUDIT_MAX_LAG_BLOCKS: u64 = 20;
+const DEFAULT_FEED_AUDIT_RECHECK_SECS: u64 = 20;
+
+#[derive(Default, Debug, Clone)]
+struct SyncLagState {
+    is_lagging: bool,
+    eth_syncing: bool,
+    current_block: Option<u64>,
+    highest_block: Option<u64>,
+    local_tip: Option<u64>,
+    public_tip: Option<u64>,
+    protocol_lag: Option<u64>,
+    public_tip_lag: Option<u64>,
+    reasons: Vec<String>,
+}
 
 pub struct Engine {
     http_provider: HttpProvider,
@@ -68,6 +86,8 @@ pub struct Engine {
     liquidity_ratio_floor_ppm: u64,
     sell_min_native_out_wei: u64,
     router_allowlist: Arc<DashSet<Address>>,
+    wrapper_allowlist: Arc<DashSet<Address>>,
+    infra_allowlist: Arc<DashSet<Address>>,
     router_discovery: Option<Arc<RouterDiscovery>>,
     skip_log_every: u64,
     wrapped_native: Address,
@@ -83,6 +103,7 @@ pub struct Engine {
     bundle_cancel_previous: bool,
     worker_limit: usize,
     address_registry_path: String,
+    pairs_path: String,
     receipt_poll_ms: u64,
     receipt_timeout_ms: u64,
     receipt_confirm_blocks: u64,
@@ -126,6 +147,8 @@ impl Engine {
         liquidity_ratio_floor_ppm: u64,
         sell_min_native_out_wei: u64,
         router_allowlist: Arc<DashSet<Address>>,
+        wrapper_allowlist: Arc<DashSet<Address>>,
+        infra_allowlist: Arc<DashSet<Address>>,
         router_discovery: Option<Arc<RouterDiscovery>>,
         skip_log_every: u64,
         wrapped_native: Address,
@@ -141,6 +164,7 @@ impl Engine {
         bundle_cancel_previous: bool,
         worker_limit: usize,
         address_registry_path: String,
+        pairs_path: String,
         receipt_poll_ms: u64,
         receipt_timeout_ms: u64,
         receipt_confirm_blocks: u64,
@@ -181,6 +205,8 @@ impl Engine {
             liquidity_ratio_floor_ppm,
             sell_min_native_out_wei,
             router_allowlist,
+            wrapper_allowlist,
+            infra_allowlist,
             router_discovery,
             skip_log_every,
             wrapped_native,
@@ -196,6 +222,7 @@ impl Engine {
             bundle_cancel_previous,
             worker_limit,
             address_registry_path,
+            pairs_path,
             receipt_poll_ms,
             receipt_timeout_ms,
             receipt_confirm_blocks,
@@ -315,6 +342,151 @@ impl Engine {
         }
     }
 
+    fn feed_audit_max_lag_blocks() -> u64 {
+        std::env::var("FEED_AUDIT_MAX_LAG_BLOCKS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_FEED_AUDIT_MAX_LAG_BLOCKS)
+            .max(1)
+    }
+
+    fn feed_audit_recheck_secs() -> u64 {
+        std::env::var("FEED_AUDIT_RECHECK_SECS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_FEED_AUDIT_RECHECK_SECS)
+            .max(5)
+    }
+
+    fn feed_audit_public_tip_rpc(&self) -> Option<String> {
+        if let Ok(url) = std::env::var("FEED_AUDIT_PUBLIC_RPC_URL")
+            && !url.trim().is_empty()
+        {
+            return Some(url);
+        }
+        if self.chain_id == crate::common::constants::CHAIN_ETHEREUM {
+            return Some("https://ethereum-rpc.publicnode.com".to_string());
+        }
+        None
+    }
+
+    fn parse_block_field(value: &Value) -> Option<u64> {
+        match value {
+            Value::String(s) => {
+                let trimmed = s.trim();
+                if let Some(hex) = trimmed.strip_prefix("0x") {
+                    u64::from_str_radix(hex, 16).ok()
+                } else {
+                    trimmed.parse::<u64>().ok()
+                }
+            }
+            Value::Number(n) => n.as_u64(),
+            _ => None,
+        }
+    }
+
+    async fn check_sync_lag_state(
+        provider: &HttpProvider,
+        chain_id: u64,
+        max_lag_blocks: u64,
+        public_tip_rpc: Option<&str>,
+    ) -> SyncLagState {
+        let mut state = SyncLagState::default();
+        let syncing: Result<Value, _> = provider
+            .raw_request("eth_syncing".into(), NoParams::default())
+            .await;
+        match syncing {
+            Ok(Value::Bool(is_syncing)) => {
+                state.eth_syncing = is_syncing;
+                if is_syncing {
+                    state.reasons.push("eth_syncing=true".to_string());
+                }
+            }
+            Ok(Value::Object(map)) => {
+                state.eth_syncing = true;
+                state.current_block = map.get("currentBlock").and_then(Self::parse_block_field);
+                state.highest_block = map.get("highestBlock").and_then(Self::parse_block_field);
+                if let (Some(current), Some(highest)) = (state.current_block, state.highest_block) {
+                    let lag = highest.saturating_sub(current);
+                    state.protocol_lag = Some(lag);
+                    if lag > max_lag_blocks {
+                        state.reasons.push(format!(
+                            "eth_syncing_lag={} (highest={} current={} threshold={})",
+                            lag, highest, current, max_lag_blocks
+                        ));
+                    }
+                }
+            }
+            Ok(other) => {
+                tracing::debug!(
+                    target: "price_feed",
+                    chain_id,
+                    response = %other,
+                    "Unexpected eth_syncing response shape"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "price_feed",
+                    chain_id,
+                    error = %e,
+                    "eth_syncing check failed; falling back to tip comparison"
+                );
+            }
+        }
+
+        if state.current_block.is_none() {
+            state.current_block = provider.get_block_number().await.ok();
+        }
+        state.local_tip = state.current_block;
+
+        if let Some(url) = public_tip_rpc {
+            match ConnectionFactory::http(url) {
+                Ok(public_provider) => match public_provider.get_block_number().await {
+                    Ok(public_tip) => {
+                        state.public_tip = Some(public_tip);
+                        if let Some(local_tip) = state.local_tip
+                            && public_tip > local_tip
+                        {
+                            let lag = public_tip.saturating_sub(local_tip);
+                            state.public_tip_lag = Some(lag);
+                            state.reasons.push(format!(
+                                "public_tip_ahead_by={} (public={} local={})",
+                                lag, public_tip, local_tip
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "price_feed",
+                            chain_id,
+                            rpc = %url,
+                            error = %e,
+                            "Failed to fetch public tip for feed-audit lag detection"
+                        );
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        target: "price_feed",
+                        chain_id,
+                        rpc = %url,
+                        error = %e,
+                        "Invalid FEED_AUDIT_PUBLIC_RPC_URL"
+                    );
+                }
+            }
+        }
+
+        state.is_lagging = state.eth_syncing
+            || state
+                .protocol_lag
+                .map(|lag| lag > max_lag_blocks)
+                .unwrap_or(false)
+            || state.public_tip_lag.map(|lag| lag > 0).unwrap_or(false);
+        state
+    }
+
     pub async fn run(self) -> Result<(), AppError> {
         if self.flashloan_enabled && self.executor.is_none() {
             return Err(AppError::Config(
@@ -342,9 +514,99 @@ impl Engine {
                 "eth_feeHistory probe failed; GasOracle will use fallback strategy"
             );
         }
+        let shutdown = CancellationToken::new();
+        {
+            let shutdown_on_ctrlc = shutdown.clone();
+            tokio::spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    tracing::info!(target: "shutdown", "Ctrl+C received; requesting graceful shutdown");
+                    shutdown_on_ctrlc.cancel();
+                }
+            });
+        }
+
+        let feed_audit_max_lag_blocks = Self::feed_audit_max_lag_blocks();
+        let feed_audit_public_rpc = self.feed_audit_public_tip_rpc();
+        let sync_state = Self::check_sync_lag_state(
+            &self.http_provider,
+            self.chain_id,
+            feed_audit_max_lag_blocks,
+            feed_audit_public_rpc.as_deref(),
+        )
+        .await;
+        if sync_state.is_lagging {
+            tracing::warn!(
+                target: "price_feed",
+                chain_id = self.chain_id,
+                reasons = %sync_state.reasons.join("; "),
+                current_block = ?sync_state.current_block,
+                highest_block = ?sync_state.highest_block,
+                local_tip = ?sync_state.local_tip,
+                public_tip = ?sync_state.public_tip,
+                "Node is still syncing/lagging; downgrading critical Chainlink feed audit to warn+continue"
+            );
+        }
         self.price_feed
-            .audit_chainlink_feeds(self.chainlink_feed_strict)
+            .audit_chainlink_feeds_with_options(ChainlinkFeedAuditOptions {
+                strict: self.chainlink_feed_strict,
+                allow_stale_critical: sync_state.is_lagging,
+            })
             .await?;
+        if sync_state.is_lagging {
+            let provider = self.http_provider.clone();
+            let price_feed = self.price_feed.clone();
+            let chain_id = self.chain_id;
+            let strict = self.chainlink_feed_strict;
+            let shutdown_monitor = shutdown.clone();
+            let public_rpc_for_monitor = feed_audit_public_rpc.clone();
+            tokio::spawn(async move {
+                let poll_interval = Duration::from_secs(Self::feed_audit_recheck_secs());
+                loop {
+                    tokio::select! {
+                        _ = shutdown_monitor.cancelled() => break,
+                        _ = sleep(poll_interval) => {}
+                    }
+                    let state = Self::check_sync_lag_state(
+                        &provider,
+                        chain_id,
+                        feed_audit_max_lag_blocks,
+                        public_rpc_for_monitor.as_deref(),
+                    )
+                    .await;
+                    if state.is_lagging {
+                        continue;
+                    }
+
+                    tracing::info!(
+                        target: "price_feed",
+                        chain_id,
+                        "Node recovered into freshness window; rerunning strict Chainlink feed audit"
+                    );
+                    let strict_result = price_feed
+                        .audit_chainlink_feeds_with_options(ChainlinkFeedAuditOptions {
+                            strict,
+                            allow_stale_critical: false,
+                        })
+                        .await;
+                    if let Err(e) = strict_result {
+                        tracing::error!(
+                            target: "price_feed",
+                            chain_id,
+                            error = %e,
+                            "Strict Chainlink feed audit failed after sync recovery; requesting shutdown"
+                        );
+                        shutdown_monitor.cancel();
+                    } else {
+                        tracing::info!(
+                            target: "price_feed",
+                            chain_id,
+                            "Strict Chainlink feed audit passed after sync recovery"
+                        );
+                    }
+                    break;
+                }
+            });
+        }
         if self.rpc_capability_strict
             && !(capabilities.eth_simulate || capabilities.debug_trace_call_many)
         {
@@ -377,17 +639,6 @@ impl Engine {
                 "debug_traceCall is available but debug_traceCallMany is not; bundle simulation will fall back to per-transaction execution when eth_simulateV1 is unavailable"
             );
         }
-
-        let shutdown = CancellationToken::new();
-        {
-            let shutdown_on_ctrlc = shutdown.clone();
-            tokio::spawn(async move {
-                if tokio::signal::ctrl_c().await.is_ok() {
-                    tracing::info!(target: "shutdown", "Ctrl+C received; requesting graceful shutdown");
-                    shutdown_on_ctrlc.cancel();
-                }
-            });
-        }
         let stats = Arc::new(StrategyStats::default());
         let work_queue = Arc::new(WorkQueue::new(INGEST_QUEUE_BOUND));
         let (block_sender, block_receiver) = broadcast::channel(32);
@@ -419,9 +670,13 @@ impl Engine {
             self.bundle_cancel_previous,
         ));
         let reserve_cache = Arc::new(ReserveCache::new(self.http_provider.clone()));
-        if Path::new("data/pairs.json").exists() {
+        if Path::new(&self.pairs_path).exists() {
             if let Err(e) = reserve_cache
-                .load_pairs_from_file_validated("data/pairs.json", &self.http_provider)
+                .load_pairs_from_file_validated(
+                    &self.pairs_path,
+                    &self.http_provider,
+                    self.chain_id,
+                )
                 .await
             {
                 tracing::warn!(target: "reserves", error=%e, "Failed to preload pairs.json");
@@ -439,8 +694,18 @@ impl Engine {
         if let Ok(registry) = AddressRegistry::load_from_file(&self.address_registry_path) {
             if let Some(chain_reg) = registry.chain(self.chain_id) {
                 let chain_reg = chain_reg.validate_with_provider(&self.http_provider).await;
-                for addr in chain_reg.routers.values().copied() {
-                    self.router_allowlist.insert(addr);
+                for (name, addr) in chain_reg.routers {
+                    match classify_allowlist_entry(&name) {
+                        crate::services::strategy::strategy::AllowlistCategory::Routers => {
+                            self.router_allowlist.insert(addr);
+                        }
+                        crate::services::strategy::strategy::AllowlistCategory::Wrappers => {
+                            self.wrapper_allowlist.insert(addr);
+                        }
+                        crate::services::strategy::strategy::AllowlistCategory::Infra => {
+                            self.infra_allowlist.insert(addr);
+                        }
+                    }
                 }
                 if let Some(vault) = chain_reg.balancer_vault {
                     reserve_cache.set_balancer_vault(vault).await;
@@ -502,15 +767,12 @@ impl Engine {
             }
         }
 
-        // Validate router allowlist against on-chain code.
+        // Validate categorized allowlists against on-chain code.
         let mut invalid_routers = Vec::new();
         for addr in self.router_allowlist.iter() {
             match self.http_provider.get_code_at(*addr).await {
-                Ok(code) => {
-                    if code.is_empty() {
-                        invalid_routers.push(*addr);
-                    }
-                }
+                Ok(code) if code.is_empty() => invalid_routers.push(*addr),
+                Ok(_) => {}
                 Err(e) => {
                     tracing::warn!(
                         target: "router",
@@ -529,7 +791,61 @@ impl Engine {
             tracing::warn!(
                 target: "router",
                 count = invalid_routers.len(),
-                "Dropped routers with missing code"
+                "Dropped router-category allowlist entries with missing code"
+            );
+        }
+
+        let mut invalid_wrappers = Vec::new();
+        for addr in self.wrapper_allowlist.iter() {
+            match self.http_provider.get_code_at(*addr).await {
+                Ok(code) if code.is_empty() => invalid_wrappers.push(*addr),
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        target: "router",
+                        address = %format!("{:#x}", *addr),
+                        error = %e,
+                        "Failed to validate wrapper; dropping"
+                    );
+                    invalid_wrappers.push(*addr);
+                }
+            }
+        }
+        for addr in invalid_wrappers.iter() {
+            self.wrapper_allowlist.remove(addr);
+        }
+        if !invalid_wrappers.is_empty() {
+            tracing::warn!(
+                target: "router",
+                count = invalid_wrappers.len(),
+                "Dropped wrapper-category allowlist entries with missing code"
+            );
+        }
+
+        let mut invalid_infra = Vec::new();
+        for addr in self.infra_allowlist.iter() {
+            match self.http_provider.get_code_at(*addr).await {
+                Ok(code) if code.is_empty() => invalid_infra.push(*addr),
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        target: "router",
+                        address = %format!("{:#x}", *addr),
+                        error = %e,
+                        "Failed to validate infra; dropping"
+                    );
+                    invalid_infra.push(*addr);
+                }
+            }
+        }
+        for addr in invalid_infra.iter() {
+            self.infra_allowlist.remove(addr);
+        }
+        if !invalid_infra.is_empty() {
+            tracing::warn!(
+                target: "router",
+                count = invalid_infra.len(),
+                "Dropped infra-category allowlist entries with missing code"
             );
         }
         let reserve_listener = {
@@ -592,6 +908,8 @@ impl Engine {
                 self.http_provider.clone(),
                 self.dry_run,
                 self.router_allowlist.clone(),
+                self.wrapper_allowlist.clone(),
+                self.infra_allowlist.clone(),
                 self.router_discovery.clone(),
                 self.skip_log_every,
                 self.wrapped_native,

@@ -4,9 +4,7 @@
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
 use crate::services::strategy::routers::{ERC20, UniV2Router};
-use crate::services::strategy::strategy::{
-    StrategyExecutor, TOXIC_PROBE_FAILURE_THRESHOLD, TOXIC_PROBE_FAILURE_WINDOW_SECS,
-};
+use crate::services::strategy::strategy::StrategyExecutor;
 use alloy::primitives::TxKind;
 use alloy::primitives::{Address, U256};
 use alloy::rpc::types::eth::TransactionInput;
@@ -23,11 +21,13 @@ impl StrategyExecutor {
         token: Address,
         reason: &str,
     ) -> bool {
+        let failure_window_secs = self.toxic_probe_failure_window_secs();
+        let failure_threshold = self.toxic_probe_failure_threshold();
         let now = std::time::Instant::now();
         let mut count = 1u32;
         if let Some(mut entry) = self.toxic_probe_failures.get_mut(&token) {
             let (ref mut prev_count, ref mut first_seen) = *entry;
-            if first_seen.elapsed().as_secs() > TOXIC_PROBE_FAILURE_WINDOW_SECS {
+            if first_seen.elapsed().as_secs() > failure_window_secs {
                 *prev_count = 1;
                 *first_seen = now;
             } else {
@@ -38,7 +38,7 @@ impl StrategyExecutor {
             self.toxic_probe_failures.insert(token, (1, now));
         }
 
-        if count >= TOXIC_PROBE_FAILURE_THRESHOLD {
+        if count >= failure_threshold {
             self.toxic_probe_failures.remove(&token);
             self.mark_toxic_token(token, reason);
             true
@@ -48,7 +48,7 @@ impl StrategyExecutor {
                 token = %format!("{:#x}", token),
                 %reason,
                 failures = count,
-                threshold = TOXIC_PROBE_FAILURE_THRESHOLD,
+                threshold = failure_threshold,
                 "Probe failure recorded below toxic threshold"
             );
             false

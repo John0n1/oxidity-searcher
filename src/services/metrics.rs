@@ -241,6 +241,24 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
     let skip_backrun_build_failed = stats
         .skip_backrun_build_failed
         .load(std::sync::atomic::Ordering::Relaxed);
+    let decode_attempts_router = stats
+        .decode_attempts_router
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let decode_success_router = stats
+        .decode_success_router
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let decode_attempts_wrapper = stats
+        .decode_attempts_wrapper
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let decode_success_wrapper = stats
+        .decode_success_wrapper
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let decode_attempts_infra = stats
+        .decode_attempts_infra
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let decode_success_infra = stats
+        .decode_success_infra
+        .load(std::sync::atomic::Ordering::Relaxed);
     let nonce_loads = stats
         .nonce_state_loads
         .load(std::sync::atomic::Ordering::Relaxed);
@@ -305,6 +323,21 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
         .saturating_add(skip_sandwich_risk)
         .saturating_add(skip_front_run_build_failed)
         .saturating_add(skip_backrun_build_failed);
+    let decode_success_rate_router = if decode_attempts_router == 0 {
+        0.0
+    } else {
+        decode_success_router as f64 / decode_attempts_router as f64
+    };
+    let decode_success_rate_wrapper = if decode_attempts_wrapper == 0 {
+        0.0
+    } else {
+        decode_success_wrapper as f64 / decode_attempts_wrapper as f64
+    };
+    let decode_success_rate_infra = if decode_attempts_infra == 0 {
+        0.0
+    } else {
+        decode_success_infra as f64 / decode_attempts_infra as f64
+    };
     let bundles_snapshot: Vec<crate::core::strategy::BundleTelemetry> = {
         let guard = stats.bundles.lock().unwrap_or_else(|e| e.into_inner());
         guard.clone()
@@ -335,6 +368,15 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
             "# TYPE strategy_skip_sandwich_risk counter\nstrategy_skip_sandwich_risk {}\n",
             "# TYPE strategy_skip_front_run_build_failed counter\nstrategy_skip_front_run_build_failed {}\n",
             "# TYPE strategy_skip_backrun_build_failed counter\nstrategy_skip_backrun_build_failed {}\n",
+            "# TYPE decode_attempts_by_category counter\ndecode_attempts_by_category{{category=\"routers\"}} {}\n",
+            "decode_attempts_by_category{{category=\"wrappers\"}} {}\n",
+            "decode_attempts_by_category{{category=\"infra\"}} {}\n",
+            "# TYPE decode_success_by_category counter\ndecode_success_by_category{{category=\"routers\"}} {}\n",
+            "decode_success_by_category{{category=\"wrappers\"}} {}\n",
+            "decode_success_by_category{{category=\"infra\"}} {}\n",
+            "# TYPE decode_success_rate_by_category gauge\ndecode_success_rate_by_category{{category=\"routers\"}} {:.6}\n",
+            "decode_success_rate_by_category{{category=\"wrappers\"}} {:.6}\n",
+            "decode_success_rate_by_category{{category=\"infra\"}} {:.6}\n",
             "# TYPE nonce_state_loads counter\nnonce_state_loads {}\n",
             "# TYPE nonce_state_load_fail counter\nnonce_state_load_fail {}\n",
             "# TYPE nonce_state_persist counter\nnonce_state_persist {}\n",
@@ -377,6 +419,15 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
         skip_sandwich_risk,
         skip_front_run_build_failed,
         skip_backrun_build_failed,
+        decode_attempts_router,
+        decode_attempts_wrapper,
+        decode_attempts_infra,
+        decode_success_router,
+        decode_success_wrapper,
+        decode_success_infra,
+        decode_success_rate_router,
+        decode_success_rate_wrapper,
+        decode_success_rate_infra,
         nonce_loads,
         nonce_load_fail,
         nonce_persist,

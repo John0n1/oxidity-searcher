@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
+use crate::common::data_path::{resolve_data_path, resolve_required_data_path};
 use crate::domain::constants;
 use crate::domain::error::AppError;
 use alloy::primitives::Address;
 use config::{Config, Environment, File};
 use serde::{Deserialize, Deserializer};
 use serde_json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::str::FromStr;
@@ -47,6 +48,7 @@ pub struct GlobalSettings {
     pub ipc_providers: Option<HashMap<String, String>>,
     pub chainlink_feeds: Option<HashMap<String, String>>, // Symbol -> aggregator address
     pub chainlink_feeds_path: Option<String>,
+    pub pairs_path: Option<String>,
     pub aave_pools_by_chain: Option<HashMap<String, String>>,
     pub flashbots_relay_url: Option<String>,
     pub bundle_signer_key: Option<String>,
@@ -55,6 +57,7 @@ pub struct GlobalSettings {
     pub executor_bribe_recipient: Option<Address>,
     pub tokenlist_path: Option<String>,
     pub address_registry_path: Option<String>,
+    pub data_dir: Option<String>,
     #[serde(default = "default_metrics_port")]
     pub metrics_port: u16,
     #[serde(default = "default_true")]
@@ -184,7 +187,7 @@ fn default_skip_log_every() -> u64 {
     500
 }
 fn default_allow_non_wrapped_swaps() -> bool {
-    false
+    true
 }
 fn default_sim_backend() -> String {
     "revm".to_string()
@@ -246,7 +249,7 @@ fn default_router_discovery_check_interval_secs() -> u64 {
     300
 }
 fn default_router_discovery_auto_allow() -> bool {
-    false
+    true
 }
 fn default_router_discovery_max_entries() -> usize {
     10_000
@@ -319,6 +322,50 @@ impl GlobalSettings {
         }
 
         Ok(settings)
+    }
+
+    fn data_dir_value(&self) -> Option<String> {
+        std::env::var("DATA_DIR")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                self.data_dir
+                    .as_ref()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+    }
+
+    pub fn data_dir(&self) -> Option<String> {
+        self.data_dir_value()
+    }
+
+    fn resolve_path_setting(
+        &self,
+        env_key: &str,
+        configured: Option<&str>,
+        default_path: &str,
+        required: bool,
+    ) -> Result<String, AppError> {
+        let raw = std::env::var(env_key)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                configured
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToString::to_string)
+            })
+            .unwrap_or_else(|| default_path.to_string());
+        let data_dir = self.data_dir_value();
+        let resolved = if required {
+            resolve_required_data_path(&raw, data_dir.as_deref())?
+        } else {
+            resolve_data_path(&raw, data_dir.as_deref())
+        };
+        Ok(resolved.to_string_lossy().to_string())
     }
 
     pub fn load() -> Result<Self, AppError> {
@@ -442,18 +489,31 @@ impl GlobalSettings {
         self.profit_receiver_address.unwrap_or(self.wallet_address)
     }
 
-    pub fn tokenlist_path(&self) -> String {
-        std::env::var("TOKENLIST_PATH")
-            .ok()
-            .or_else(|| self.tokenlist_path.clone())
-            .unwrap_or_else(|| "data/tokenlist.json".to_string())
+    pub fn tokenlist_path(&self) -> Result<String, AppError> {
+        self.resolve_path_setting(
+            "TOKENLIST_PATH",
+            self.tokenlist_path.as_deref(),
+            "data/tokenlist.json",
+            true,
+        )
     }
 
-    pub fn address_registry_path(&self) -> String {
-        std::env::var("ADDRESS_REGISTRY_PATH")
-            .ok()
-            .or_else(|| self.address_registry_path.clone())
-            .unwrap_or_else(|| "data/address_registry.json".to_string())
+    pub fn address_registry_path(&self) -> Result<String, AppError> {
+        self.resolve_path_setting(
+            "ADDRESS_REGISTRY_PATH",
+            self.address_registry_path.as_deref(),
+            "data/address_registry.json",
+            true,
+        )
+    }
+
+    pub fn pairs_path(&self) -> Result<String, AppError> {
+        self.resolve_path_setting(
+            "PAIRS_PATH",
+            self.pairs_path.as_deref(),
+            "data/pairs.json",
+            false,
+        )
     }
 
     pub fn database_url(&self) -> String {
@@ -644,7 +704,7 @@ impl GlobalSettings {
 
         if out.is_empty()
             && let Some(map) = load_chainlink_feeds_from_file(
-                &self.chainlink_feeds_path(),
+                &self.chainlink_feeds_path()?,
                 chain_id,
                 self.chainlink_feed_conflict_strict_for_chain(chain_id),
             )?
@@ -659,11 +719,13 @@ impl GlobalSettings {
         Ok(out)
     }
 
-    pub fn chainlink_feeds_path(&self) -> String {
-        std::env::var("CHAINLINK_FEEDS_PATH")
-            .ok()
-            .or_else(|| self.chainlink_feeds_path.clone())
-            .unwrap_or_else(|| "data/chainlink_feeds.json".to_string())
+    pub fn chainlink_feeds_path(&self) -> Result<String, AppError> {
+        self.resolve_path_setting(
+            "CHAINLINK_FEEDS_PATH",
+            self.chainlink_feeds_path.as_deref(),
+            "data/chainlink_feeds.json",
+            false,
+        )
     }
 
     pub fn mev_share_relay_url(&self) -> String {
@@ -720,8 +782,8 @@ impl GlobalSettings {
         }
     }
 
-    pub fn chainlink_feed_conflict_strict_for_chain(&self, chain_id: u64) -> bool {
-        chain_id == constants::CHAIN_ETHEREUM
+    pub fn chainlink_feed_conflict_strict_for_chain(&self, _chain_id: u64) -> bool {
+        env_bool("CHAINLINK_FEED_CONFLICT_STRICT").unwrap_or(self.chainlink_feed_conflict_strict)
     }
 
     pub fn chainlink_feed_audit_strict_for_chain(&self, chain_id: u64) -> bool {
@@ -767,6 +829,16 @@ impl GlobalSettings {
                 .ok()
                 .or_else(|| self.coindesk_api_key.clone()),
         }
+    }
+}
+
+fn env_bool(key: &str) -> Option<bool> {
+    let value = std::env::var(key).ok()?;
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
     }
 }
 
@@ -882,6 +954,47 @@ fn quote_priority(quote: &str) -> usize {
     }
 }
 
+#[derive(Clone, Debug)]
+struct NormalizedChainlinkFeedEntry {
+    base: String,
+    quote: String,
+    address: Address,
+    index: usize,
+}
+
+fn normalize_chainlink_feed_entries(
+    entries: Vec<ChainlinkFeedEntry>,
+    chain_id: u64,
+) -> Result<(Vec<NormalizedChainlinkFeedEntry>, usize), AppError> {
+    let mut dedupe = HashSet::new();
+    let mut normalized = Vec::new();
+    let mut deduped_count = 0usize;
+
+    for (index, entry) in entries.into_iter().enumerate() {
+        if entry.chain_id != chain_id {
+            continue;
+        }
+        let base = alias_base_symbol(&entry.base);
+        let quote = entry.quote.to_uppercase();
+        let address = Address::from_str(&entry.address).map_err(|_| {
+            AppError::InvalidAddress(format!("chainlink_feeds:{base} -> {}", entry.address))
+        })?;
+        let dedupe_key = format!("{base}|{quote}|{:#x}", address);
+        if !dedupe.insert(dedupe_key) {
+            deduped_count = deduped_count.saturating_add(1);
+            continue;
+        }
+        normalized.push(NormalizedChainlinkFeedEntry {
+            base,
+            quote,
+            address,
+            index,
+        });
+    }
+
+    Ok((normalized, deduped_count))
+}
+
 fn load_chainlink_feeds_from_file(
     path: &str,
     chain_id: u64,
@@ -896,22 +1009,17 @@ fn load_chainlink_feeds_from_file(
         .map_err(|e| AppError::Config(format!("chainlink_feeds json read failed: {}", e)))?;
     let entries: Vec<ChainlinkFeedEntry> = serde_json::from_str(&raw)
         .map_err(|e| AppError::Config(format!("chainlink_feeds json parse failed: {}", e)))?;
+    let (normalized_entries, deduped_count) = normalize_chainlink_feed_entries(entries, chain_id)?;
 
     let canonical = constants::default_chainlink_feeds(chain_id);
     let mut selected: HashMap<String, (String, Address, usize, usize)> = HashMap::new();
     let mut by_base_quote: HashMap<(String, String), Vec<Address>> = HashMap::new();
-    let mut seen_any = false;
-    for (index, entry) in entries.into_iter().enumerate() {
-        if entry.chain_id != chain_id {
-            continue;
-        }
-        seen_any = true;
-
-        let base = alias_base_symbol(&entry.base);
-        let quote = entry.quote.to_uppercase();
-        let addr = Address::from_str(&entry.address).map_err(|_| {
-            AppError::InvalidAddress(format!("chainlink_feeds:{base} -> {}", entry.address))
-        })?;
+    let seen_any = !normalized_entries.is_empty() || deduped_count > 0;
+    for entry in normalized_entries {
+        let base = entry.base;
+        let quote = entry.quote;
+        let addr = entry.address;
+        let index = entry.index;
         by_base_quote
             .entry((base.clone(), quote.clone()))
             .or_default()
@@ -942,6 +1050,14 @@ fn load_chainlink_feeds_from_file(
         if replace {
             selected.insert(base, (quote, addr, canonical_rank, index));
         }
+    }
+    if deduped_count > 0 {
+        tracing::debug!(
+            target: "config",
+            chain_id,
+            deduped = deduped_count,
+            "Chainlink feed normalization removed duplicate entries"
+        );
     }
 
     let mut resolved_conflicts: Vec<String> = Vec::new();
@@ -1076,12 +1192,14 @@ mod tests {
             ipc_providers: None,
             chainlink_feeds: None,
             chainlink_feeds_path: None,
+            pairs_path: None,
             flashbots_relay_url: None,
             bundle_signer_key: None,
             executor_bribe_bps: default_bribe_bps(),
             executor_bribe_recipient: None,
             tokenlist_path: None,
             address_registry_path: None,
+            data_dir: None,
             metrics_port: default_metrics_port(),
             strategy_enabled: default_true(),
             strategy_workers: None,
@@ -1257,10 +1375,27 @@ mod tests {
     }
 
     #[test]
-    fn chainlink_feed_conflict_strict_defaults_to_mainnet_only() {
+    fn chainlink_feed_conflict_strict_applies_globally() {
         let settings = base_settings();
         assert!(settings.chainlink_feed_conflict_strict_for_chain(1));
+        assert!(settings.chainlink_feed_conflict_strict_for_chain(137));
+    }
+
+    #[test]
+    fn chainlink_feed_conflict_strict_respects_env_override() {
+        let _env_lock = env_lock_guard();
+        let old = std::env::var("CHAINLINK_FEED_CONFLICT_STRICT").ok();
+        unsafe {
+            std::env::set_var("CHAINLINK_FEED_CONFLICT_STRICT", "false");
+        }
+        let settings = base_settings();
+        assert!(!settings.chainlink_feed_conflict_strict_for_chain(1));
         assert!(!settings.chainlink_feed_conflict_strict_for_chain(137));
+        if let Some(v) = old {
+            unsafe { std::env::set_var("CHAINLINK_FEED_CONFLICT_STRICT", v) };
+        } else {
+            unsafe { std::env::remove_var("CHAINLINK_FEED_CONFLICT_STRICT") };
+        }
     }
 
     #[test]
@@ -1320,6 +1455,27 @@ mod tests {
             format!("{:#x}", eth),
             "0x5f4ec3df9cbd43714fe2740f5e3616155c5b8419"
         );
+    }
+
+    #[test]
+    fn chainlink_loader_dedupes_identical_entries() {
+        let tmp = std::env::temp_dir().join(format!(
+            "chainlink-feeds-dedupe-test-{}.json",
+            std::process::id()
+        ));
+        let body = r#"
+[
+  {"base":"WETH","quote":"USD","chainId":1,"address":"0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"},
+  {"base":"ETH","quote":"USD","chainId":1,"address":"0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"}
+]
+"#;
+        std::fs::write(&tmp, body).expect("write temp chainlink file");
+        let selected = load_chainlink_feeds_from_file(tmp.to_str().expect("utf8 path"), 1, false)
+            .expect("loader result")
+            .expect("selected feeds");
+        std::fs::remove_file(&tmp).ok();
+        assert_eq!(selected.len(), 1);
+        assert!(selected.contains_key("ETH"));
     }
 
     #[test]

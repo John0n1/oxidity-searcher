@@ -68,6 +68,8 @@ async fn flashloan_builder_encodes_callbacks() {
     let nonce_manager = NonceManager::new(http.clone(), bundle_signer.address());
     let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
     let router_allowlist = Arc::new(DashSet::<Address>::new());
+    let wrapper_allowlist = Arc::new(DashSet::<Address>::new());
+    let infra_allowlist = Arc::new(DashSet::<Address>::new());
 
     let work_queue = Arc::new(WorkQueue::new(4));
     let (_block_tx, block_rx) = broadcast::channel(4);
@@ -100,6 +102,8 @@ async fn flashloan_builder_encodes_callbacks() {
         http.clone(),
         true,
         router_allowlist.clone(),
+        wrapper_allowlist.clone(),
+        infra_allowlist.clone(),
         None,
         500,
         wrapped_native_for_chain(CHAIN_ETHEREUM),
@@ -176,8 +180,9 @@ async fn flashloan_builder_encodes_callbacks() {
     )
     .expect("decode envelope");
 
-    let inner = <FlashCallbackData as alloy_sol_types::SolValue>::abi_decode_params(&decoded.params)
-        .expect("decode params");
+    let inner =
+        <FlashCallbackData as alloy_sol_types::SolValue>::abi_decode_params(&decoded.params)
+            .expect("decode params");
     assert_eq!(inner.targets.len(), callbacks.len());
     assert_eq!(inner.targets[0], callbacks[0].0);
     assert_eq!(inner.values[1], callbacks[1].2);
@@ -225,6 +230,8 @@ async fn flashloan_builder_uses_aave_selector() {
     let nonce_manager = NonceManager::new(http.clone(), bundle_signer.address());
     let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
     let router_allowlist = Arc::new(DashSet::<Address>::new());
+    let wrapper_allowlist = Arc::new(DashSet::<Address>::new());
+    let infra_allowlist = Arc::new(DashSet::<Address>::new());
 
     let work_queue = Arc::new(WorkQueue::new(4));
     let (_block_tx, block_rx) = broadcast::channel(4);
@@ -258,6 +265,8 @@ async fn flashloan_builder_uses_aave_selector() {
         http.clone(),
         true,
         router_allowlist.clone(),
+        wrapper_allowlist.clone(),
+        infra_allowlist.clone(),
         None,
         500,
         wrapped_native_for_chain(CHAIN_ETHEREUM),
@@ -354,7 +363,10 @@ async fn live_executor_flashloan_smoke_mainnet() {
         params: Bytes::from(params),
     };
     let calldata = call.abi_encode();
-    println!("balancer_flashloan_smoke_calldata=0x{}", hex::encode(&calldata));
+    println!(
+        "balancer_flashloan_smoke_calldata=0x{}",
+        hex::encode(&calldata)
+    );
 
     let req = alloy::rpc::types::eth::TransactionRequest {
         from: Some(owner),
@@ -464,6 +476,8 @@ async fn flashloan_builder_rejects_when_no_provider_available() {
     let nonce_manager = NonceManager::new(http.clone(), bundle_signer.address());
     let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
     let router_allowlist = Arc::new(DashSet::<Address>::new());
+    let wrapper_allowlist = Arc::new(DashSet::<Address>::new());
+    let infra_allowlist = Arc::new(DashSet::<Address>::new());
 
     let work_queue = Arc::new(WorkQueue::new(4));
     let (_block_tx, block_rx) = broadcast::channel(4);
@@ -495,6 +509,8 @@ async fn flashloan_builder_rejects_when_no_provider_available() {
         http.clone(),
         true,
         router_allowlist,
+        wrapper_allowlist,
+        infra_allowlist,
         None,
         500,
         wrapped_native_for_chain(CHAIN_ETHEREUM),

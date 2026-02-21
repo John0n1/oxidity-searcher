@@ -73,6 +73,8 @@ async fn mev_share_hint_round_trip() {
     let (_block_tx, block_rx) = broadcast::channel(4);
 
     let allowlist = Arc::new(DashSet::new());
+    let wrapper_allowlist = Arc::new(DashSet::new());
+    let infra_allowlist = Arc::new(DashSet::new());
     let router =
         default_uniswap_v2_router(CHAIN_ETHEREUM).unwrap_or_else(|| Address::from([0x11; 20]));
     allowlist.insert(router);
@@ -103,6 +105,8 @@ async fn mev_share_hint_round_trip() {
         http.clone(),
         true,
         allowlist,
+        wrapper_allowlist,
+        infra_allowlist,
         None,
         500,
         wrapped_native_for_chain(CHAIN_ETHEREUM),

@@ -525,15 +525,14 @@ impl Simulator {
         };
 
         let call_res = self.provider.call(req).await;
-        let (success, return_data) = match call_res {
-            Ok(bytes) => (true, bytes.to_vec()),
-            Err(e) => (false, format!("eth_call failed: {e}").into_bytes()),
-        };
-
-        let reason = if success {
-            None
-        } else {
-            Some(decode_flashloan_revert(&return_data))
+        let (success, return_data, reason) = match call_res {
+            Ok(bytes) => (true, bytes.to_vec(), None),
+            Err(e) => {
+                let msg = format!("eth_call failed: {e}");
+                // This path does not reliably expose raw ABI revert bytes; decoding the provider
+                // message as revert payload turns clear RPC errors into noisy hex output.
+                (false, msg.clone().into_bytes(), Some(msg))
+            }
         };
 
         Ok(SimulationOutcome {
@@ -569,15 +568,38 @@ impl Simulator {
                         .try_bundle_with_eth_simulate(txs, state_override.clone())
                         .await?
                     {
+                        if outcomes.len() != txs.len() {
+                            tracing::warn!(
+                                target: "simulation",
+                                backend = "eth_simulate",
+                                expected = txs.len(),
+                                got = outcomes.len(),
+                                "bundle simulation outcome count mismatch; falling back"
+                            );
+                            continue;
+                        }
                         return Ok(outcomes);
                     }
                 }
                 SimulationBackendMethod::DebugTraceCall => {
                     if let Some(outcomes) = self.try_bundle_with_debug_trace(txs).await? {
+                        if outcomes.len() != txs.len() {
+                            tracing::warn!(
+                                target: "simulation",
+                                backend = "debug_trace_call_many",
+                                expected = txs.len(),
+                                got = outcomes.len(),
+                                "bundle simulation outcome count mismatch; falling back"
+                            );
+                            continue;
+                        }
                         return Ok(outcomes);
                     }
                 }
                 SimulationBackendMethod::EthCall => {
+                    if txs.len() > 1 {
+                        return Ok(non_stateful_eth_call_bundle_outcomes(txs.len()));
+                    }
                     let mut outcomes = Vec::with_capacity(txs.len());
                     for tx in txs {
                         outcomes.push(self.simulate_request_with_eth_call(tx.clone()).await?);
@@ -585,6 +607,10 @@ impl Simulator {
                     return Ok(outcomes);
                 }
             }
+        }
+
+        if txs.len() > 1 {
+            return Ok(non_stateful_eth_call_bundle_outcomes(txs.len()));
         }
 
         let mut outcomes = Vec::with_capacity(txs.len());
@@ -722,6 +748,23 @@ impl Simulator {
             }
         }
     }
+}
+
+fn non_stateful_eth_call_bundle_outcomes(count: usize) -> Vec<SimulationOutcome> {
+    let reason = "eth_call fallback is non-stateful for multi-tx bundles; treating as failed simulation".to_string();
+    tracing::warn!(
+        target: "simulation",
+        tx_count = count,
+        "eth_call fallback cannot safely simulate multi-transaction bundles"
+    );
+    (0..count)
+        .map(|_| SimulationOutcome {
+            success: false,
+            gas_used: 0,
+            return_data: reason.as_bytes().to_vec(),
+            reason: Some(reason.clone()),
+        })
+        .collect()
 }
 
 fn parse_rpc_error_from_text(text: &str) -> Option<RpcErrorInfo> {

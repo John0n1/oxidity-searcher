@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use crate::common::error::AppError;
+use crate::domain::constants::{FLASHBOTS_MAX_BYTES, FLASHBOTS_MAX_TXS};
 use crate::network::provider::HttpProvider;
 use crate::services::strategy::strategy::StrategyStats;
 use crate::services::strategy::time_utils::current_unix;
@@ -45,8 +46,6 @@ pub struct BundleSender {
     relay_replacement_uuids: StdMutex<HashMap<String, String>>,
 }
 
-const FLASHBOTS_MAX_TXS: usize = 100;
-const FLASHBOTS_MAX_BYTES: usize = 300_000;
 const RELAY_TIMEOUT_MS: u64 = 2_500;
 const RELAY_MAX_ATTEMPTS: u64 = 2;
 const DEFAULT_MEVSHARE_BUILDERS: [&str; 4] = ["flashbots", "beaverbuild.org", "rsync", "Titan"];

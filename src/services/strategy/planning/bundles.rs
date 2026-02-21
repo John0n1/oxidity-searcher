@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use crate::common::error::AppError;
+use crate::domain::constants::{FLASHBOTS_MAX_BYTES, FLASHBOTS_MAX_TXS};
 use crate::services::strategy::strategy::StrategyExecutor;
 use alloy::consensus::{SignableTransaction, TxEip1559};
 use alloy::eips::eip2718::Encodable2718;
@@ -18,9 +19,6 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 pub const BUNDLE_DEBOUNCE_MS: u64 = 5;
-// Flashbots documented limits: <=100 txs and <=300 kB per bundle.
-const MAX_FLASHBOTS_TXS: usize = 100;
-const MAX_FLASHBOTS_BYTES: usize = 300_000;
 
 fn bundle_bytes(bundle: &[Vec<u8>]) -> usize {
     bundle.iter().map(|b| b.len()).sum()
@@ -345,7 +343,7 @@ impl StrategyExecutor {
         }
 
         let new_raw_bytes = bundle_bytes(&new_raw);
-        if new_raw.len() > MAX_FLASHBOTS_TXS || new_raw_bytes > MAX_FLASHBOTS_BYTES {
+        if new_raw.len() > FLASHBOTS_MAX_TXS || new_raw_bytes > FLASHBOTS_MAX_BYTES {
             return Err(AppError::Strategy(
                 "Single merge would exceed Flashbots bundle limits".into(),
             ));
@@ -359,7 +357,7 @@ impl StrategyExecutor {
         };
         let combined_txs = state.raw.len().saturating_add(new_raw.len());
         let combined_bytes = bundle_bytes(&state.raw).saturating_add(new_raw_bytes);
-        if (combined_txs > MAX_FLASHBOTS_TXS || combined_bytes > MAX_FLASHBOTS_BYTES)
+        if (combined_txs > FLASHBOTS_MAX_TXS || combined_bytes > FLASHBOTS_MAX_BYTES)
             && !state.raw.is_empty()
         {
             let flush_bundle = state.raw.clone();
@@ -682,7 +680,7 @@ mod tests {
             front_run: None,
             approvals: Vec::new(),
             main: request_with_nonce(10, address!("3333333333333333333333333333333333333333")),
-            victims: vec![vec![0u8; 1]; MAX_FLASHBOTS_TXS],
+            victims: vec![vec![0u8; 1]; FLASHBOTS_MAX_TXS],
         };
 
         let res = exec.merge_and_send_bundle(plan, Vec::new(), lease).await;

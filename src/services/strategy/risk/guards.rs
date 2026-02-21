@@ -59,8 +59,7 @@ impl StrategyExecutor {
         Self::price_ratio_ppm(out, inn)
     }
 
-    pub(crate) fn dynamic_profit_floor(wallet_balance: U256) -> U256 {
-        let abs_floor = *MIN_PROFIT_THRESHOLD_WEI;
+    fn dynamic_profit_floor_with_abs(wallet_balance: U256, abs_floor: U256) -> U256 {
         let scaled = wallet_balance
             .checked_div(U256::from(100_000u64))
             .unwrap_or(U256::ZERO);
@@ -69,6 +68,18 @@ impl StrategyExecutor {
         } else {
             abs_floor
         }
+    }
+
+    fn configured_abs_floor(&self) -> U256 {
+        self.profit_floor_abs_wei
+    }
+
+    fn configured_dynamic_floor(&self, wallet_balance: U256) -> U256 {
+        Self::dynamic_profit_floor_with_abs(wallet_balance, self.configured_abs_floor())
+    }
+
+    pub(crate) fn dynamic_profit_floor(wallet_balance: U256) -> U256 {
+        Self::dynamic_profit_floor_with_abs(wallet_balance, *MIN_PROFIT_THRESHOLD_WEI)
     }
 
     /// Minimum profit that accounts for current gas/bribe costs plus a small safety margin.
@@ -96,7 +107,7 @@ impl StrategyExecutor {
     ) -> U256 {
         let base_bps = self.adaptive_base_floor_bps(gas_fees);
         let cost_bps = self.adaptive_cost_floor_bps(gas_fees);
-        let base_floor = Self::dynamic_profit_floor(wallet_balance);
+        let base_floor = self.configured_dynamic_floor(wallet_balance);
         let scaled_base = base_floor
             .saturating_mul(U256::from(base_bps))
             .checked_div(U256::from(10_000u64))
@@ -109,6 +120,38 @@ impl StrategyExecutor {
             .unwrap_or(cost_basis);
 
         scaled_base.saturating_add(scaled_cost)
+    }
+
+    pub(crate) fn dynamic_policy_profit_floor_with_costs(
+        &self,
+        wallet_balance: U256,
+        gas_cost_wei: U256,
+        extra_costs: U256,
+        gas_fees: &GasFees,
+        min_usd_floor_wei: Option<U256>,
+    ) -> U256 {
+        let tuned_floor =
+            self.tuned_profit_floor_with_costs(wallet_balance, gas_cost_wei, extra_costs, gas_fees);
+        let abs_or_scaled = self.configured_dynamic_floor(wallet_balance);
+        let gas_mult_floor = gas_cost_wei
+            .saturating_mul(U256::from(self.profit_floor_mult_gas))
+            .saturating_add(extra_costs);
+        let volatility_bps = self
+            .price_feed
+            .volatility_bps_cached("ETH")
+            .unwrap_or(0)
+            .min(2_000);
+        let volatility_guard = gas_cost_wei
+            .saturating_add(extra_costs)
+            .saturating_mul(U256::from(10_000u64.saturating_add(volatility_bps)))
+            .checked_div(U256::from(10_000u64))
+            .unwrap_or_else(|| gas_cost_wei.saturating_add(extra_costs));
+        let usd_guard = min_usd_floor_wei.unwrap_or(U256::ZERO);
+        tuned_floor
+            .max(abs_or_scaled)
+            .max(gas_mult_floor)
+            .max(volatility_guard)
+            .max(usd_guard)
     }
 
     pub(crate) fn classify_stress_profile(&self, gas_fees: &GasFees) -> StressProfile {
@@ -321,6 +364,24 @@ impl StrategyExecutor {
     #[cfg(test)]
     pub(crate) fn test_dynamic_profit_floor_public(balance: U256) -> U256 {
         Self::dynamic_profit_floor(balance)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_dynamic_policy_profit_floor_public(
+        &self,
+        wallet_balance: U256,
+        gas_cost_wei: U256,
+        extra_costs: U256,
+        gas_fees: &GasFees,
+        min_usd_floor_wei: Option<U256>,
+    ) -> U256 {
+        self.dynamic_policy_profit_floor_with_costs(
+            wallet_balance,
+            gas_cost_wei,
+            extra_costs,
+            gas_fees,
+            min_usd_floor_wei,
+        )
     }
 
     pub(crate) fn boost_fees(
@@ -767,5 +828,107 @@ mod tests {
             assert!(profile.base_floor_bps >= prev_base_floor);
             prev_base_floor = profile.base_floor_bps;
         }
+    }
+
+    #[tokio::test]
+    async fn dynamic_policy_floor_scales_with_fee_pressure() {
+        let mut exec = dummy_executor_for_tests().await;
+        exec.profit_floor_abs_wei = U256::from(900_000_000_000_000u64);
+        exec.profit_floor_mult_gas = 15;
+        let wallet = U256::from(800_000_000_000_000_000u128);
+
+        let low_fees = GasFees {
+            max_fee_per_gas: 45_000_000,
+            max_priority_fee_per_gas: 5_000_000,
+            next_base_fee_per_gas: 40_000_000,
+            base_fee_per_gas: 35_000_000,
+            p50_priority_fee_per_gas: Some(4_500_000),
+            p90_priority_fee_per_gas: Some(6_000_000),
+            gas_used_ratio: Some(0.45),
+            suggested_max_fee_per_gas: Some(55_000_000),
+        };
+        let high_fees = GasFees {
+            max_fee_per_gas: 220_000_000_000,
+            max_priority_fee_per_gas: 8_000_000_000,
+            next_base_fee_per_gas: 200_000_000_000,
+            base_fee_per_gas: 185_000_000_000,
+            p50_priority_fee_per_gas: Some(7_500_000_000),
+            p90_priority_fee_per_gas: Some(14_000_000_000),
+            gas_used_ratio: Some(1.2),
+            suggested_max_fee_per_gas: Some(260_000_000_000),
+        };
+
+        let low_floor = exec.test_dynamic_policy_profit_floor_public(
+            wallet,
+            U256::from(150_000u64).saturating_mul(U256::from(low_fees.max_fee_per_gas)),
+            U256::ZERO,
+            &low_fees,
+            None,
+        );
+        let high_floor = exec.test_dynamic_policy_profit_floor_public(
+            wallet,
+            U256::from(150_000u64).saturating_mul(U256::from(high_fees.max_fee_per_gas)),
+            U256::ZERO,
+            &high_fees,
+            None,
+        );
+
+        assert!(low_floor >= exec.profit_floor_abs_wei);
+        assert!(high_floor > low_floor);
+    }
+
+    #[tokio::test]
+    async fn dynamic_policy_floor_respects_min_usd_guard_when_present() {
+        let mut exec = dummy_executor_for_tests().await;
+        exec.profit_floor_abs_wei = U256::from(900_000_000_000_000u64);
+        exec.profit_floor_mult_gas = 10;
+        let wallet = U256::from(1_000_000_000_000_000_000u128);
+        let fees = GasFees {
+            max_fee_per_gas: 40_000_000,
+            max_priority_fee_per_gas: 5_000_000,
+            next_base_fee_per_gas: 35_000_000,
+            base_fee_per_gas: 30_000_000,
+            p50_priority_fee_per_gas: Some(4_000_000),
+            p90_priority_fee_per_gas: Some(5_000_000),
+            gas_used_ratio: Some(0.4),
+            suggested_max_fee_per_gas: Some(50_000_000),
+        };
+        let usd_guard = U256::from(2_000_000_000_000_000u64);
+        let floor = exec.test_dynamic_policy_profit_floor_public(
+            wallet,
+            U256::from(150_000u64).saturating_mul(U256::from(fees.max_fee_per_gas)),
+            U256::ZERO,
+            &fees,
+            Some(usd_guard),
+        );
+        assert!(floor >= usd_guard);
+    }
+
+    #[tokio::test]
+    async fn dynamic_policy_floor_respects_lower_configured_abs_floor_override() {
+        let mut exec = dummy_executor_for_tests().await;
+        // Explicit runtime override below the historical baseline.
+        exec.profit_floor_abs_wei = U256::from(150_000_000_000_000u64);
+        exec.profit_floor_mult_gas = 10;
+        let wallet = U256::from(1_000_000_000_000_000_000u128);
+        let fees = GasFees {
+            max_fee_per_gas: 40_000_000,
+            max_priority_fee_per_gas: 5_000_000,
+            next_base_fee_per_gas: 35_000_000,
+            base_fee_per_gas: 30_000_000,
+            p50_priority_fee_per_gas: Some(4_000_000),
+            p90_priority_fee_per_gas: Some(5_000_000),
+            gas_used_ratio: Some(0.4),
+            suggested_max_fee_per_gas: Some(50_000_000),
+        };
+        let floor = exec.test_dynamic_policy_profit_floor_public(
+            wallet,
+            U256::ZERO,
+            U256::ZERO,
+            &fees,
+            None,
+        );
+        assert_eq!(floor, U256::from(150_000_000_000_000u64));
+        assert!(floor < *MIN_PROFIT_THRESHOLD_WEI);
     }
 }
