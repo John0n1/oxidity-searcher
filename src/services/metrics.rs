@@ -53,7 +53,7 @@ pub async fn spawn_metrics_server(
 
     let local = listener.local_addr().ok();
     if let Some(addr) = local {
-        tracing::info!("Metrics server listening on {}", addr);
+        tracing::info!("✔ Metrics server online - listening on {}", addr);
     }
 
     let token = token.clone();

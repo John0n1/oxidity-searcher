@@ -340,7 +340,7 @@ impl Simulator {
             debug_trace_call_many,
             eth_simulate_shape_ok,
             debug_trace_call_many_shape_ok,
-            "RPC simulation capabilities"
+            "✔ Confirmed RPC simulation capabilities"
         );
         RpcCapabilities {
             fee_history,

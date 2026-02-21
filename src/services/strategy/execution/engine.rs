@@ -284,7 +284,7 @@ impl Engine {
         match self.http_provider.get_client_version().await {
             Ok(version) => {
                 client_version = Some(version.clone());
-                tracing::info!(target: "rpc", client = %version, "✅ RPC client version");
+                tracing::info!(target: "rpc", client = %version, "✔  RPC client version");
             }
             Err(e) => {
                 tracing::warn!(
