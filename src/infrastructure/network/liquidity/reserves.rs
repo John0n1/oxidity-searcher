@@ -521,7 +521,7 @@ impl ReserveCache {
             target: "reserves",
             kept,
             metadata_kept,
-            "Validated pairs.json entries loaded"
+            "✔ Validated pairs.json entries loaded"
         );
         Ok(())
     }
@@ -565,7 +565,7 @@ impl ReserveCache {
             requested = pairs.len(),
             warmed,
             failed,
-            "V2 reserve warmup completed"
+            "✔ V2 reserve warmup completed"
         );
         Ok(())
     }

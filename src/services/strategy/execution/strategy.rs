@@ -760,7 +760,7 @@ impl StrategyExecutor {
                 target: "bundle_state",
                 block,
                 next_nonce = next,
-                "Restored nonce state from DB"
+                "🔢 Restored nonce state from DB"
             );
         } else if let Ok(None) = loaded {
             self.stats.nonce_state_loads.fetch_add(1, Ordering::Relaxed);

@@ -298,7 +298,7 @@ impl PriceFeed {
             stale_critical = stale_critical.len(),
             stale = stale.len(),
             invalid = invalid.len(),
-            "Chainlink feed audit completed"
+            "✔ Chainlink feed audit completed"
         );
         Ok(())
     }

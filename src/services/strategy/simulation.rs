@@ -151,7 +151,7 @@ impl Simulator {
 
         match self.provider.simulate(&payload).await {
             Ok(_) => {
-                tracing::info!(target: "simulation", "✅ eth_simulateV1 available");
+                tracing::info!(target: "simulation", "✔ eth_simulateV1 available");
                 true
             }
             Err(e) => {
