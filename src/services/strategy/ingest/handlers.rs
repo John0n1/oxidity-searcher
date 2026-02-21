@@ -29,6 +29,55 @@ use alloy::rpc::types::eth::{Transaction, TransactionInput, TransactionRequest};
 use alloy_sol_types::SolCall;
 
 impl StrategyExecutor {
+    fn simulation_failure_is_router_attributable(
+        detail: &str,
+        failed_to: Option<Address>,
+        router: Address,
+    ) -> bool {
+        let lower = detail.to_ascii_lowercase();
+        // Exclude systemic / infra failures that are not router quality signals.
+        const NON_ROUTER_MARKERS: &[&str] = &[
+            "victim_deadline_passed",
+            "nonce too low",
+            "nonce too high",
+            "already known",
+            "insufficient funds",
+            "underpriced",
+            "max fee per gas less than block base fee",
+            "intrinsic gas too low",
+            "timeout",
+            "connection failed",
+            "header not found",
+            "aavecallbacknotreceived",
+            "balancercallbacknotreceived",
+            "insufficientfundsforrepayment",
+            "approvalfailed",
+            "bribefailed",
+            "tokentransferfailed",
+            "lengthmismatch",
+        ];
+        if NON_ROUTER_MARKERS.iter().any(|m| lower.contains(m)) {
+            return false;
+        }
+
+        let target_is_router = failed_to.map(|addr| addr == router).unwrap_or(false);
+        let looks_router_revert = [
+            "revert",
+            "execution reverted",
+            "insufficient output amount",
+            "too little received",
+            "uniswapv2",
+            "uniswapv3",
+            "panic code",
+            "transfer_failed",
+            "transfer failed",
+        ]
+        .iter()
+        .any(|m| lower.contains(m));
+
+        target_is_router || looks_router_revert
+    }
+
     fn required_wallet_upfront_wei(
         uses_flashloan: bool,
         principal_wei: U256,
@@ -1622,7 +1671,21 @@ impl StrategyExecutor {
                 .unwrap_or(U256::ZERO)
                 .saturating_sub(backrun.value)
         } else {
-            U256::ZERO
+            if Some(backrun.to) == self.executor {
+                backrun
+                    .request
+                    .input
+                    .clone()
+                    .into_input()
+                    .and_then(|input| {
+                        UnifiedHardenedExecutor::executeBundleCall::abi_decode(&input)
+                            .ok()
+                            .map(|call| call.bribeAmount)
+                    })
+                    .unwrap_or(U256::ZERO)
+            } else {
+                U256::ZERO
+            }
         };
         let main_request_for_gas = executor_request.as_ref().map(|(_, req, _)| req.clone());
         let refined_bundle_gas = self.adaptive_min_bundle_gas_from_plan(
@@ -1778,7 +1841,6 @@ impl StrategyExecutor {
         )
         .await?;
         if bundle_sims.len() != bundle_requests.len() {
-            self.record_router_sim(router, false);
             self.log_skip(
                 SkipReason::SimulationFailed,
                 &format!(
@@ -1799,13 +1861,13 @@ impl StrategyExecutor {
         if let Some((failed_idx, failure)) =
             bundle_sims.iter().enumerate().find(|(_, o)| !o.success)
         {
-            self.record_router_sim(router, false);
             let detail = failure
                 .reason
                 .clone()
                 .unwrap_or_else(|| "bundle sim returned failure".to_string());
             let (
                 failed_to,
+                failed_to_addr,
                 failed_gas,
                 failed_value,
                 failed_selector,
@@ -1813,6 +1875,10 @@ impl StrategyExecutor {
                 failed_flashloan_amount,
                 failed_is_last,
             ) = if let Some(req) = bundle_requests.get(failed_idx) {
+                let to_addr = match req.to.as_ref() {
+                    Some(alloy::primitives::TxKind::Call(addr)) => Some(*addr),
+                    _ => None,
+                };
                 let to = match req.to.as_ref() {
                     Some(alloy::primitives::TxKind::Call(addr)) => format!("{addr:#x}"),
                     Some(alloy::primitives::TxKind::Create) => "create".to_string(),
@@ -1846,6 +1912,7 @@ impl StrategyExecutor {
                 }
                 (
                     to,
+                    to_addr,
                     req.gas.unwrap_or_default(),
                     req.value.unwrap_or(U256::ZERO),
                     selector,
@@ -1856,6 +1923,7 @@ impl StrategyExecutor {
             } else {
                 (
                     "unknown".to_string(),
+                    None,
                     0u64,
                     U256::ZERO,
                     "0x".to_string(),
@@ -1864,6 +1932,19 @@ impl StrategyExecutor {
                     false,
                 )
             };
+            let router_fail_attributed =
+                Self::simulation_failure_is_router_attributable(&detail, failed_to_addr, router);
+            if router_fail_attributed {
+                self.record_router_sim(router, false);
+            } else {
+                tracing::trace!(
+                    target: "simulation",
+                    router = %format!("{:#x}", router),
+                    fail_to = %failed_to,
+                    detail = %detail,
+                    "simulation failure not attributed to router risk score"
+                );
+            }
             self.log_skip(SkipReason::SimulationFailed, &detail);
             tracing::debug!(
                 target: "simulation",

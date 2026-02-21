@@ -14,6 +14,7 @@ use reqwest::header::HeaderValue;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
+use futures::future::join_all;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
@@ -349,84 +350,123 @@ impl BundleSender {
             self.provider.get_block_number().await.map_err(|e| {
                 AppError::Connection(format!("Failed to fetch block number: {}", e))
             })?;
-        let target_block = block_number + 1;
-        let replacement_uuid = if self.use_replacement_uuid {
-            Some(Self::generate_replacement_uuid(raw_txs, target_block))
-        } else {
-            None
-        };
+        let target_blocks = std::env::var("BUNDLE_TARGET_BLOCKS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(1)
+            .clamp(1, 5);
 
-        let mut params = json!({
-            "txs": raw_txs.iter().map(|r| format!("0x{}", hex::encode(r))).collect::<Vec<_>>(),
-            "blockNumber": format!("0x{:x}", target_block),
-            "minTimestamp": current_unix(),
-        });
-        if let Some(uuid) = replacement_uuid.as_ref() {
-            params["replacementUuid"] = json!(uuid);
-        }
-
-        let body = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "eth_sendBundle",
-            "params": [params]
-        });
-
-        let body_bytes =
-            serde_json::to_vec(&body).map_err(|e| AppError::Initialization(e.to_string()))?;
-
-        let relays = [
-            (self.relay_url.as_str(), true, "flashbots"),
-            ("https://rpc.beaverbuild.org", false, "beaver"),
-            ("https://rpc.titanbuilder.xyz", true, "titan"),
-            ("https://rpc.ultrasound.money", true, "ultrasound"),
-            ("https://builder0x69.io", true, "agnostic"),
-            ("https://rpc.blxrbdn.com", true, "bloxroute"),
+        let relays: Vec<(String, bool, String)> = vec![
+            (self.relay_url.clone(), true, "flashbots".to_string()),
+            ("https://rpc.beaverbuild.org".to_string(), false, "beaver".to_string()),
+            (
+                "https://rpc.titanbuilder.xyz".to_string(),
+                true,
+                "titan".to_string(),
+            ),
+            (
+                "https://rpc.bobthebuilder.xyz".to_string(),
+                true,
+                "bobthebuilder".to_string(),
+            ),
+            (
+                "https://flashbots.btcs.com".to_string(),
+                true,
+                "btcs".to_string(),
+            ),
+            (
+                "https://rpc.eurekabuilder.xyz".to_string(),
+                true,
+                "eureka".to_string(),
+            ),
+            (
+                "https://rpc.quasar.win".to_string(),
+                true,
+                "quasar".to_string(),
+            ),
         ];
+
         let mut accepted = 0usize;
         let mut failures: Vec<String> = Vec::new();
-        for (url, with_sig, name) in relays {
-            if with_sig
-                && self.cancel_previous_bundle
-                && let Some(prev_uuid) = self.relay_last_replacement_uuid(name)
-                && let Err(err) = self.cancel_bundle_with_sig(url, name, &prev_uuid).await
-            {
-                tracing::warn!(
-                    target: "executor",
-                    relay = %url,
-                    name = %name,
-                    replacement_uuid = %prev_uuid,
-                    error = %err,
-                    "Failed to cancel previous bundle before replacement"
-                );
+        for offset in 1..=target_blocks {
+            let target_block = block_number + offset;
+            let replacement_uuid = if self.use_replacement_uuid {
+                Some(Self::generate_replacement_uuid(raw_txs, target_block))
+            } else {
+                None
+            };
+
+            let mut params = json!({
+                "txs": raw_txs.iter().map(|r| format!("0x{}", hex::encode(r))).collect::<Vec<_>>(),
+                "blockNumber": format!("0x{:x}", target_block),
+                "minTimestamp": current_unix(),
+            });
+            if let Some(uuid) = replacement_uuid.as_ref() {
+                params["replacementUuid"] = json!(uuid);
             }
-            let result = self
-                .post_bundle_optional(
-                    url,
-                    &body_bytes,
-                    with_sig,
-                    name,
-                    target_block,
-                    raw_txs.len(),
-                    replacement_uuid.as_deref(),
-                )
-                .await;
-            match result {
-                Ok(()) => {
-                    accepted = accepted.saturating_add(1);
-                    if let Some(uuid) = replacement_uuid.as_deref() {
-                        self.relay_set_replacement_uuid(name, uuid);
-                    }
+
+            let body = json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "eth_sendBundle",
+                "params": [params]
+            });
+            let body_bytes =
+                serde_json::to_vec(&body).map_err(|e| AppError::Initialization(e.to_string()))?;
+
+            let mut requests = Vec::with_capacity(relays.len());
+            for (url, with_sig, name) in &relays {
+                if *with_sig
+                    && self.cancel_previous_bundle
+                    && let Some(prev_uuid) = self.relay_last_replacement_uuid(name)
+                    && let Err(err) = self.cancel_bundle_with_sig(url, name, &prev_uuid).await
+                {
+                    tracing::warn!(
+                        target: "executor",
+                        relay = %url,
+                        name = %name,
+                        replacement_uuid = %prev_uuid,
+                        error = %err,
+                        "Failed to cancel previous bundle before replacement"
+                    );
                 }
-                Err(e) => {
-                    failures.push(format!("{name}@{url}: {e}"));
+
+                requests.push(async {
+                    self.post_bundle_optional(
+                        url,
+                        &body_bytes,
+                        *with_sig,
+                        name,
+                        target_block,
+                        raw_txs.len(),
+                        replacement_uuid.as_deref(),
+                    )
+                    .await
+                    .map(|_| (name.clone(), url.clone()))
+                    .map_err(|e| (name.clone(), url.clone(), e))
+                });
+            }
+
+            let results = join_all(requests).await;
+            for result in results {
+                match result {
+                    Ok((name, _url)) => {
+                        accepted = accepted.saturating_add(1);
+                        if let Some(uuid) = replacement_uuid.as_deref() {
+                            self.relay_set_replacement_uuid(&name, uuid);
+                        }
+                    }
+                    Err((name, url, e)) => {
+                        failures.push(format!("{name}@{url}: {e}"));
+                    }
                 }
             }
         }
 
         if accepted == 0 {
             return Err(AppError::Connection(format!(
-                "All relays rejected bundle: {}",
+                "All relays rejected bundle across {} block(s): {}",
+                target_blocks,
                 failures.join(" | ")
             )));
         }
@@ -434,6 +474,7 @@ impl BundleSender {
             tracing::warn!(
                 target: "executor",
                 accepted,
+                target_blocks,
                 failures = %failures.join(" | "),
                 "Bundle accepted by subset of relays"
             );

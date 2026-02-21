@@ -262,13 +262,19 @@ impl StrategyExecutor {
                 .saturating_mul(congestion)
                 / 10_000u64;
             let floor = match stress {
-                StressProfile::UltraLow => 9_000,
-                StressProfile::Low => 9_500,
-                StressProfile::Normal => 10_000,
-                StressProfile::Elevated => 10_750,
-                StressProfile::High => 11_500,
+                StressProfile::UltraLow => self
+                    .profit_guard_base_floor_multiplier_bps
+                    .saturating_mul(70)
+                    / 100,
+                StressProfile::Low => self.profit_guard_base_floor_multiplier_bps * 8 / 10,
+                StressProfile::Normal => self.profit_guard_base_floor_multiplier_bps * 9 / 10,
+                StressProfile::Elevated => self.profit_guard_base_floor_multiplier_bps,
+                StressProfile::High => self
+                    .profit_guard_base_floor_multiplier_bps
+                    .saturating_mul(110)
+                    / 100,
             };
-            dynamic.max(floor).clamp(8_000, 14_000)
+            dynamic.max(floor).clamp(3_500, 14_000)
         };
         let cost_floor_bps = {
             let extra = match stress {
@@ -280,32 +286,39 @@ impl StrategyExecutor {
             };
             let dynamic = self
                 .profit_guard_cost_multiplier_bps
-                .max(9_500)
                 .saturating_mul(extra)
                 / 10_000u64;
-            dynamic.clamp(9_500, 16_000)
+            let floor = match stress {
+                StressProfile::UltraLow => self.profit_guard_cost_multiplier_bps * 8 / 10,
+                StressProfile::Low => self.profit_guard_cost_multiplier_bps * 85 / 100,
+                StressProfile::Normal => self.profit_guard_cost_multiplier_bps * 9 / 10,
+                StressProfile::Elevated => self.profit_guard_cost_multiplier_bps * 95 / 100,
+                StressProfile::High => self.profit_guard_cost_multiplier_bps,
+            };
+            dynamic.clamp(5_000, 16_000)
+                .max(floor.clamp(5_000, 16_000))
         };
         let min_margin_bps = {
             let dynamic = self.profit_guard_min_margin_bps.saturating_mul(congestion) / 10_000u64;
             let floor = match stress {
-                StressProfile::UltraLow => 450,
-                StressProfile::Low => 550,
-                StressProfile::Normal => 750,
-                StressProfile::Elevated => 950,
-                StressProfile::High => 1_150,
+                StressProfile::UltraLow => self.profit_guard_min_margin_bps * 55 / 100,
+                StressProfile::Low => self.profit_guard_min_margin_bps * 70 / 100,
+                StressProfile::Normal => self.profit_guard_min_margin_bps * 85 / 100,
+                StressProfile::Elevated => self.profit_guard_min_margin_bps,
+                StressProfile::High => self.profit_guard_min_margin_bps * 115 / 100,
             };
-            dynamic.max(floor).clamp(200, 3_000)
+            dynamic.max(floor).clamp(120, 3_000)
         };
         let liquidity_ratio_floor_ppm = {
             let dynamic = self.liquidity_ratio_floor_ppm.saturating_mul(congestion) / 10_000u64;
             let floor = match stress {
-                StressProfile::UltraLow => 450,
-                StressProfile::Low => 550,
-                StressProfile::Normal => 700,
-                StressProfile::Elevated => 850,
-                StressProfile::High => 1_000,
+                StressProfile::UltraLow => self.liquidity_ratio_floor_ppm * 6 / 10,
+                StressProfile::Low => self.liquidity_ratio_floor_ppm * 7 / 10,
+                StressProfile::Normal => self.liquidity_ratio_floor_ppm * 85 / 100,
+                StressProfile::Elevated => self.liquidity_ratio_floor_ppm,
+                StressProfile::High => self.liquidity_ratio_floor_ppm * 11 / 10,
             };
-            dynamic.max(floor).clamp(220, 1_800)
+            dynamic.max(floor).clamp(180, 1_800)
         };
         CalibratedRiskProfile {
             stress,

@@ -7,7 +7,9 @@ use clap::Parser;
 use dashmap::DashSet;
 use futures::future::try_join_all;
 use oxidity_searcher::app::config::GlobalSettings;
-use oxidity_searcher::app::logging::{format_framed_table, setup_logging};
+use oxidity_searcher::app::logging::{
+    ansi_tables_enabled, format_framed_table, format_framed_table_with_blue_title, setup_logging,
+};
 use oxidity_searcher::domain::error::AppError;
 use oxidity_searcher::infrastructure::data::address_registry::validate_address_map;
 use oxidity_searcher::infrastructure::data::db::Database;
@@ -81,14 +83,20 @@ fn log_chainlink_feed_summary(chain_id: u64, feeds: &HashMap<String, alloy::prim
         .collect::<Vec<_>>()
         .join(",");
 
-    let framed = format_framed_table(vec![
+    let panel_lines = vec![
         "Selected canonical Chainlink feeds".to_string(),
         format!("chain_id={chain_id}"),
         format!("feed_count={feed_count}"),
         format!("critical={critical_summary}"),
         format!("sample={sample}"),
-    ]);
-    tracing::info!(target: "config", "\n{framed}");
+    ];
+    if ansi_tables_enabled() {
+        let framed = format_framed_table_with_blue_title(panel_lines.iter().map(String::as_str));
+        eprintln!("{framed}");
+    } else {
+        let framed = format_framed_table(panel_lines.iter().map(String::as_str));
+        tracing::info!(target: "config", "\n{framed}");
+    }
     if !missing_critical.is_empty() {
         tracing::warn!(
             target: "config",
@@ -253,10 +261,17 @@ async fn main() -> Result<(), AppError> {
             chainlink_feeds,
             settings.price_api_keys(),
         )?;
-        let simulation_backend = if chain_id == 1 {
-            SimulationBackend::mainnet_priority()
-        } else {
-            SimulationBackend::new(settings.simulation_backend.clone())
+        let simulation_backend = {
+            let configured = settings.simulation_backend.trim().to_lowercase();
+            let explicit = !configured.is_empty()
+                && configured != "auto"
+                && configured != "mainnet_priority"
+                && configured != "mainnet-priority";
+            if chain_id == 1 && !explicit {
+                SimulationBackend::mainnet_priority()
+            } else {
+                SimulationBackend::new(settings.simulation_backend.clone())
+            }
         };
         let simulator = Simulator::new(http_provider.clone(), simulation_backend);
 

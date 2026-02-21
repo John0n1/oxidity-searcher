@@ -99,31 +99,11 @@ where
         .unwrap_or(110)
         .clamp(60, 180);
 
-    let raw_lines = lines
-        .into_iter()
-        .map(|line| line.as_ref().to_string())
-        .collect::<Vec<_>>();
-    if raw_lines.is_empty() {
+    let lines = collect_wrapped_lines(lines, max_content_width);
+    if lines.is_empty() {
         return String::new();
     }
-
-    let mut lines = Vec::new();
-    for (line_idx, line) in raw_lines.iter().enumerate() {
-        let wrapped = wrap_line(line, max_content_width);
-        for (part_idx, part) in wrapped.into_iter().enumerate() {
-            if line_idx == 0 && part_idx == 0 && ansi_enabled() {
-                lines.push(format!("{ANSI_TITLE_BLUEISH}{part}{ANSI_RESET}"));
-            } else {
-                lines.push(part);
-            }
-        }
-    }
-
-    let width = lines
-        .iter()
-        .map(|line| visible_len(line))
-        .max()
-        .unwrap_or(0);
+    let width = lines.iter().map(|line| visible_len(line)).max().unwrap_or(0);
     let border = format!("+{}+", "-".repeat(width + 2));
     let mut framed = String::new();
     framed.push_str(&border);
@@ -138,6 +118,68 @@ where
     framed
 }
 
+fn collect_wrapped_lines<I, S>(lines: I, max_content_width: usize) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let raw_lines = lines
+        .into_iter()
+        .map(|line| line.as_ref().to_string())
+        .collect::<Vec<_>>();
+    if raw_lines.is_empty() {
+        return Vec::new();
+    }
+
+    let mut wrapped_lines = Vec::new();
+    for line in raw_lines {
+        wrapped_lines.extend(wrap_line(&line, max_content_width));
+    }
+    wrapped_lines
+}
+
+pub fn format_framed_table_with_blue_title<I, S>(lines: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let max_content_width = std::env::var("LOG_TABLE_MAX_WIDTH")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(110)
+        .clamp(60, 180);
+
+    let mut wrapped_lines = collect_wrapped_lines(lines, max_content_width);
+    if wrapped_lines.is_empty() {
+        return String::new();
+    }
+    if let Some(first_line) = wrapped_lines.first_mut() {
+        *first_line = format!("{ANSI_TITLE_BLUEISH}{first_line}{ANSI_RESET}");
+    }
+
+    let width = wrapped_lines
+        .iter()
+        .map(|line| visible_len(line))
+        .max()
+        .unwrap_or(0);
+    let border = format!("+{}+", "-".repeat(width + 2));
+    let mut framed = String::new();
+    framed.push_str(&border);
+    for line in wrapped_lines {
+        let line_len = visible_len(&line);
+        let pad = width.saturating_sub(line_len);
+        framed.push('\n');
+        framed.push_str(&format!("| {}{} |", line, " ".repeat(pad)));
+    }
+    framed.push('\n');
+    framed.push_str(&border);
+    framed
+}
+
+pub fn ansi_tables_enabled() -> bool {
+    ansi_enabled()
+}
+
 pub fn setup_logging(log_level: &str, json_format: bool) {
     // If user passes a bare level (e.g. "debug"), apply sane noisy-module defaults.
     // Custom directive strings (with ',' or '=') are respected as-is.
@@ -146,7 +188,7 @@ pub fn setup_logging(log_level: &str, json_format: bool) {
         normalized.to_string()
     } else {
         format!(
-            "{},h2=info,hyper=info,hyper_util=info,reqwest=info,tokio_tungstenite=info,alloy_transport_http=info",
+            "{},h2=info,hyper=info,hyper_util=info,reqwest=info,tokio_tungstenite=info,alloy_transport_http=info,alloy_pubsub=info,alloy_transport_ipc=info,alloy_rpc_client=info,request=info,sqlx=info",
             normalized
         )
     };
@@ -188,6 +230,11 @@ pub fn setup_logging(log_level: &str, json_format: bool) {
         "format: {}",
         if json_format { "json" } else { "compact" }
     ));
-    let framed = format_framed_table(panel_lines);
-    tracing::info!(target: "oxidity_searcher::app::logging", "\n{framed}");
+    if ansi_tables_enabled() {
+        let framed = format_framed_table_with_blue_title(panel_lines.iter().map(String::as_str));
+        eprintln!("{framed}");
+    } else {
+        let framed = format_framed_table(panel_lines.iter().map(String::as_str));
+        tracing::info!(target: "oxidity_searcher::app::logging", "\n{framed}");
+    }
 }

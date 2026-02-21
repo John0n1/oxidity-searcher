@@ -283,25 +283,32 @@ impl StrategyExecutor {
             values.push(U256::ZERO);
         }
 
-        let exec_call = UnifiedHardenedExecutor::executeBundleCall {
-            targets,
-            payloads,
-            values,
-            bribeRecipient: Address::ZERO,
-            bribeAmount: U256::ZERO,
-            allowPartial: false,
-            balanceCheckToken: self.wrapped_native,
-        };
-        let calldata = exec_call.abi_encode();
         let gas_limit = gas_limit_hint
             .saturating_add(260_000)
             .saturating_add((approvals.len() as u64).saturating_mul(40_000))
             .max(320_000);
+        let bribe_amount = if self.executor_bribe_bps > 0 {
+            let base = U256::from(gas_limit).saturating_mul(U256::from(gas_fees.max_fee_per_gas));
+            base.saturating_mul(U256::from(self.executor_bribe_bps)) / U256::from(10_000u64)
+        } else {
+            U256::ZERO
+        };
+        let exec_call = UnifiedHardenedExecutor::executeBundleCall {
+            targets,
+            payloads,
+            values,
+            bribeRecipient: self.executor_bribe_recipient.unwrap_or(Address::ZERO),
+            bribeAmount: bribe_amount,
+            allowPartial: false,
+            balanceCheckToken: self.wrapped_native,
+        };
+        let total_value = value_in.saturating_add(bribe_amount);
+        let calldata = exec_call.abi_encode();
         let (raw, request, hash) = self
             .sign_swap_request(
                 executor,
                 gas_limit,
-                value_in,
+                total_value,
                 gas_fees.max_fee_per_gas,
                 gas_fees.max_priority_fee_per_gas,
                 nonce,

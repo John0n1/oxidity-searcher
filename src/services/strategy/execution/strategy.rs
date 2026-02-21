@@ -7,7 +7,9 @@ use crate::core::portfolio::PortfolioManager;
 use crate::core::safety::SafetyGuard;
 use crate::core::simulation::Simulator;
 use crate::data::db::Database;
-use crate::app::logging::format_framed_table;
+use crate::app::logging::{
+    ansi_tables_enabled, format_framed_table, format_framed_table_with_blue_title,
+};
 use crate::domain::constants;
 use crate::infrastructure::data::token_manager::TokenManager;
 use crate::network::gas::{GasFees, GasOracle};
@@ -96,7 +98,10 @@ impl SkipReason {
     fn noisy(self) -> bool {
         matches!(
             self,
-            SkipReason::UnknownRouter | SkipReason::TokenCall | SkipReason::DecodeFailed
+            SkipReason::UnknownRouter
+                | SkipReason::TokenCall
+                | SkipReason::DecodeFailed
+                | SkipReason::RouterRevertRate
         )
     }
 }
@@ -441,7 +446,12 @@ impl StrategyExecutor {
     }
 
     pub(in crate::services::strategy) fn router_risk_fail_rate_bps(&self) -> u64 {
-        Self::env_u64_bounded("ROUTER_RISK_FAIL_RATE_BPS", DEFAULT_ROUTER_RISK_FAIL_RATE_BPS, 500, 9_500)
+        Self::env_u64_bounded(
+            "ROUTER_RISK_FAIL_RATE_BPS",
+            DEFAULT_ROUTER_RISK_FAIL_RATE_BPS,
+            500,
+            10_000,
+        )
     }
 
     pub(in crate::services::strategy) fn sandwich_risk_max_victim_slippage_bps(&self) -> u64 {
@@ -657,6 +667,11 @@ impl StrategyExecutor {
     }
 
     pub(in crate::services::strategy) fn router_is_risky(&self, router: Address) -> bool {
+        let threshold_bps = self.router_risk_fail_rate_bps();
+        // Allow explicit disable of router revert-rate gating via 10000 bps.
+        if threshold_bps >= 10_000 {
+            return false;
+        }
         if let Some(entry) = self.router_sim_stats.get(&router) {
             let (fails, total) = *entry;
             let min_samples = self.router_risk_min_samples();
@@ -666,7 +681,7 @@ impl StrategyExecutor {
             let fail_rate_bps = ((fails as u128).saturating_mul(10_000u128))
                 .checked_div((total as u128).max(1))
                 .unwrap_or(10_000u128) as u64;
-            return fail_rate_bps >= self.router_risk_fail_rate_bps();
+            return fail_rate_bps >= threshold_bps;
         }
         false
     }
@@ -1231,7 +1246,7 @@ impl StrategyExecutor {
 
     pub async fn run(self) -> Result<(), AppError> {
         tracing::info!("StrategyExecutor: waiting for pending transactions");
-        let framed = format_framed_table(vec![
+        let panel_lines = vec![
             "Strategy configured".to_string(),
             format!(
                 "chain={} backend={} sandwiches_enabled={} strict_atomic_mode={}",
@@ -1258,8 +1273,14 @@ impl StrategyExecutor {
                 "gas_ratio_limit_floor_bps={:?}",
                 self.gas_ratio_limit_floor_bps
             ),
-        ]);
-        tracing::info!(target: "strategy", "\n{framed}");
+        ];
+        if ansi_tables_enabled() {
+            let framed = format_framed_table_with_blue_title(panel_lines.iter().map(String::as_str));
+            eprintln!("{framed}");
+        } else {
+            let framed = format_framed_table(panel_lines.iter().map(String::as_str));
+            tracing::info!(target: "strategy", "\n{framed}");
+        }
 
         let executor = Arc::new(self);
 
