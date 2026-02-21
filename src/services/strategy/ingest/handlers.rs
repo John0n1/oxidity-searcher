@@ -655,6 +655,8 @@ impl StrategyExecutor {
                 return Ok(None);
             }
         };
+        let mut predecoded_unknown_router: Option<ObservedSwap> = None;
+        let mut decode_recorded = false;
         let category = self.allowlist_category_for(to_addr);
         match category {
             Some(AllowlistCategory::Wrappers) => {
@@ -680,17 +682,48 @@ impl StrategyExecutor {
                     self.log_skip(SkipReason::TokenCall, "erc20_transfer_or_approve_noise");
                     return Ok(None);
                 }
-                if let Some(discovery) = &self.router_discovery {
-                    discovery.record_unknown_router(to_addr, "mempool");
+                if self.allow_unknown_router_decode() {
+                    let decoded = decode_swap(tx);
+                    self.stats
+                        .record_decode_attempt(AllowlistCategory::Routers, decoded.is_some());
+                    decode_recorded = true;
+                    if let Some(mut observed) = decoded
+                        && let Some(exec_router) =
+                            self.canonical_exec_router_for_kind(observed.router_kind)
+                    {
+                        if let Some(discovery) = &self.router_discovery {
+                            discovery.record_unknown_router(to_addr, "mempool_decoded");
+                        }
+                        tracing::debug!(
+                            target: "strategy",
+                            unknown_router = %format!("{to_addr:#x}"),
+                            exec_router = %format!("{exec_router:#x}"),
+                            kind = ?observed.router_kind,
+                            "Decoded unknown router swap; routing execution through canonical router"
+                        );
+                        observed.router = exec_router;
+                        predecoded_unknown_router = Some(observed);
+                    }
                 }
-                self.log_skip(SkipReason::UnknownRouter, &format!("to={to_addr:#x}"));
-                return Ok(None);
+                if predecoded_unknown_router.is_none() {
+                    if let Some(discovery) = &self.router_discovery {
+                        discovery.record_unknown_router(to_addr, "mempool");
+                    }
+                    self.log_skip(SkipReason::UnknownRouter, &format!("to={to_addr:#x}"));
+                    return Ok(None);
+                }
             }
         }
 
-        let observed_swap = decode_swap(tx);
-        self.stats
-            .record_decode_attempt(AllowlistCategory::Routers, observed_swap.is_some());
+        let observed_swap = if let Some(observed) = predecoded_unknown_router {
+            Some(observed)
+        } else {
+            decode_swap(tx)
+        };
+        if !decode_recorded {
+            self.stats
+                .record_decode_attempt(AllowlistCategory::Routers, observed_swap.is_some());
+        }
         let Some(observed_swap) = observed_swap else {
             self.log_skip(SkipReason::DecodeFailed, "unable to decode swap input");
             return Ok(None);
@@ -977,6 +1010,8 @@ impl StrategyExecutor {
                 return Ok(None);
             }
         }
+        let mut predecoded_unknown_router: Option<ObservedSwap> = None;
+        let mut decode_recorded = false;
         let category = self.allowlist_category_for(hint.router);
         match category {
             Some(AllowlistCategory::Wrappers) => {
@@ -997,17 +1032,48 @@ impl StrategyExecutor {
             }
             Some(AllowlistCategory::Routers) => {}
             None => {
-                if let Some(discovery) = &self.router_discovery {
-                    discovery.record_unknown_router(hint.router, "mev_share");
+                if self.allow_unknown_router_decode() {
+                    let decoded = decode_swap_input(hint.router, &hint.call_data, hint.value);
+                    self.stats
+                        .record_decode_attempt(AllowlistCategory::Routers, decoded.is_some());
+                    decode_recorded = true;
+                    if let Some(mut observed) = decoded
+                        && let Some(exec_router) =
+                            self.canonical_exec_router_for_kind(observed.router_kind)
+                    {
+                        if let Some(discovery) = &self.router_discovery {
+                            discovery.record_unknown_router(hint.router, "mev_share_decoded");
+                        }
+                        tracing::debug!(
+                            target: "strategy",
+                            unknown_router = %format!("{:#x}", hint.router),
+                            exec_router = %format!("{exec_router:#x}"),
+                            kind = ?observed.router_kind,
+                            "Decoded unknown MEV-Share router; routing execution through canonical router"
+                        );
+                        observed.router = exec_router;
+                        predecoded_unknown_router = Some(observed);
+                    }
                 }
-                self.log_skip(SkipReason::UnknownRouter, &format!("to={:#x}", hint.router));
-                return Ok(None);
+                if predecoded_unknown_router.is_none() {
+                    if let Some(discovery) = &self.router_discovery {
+                        discovery.record_unknown_router(hint.router, "mev_share");
+                    }
+                    self.log_skip(SkipReason::UnknownRouter, &format!("to={:#x}", hint.router));
+                    return Ok(None);
+                }
             }
         }
 
-        let observed_swap = decode_swap_input(hint.router, &hint.call_data, hint.value);
-        self.stats
-            .record_decode_attempt(AllowlistCategory::Routers, observed_swap.is_some());
+        let observed_swap = if let Some(observed) = predecoded_unknown_router {
+            Some(observed)
+        } else {
+            decode_swap_input(hint.router, &hint.call_data, hint.value)
+        };
+        if !decode_recorded {
+            self.stats
+                .record_decode_attempt(AllowlistCategory::Routers, observed_swap.is_some());
+        }
         let Some(observed_swap) = observed_swap else {
             self.log_skip(SkipReason::DecodeFailed, "unable to decode swap input");
             return Ok(None);
@@ -1425,6 +1491,12 @@ impl StrategyExecutor {
             );
             return Ok(None);
         }
+
+        // On low-balance wallets, prefer flashloan backrun-only path early so
+        // principal sizing does not block viable gas-funded opportunities.
+        let prefer_flashloan_backrun_only = has_wrapped
+            && self.should_use_flashloan(min_bundle_gas_cost, wallet_chain_balance, &gas_fees);
+        let allow_front_run = allow_front_run && !prefer_flashloan_backrun_only;
 
         let mut attack_value_eth = U256::ZERO;
         let mut front_run: Option<FrontRunTx> = None;

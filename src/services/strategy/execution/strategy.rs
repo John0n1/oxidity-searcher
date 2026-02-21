@@ -16,7 +16,7 @@ use crate::network::price_feed::PriceFeed;
 use crate::network::provider::HttpProvider;
 use crate::network::reserves::ReserveCache;
 use crate::services::strategy::bundles::BundleState;
-use crate::services::strategy::decode::{ObservedSwap, encode_v3_path, parse_v3_path};
+use crate::services::strategy::decode::{ObservedSwap, RouterKind, encode_v3_path, parse_v3_path};
 use crate::services::strategy::execution::work_queue::SharedWorkQueue;
 use crate::services::strategy::routers::{ERC20, UniV3Router};
 use crate::services::strategy::swaps::V3QuoteCacheEntry;
@@ -949,6 +949,26 @@ impl StrategyExecutor {
             return None;
         }
         f64_native_to_wei(min_usd / native_price_usd)
+    }
+
+    pub(in crate::services::strategy) fn allow_unknown_router_decode(&self) -> bool {
+        std::env::var("ALLOW_UNKNOWN_ROUTER_DECODE")
+            .ok()
+            .map(|v| {
+                let t = v.trim().to_ascii_lowercase();
+                matches!(t.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(true)
+    }
+
+    pub(in crate::services::strategy) fn canonical_exec_router_for_kind(
+        &self,
+        kind: RouterKind,
+    ) -> Option<Address> {
+        match kind {
+            RouterKind::V2Like => self.exec_router_v2,
+            RouterKind::V3Like => self.exec_router_v3,
+        }
     }
 
     pub(in crate::services::strategy) async fn estimate_native_out(

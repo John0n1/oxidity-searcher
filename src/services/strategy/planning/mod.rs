@@ -75,6 +75,58 @@ static BALANCER_FEE_CACHE: Lazy<DashMap<u64, (U256, std::time::Instant)>> = Lazy
 static AAVE_FEE_CACHE: Lazy<DashMap<Address, (U256, std::time::Instant)>> = Lazy::new(DashMap::new);
 
 impl StrategyExecutor {
+    fn env_u128(name: &str) -> Option<u128> {
+        std::env::var(name)
+            .ok()
+            .and_then(|v| v.trim().parse::<u128>().ok())
+    }
+
+    fn flashloan_prefer_wallet_max_wei() -> U256 {
+        // Default: if signer wallet is <= 0.05 ETH, prefer gas-only flashloan mode.
+        U256::from(
+            Self::env_u128("FLASHLOAN_PREFER_WALLET_MAX_WEI")
+                .unwrap_or(50_000_000_000_000_000u128),
+        )
+    }
+
+    fn env_flag_true(name: &str) -> bool {
+        std::env::var(name)
+            .ok()
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                matches!(v.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    }
+
+    async fn quote_v2_path_with_router_fallback(
+        &self,
+        router: Address,
+        path: &[Address],
+        amount_in: U256,
+    ) -> Option<U256> {
+        if let Some(q) = self.reserve_cache.quote_v2_path(path, amount_in) {
+            return Some(q);
+        }
+        if path.len() < 2 || amount_in.is_zero() {
+            return None;
+        }
+        let quote_contract = UniV2Router::new(router, self.http_provider.clone());
+        let quote_path = path.to_vec();
+        let quote: Vec<U256> = retry_async(
+            move |_| {
+                let c = quote_contract.clone();
+                let p = quote_path.clone();
+                async move { c.getAmountsOut(amount_in, p.clone()).call().await }
+            },
+            2,
+            Duration::from_millis(75),
+        )
+        .await
+        .ok()?;
+        quote.last().copied()
+    }
+
     fn flashloan_roundtrip_callbacks(
         executor: Address,
         exec_router: Address,
@@ -550,6 +602,13 @@ impl StrategyExecutor {
         }
         if !self.has_usable_flashloan_provider() {
             return false;
+        }
+        if Self::env_flag_true("FLASHLOAN_FORCE") || Self::env_flag_true("FLASHLOAN_AGGRESSIVE")
+        {
+            return true;
+        }
+        if wallet_balance <= Self::flashloan_prefer_wallet_max_wei() {
+            return true;
         }
         // Caller passes total upfront requirement for current plan phase
         // (trade principal + adaptive bundle gas floor). If that cannot be
@@ -1197,8 +1256,13 @@ impl StrategyExecutor {
                         let reverse_amount_in = forward_min_out
                             .saturating_mul(U256::from(9_000u64))
                             / U256::from(10_000u64);
-                        let reverse_expected_out =
-                            self.reserve_cache.quote_v2_path(&rev_path, reverse_amount_in);
+                        let reverse_expected_out = self
+                            .quote_v2_path_with_router_fallback(
+                                exec_router,
+                                &rev_path,
+                                reverse_amount_in,
+                            )
+                            .await;
                         let reverse_quote_missing = reverse_expected_out.is_none();
                         if reverse_quote_missing {
                             tracing::debug!(
@@ -1210,13 +1274,15 @@ impl StrategyExecutor {
                                 "V2 reverse quote missing; using best-effort reverse with minOut=1"
                             );
                         }
-                        let reverse_expected_out = reverse_expected_out.unwrap_or_else(|| {
-                            // Conservative estimate for profitability accounting when reverse
-                            // quote cannot be produced deterministically.
-                            value
-                                .saturating_mul(U256::from(9_800u64))
-                                / U256::from(10_000u64)
-                        });
+                        let reverse_expected_out =
+                            reverse_expected_out.unwrap_or_else(|| {
+                                // Keep fallback near break-even to avoid systematically
+                                // rejecting otherwise executable paths when cache+RPC quotes
+                                // are temporarily unavailable.
+                                value
+                                    .saturating_mul(U256::from(9_980u64))
+                                    / U256::from(10_000u64)
+                            });
                         let reverse_min_out = if reverse_quote_missing {
                             U256::from(1u64)
                         } else {

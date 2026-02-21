@@ -790,13 +790,23 @@ impl BundleSender {
     }
 
     fn sign_request(&self, body_bytes: &[u8]) -> Result<String, AppError> {
-        let hash = keccak256(body_bytes);
-        let sig = self
+        // Flashbots authentication expects an EIP-191 signature over the
+        // keccak256(body) hex string bytes (not a raw secp256k1 hash signature).
+        let message_hash = keccak256(body_bytes).to_string();
+        let signature = self
             .signer
-            .sign_hash_sync(&hash)
+            .sign_message_sync(message_hash.as_bytes())
             .map_err(|e| AppError::Connection(format!("Bundle signing failed: {}", e)))?;
-        let sig_hex = format!("0x{}", hex::encode(sig.as_bytes()));
-        Ok(format!("{:#x}:{}", self.signer.address(), sig_hex))
+
+        let mut sig_bytes = [0u8; 65];
+        sig_bytes[..32].copy_from_slice(&signature.r().to_be_bytes::<32>());
+        sig_bytes[32..64].copy_from_slice(&signature.s().to_be_bytes::<32>());
+        sig_bytes[64] = signature.v() as u8;
+        Ok(format!(
+            "{}:{}",
+            self.signer.address(),
+            format!("0x{}", hex::encode(sig_bytes))
+        ))
     }
 }
 
