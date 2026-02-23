@@ -393,6 +393,14 @@ impl StrategyExecutor {
         }
 
         let target_is_router = failed_to.map(|addr| addr == router).unwrap_or(false);
+        if target_is_router {
+            return true;
+        }
+        // If we know the failure target and it is not the router, do not count this
+        // against router quality. Heuristics are only for unknown failure targets.
+        if failed_to.is_some() {
+            return false;
+        }
         let looks_router_revert = [
             "revert",
             "execution reverted",
@@ -1802,11 +1810,18 @@ impl StrategyExecutor {
             if self.router_risk_hard_block() {
                 return Ok(None);
             }
-            tracing::warn!(
-                target: "strategy",
-                router = %format!("{:#x}", observed_swap.router),
-                "Router marked risky, but continuing (ROUTER_RISK_HARD_BLOCK=false)"
-            );
+            let router_revert_skips = self
+                .stats
+                .skip_router_revert_rate
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if self.dry_run || router_revert_skips.is_multiple_of(self.skip_log_every) {
+                tracing::warn!(
+                    target: "strategy",
+                    router = %format!("{:#x}", observed_swap.router),
+                    skips = router_revert_skips,
+                    "Router marked risky, but continuing (ROUTER_RISK_HARD_BLOCK=false)"
+                );
+            }
         }
         if !self.liquidity_depth_ok(observed_swap, wallet_chain_balance) {
             self.log_skip(SkipReason::LiquidityDepth, "price impact too high");
@@ -2620,5 +2635,52 @@ mod tests {
         assert!(exec_b.should_run_signal_scan(false, now));
         // Same executor should still obey cooldown.
         assert!(!exec_a.should_run_signal_scan(false, now));
+    }
+
+    #[test]
+    fn simulation_failure_attribution_ignores_non_router_target_even_on_revert_text() {
+        let router = Address::from([0x11; 20]);
+        let other = Address::from([0x22; 20]);
+        let detail = "execution reverted: TRANSFER_FAILED";
+
+        let attributed = StrategyExecutor::simulation_failure_is_router_attributable(
+            detail,
+            Some(other),
+            router,
+        );
+        assert!(!attributed);
+    }
+
+    #[test]
+    fn simulation_failure_attribution_counts_router_target() {
+        let router = Address::from([0x11; 20]);
+        let detail = "execution reverted: TRANSFER_FAILED";
+
+        let attributed = StrategyExecutor::simulation_failure_is_router_attributable(
+            detail,
+            Some(router),
+            router,
+        );
+        assert!(attributed);
+    }
+
+    #[test]
+    fn simulation_failure_attribution_uses_heuristics_only_when_target_unknown() {
+        let router = Address::from([0x11; 20]);
+        let detail = "execution reverted: insufficient output amount";
+
+        let attributed =
+            StrategyExecutor::simulation_failure_is_router_attributable(detail, None, router);
+        assert!(attributed);
+    }
+
+    #[test]
+    fn simulation_failure_attribution_excludes_infra_markers() {
+        let router = Address::from([0x11; 20]);
+        let detail = "timeout while waiting for upstream";
+
+        let attributed =
+            StrategyExecutor::simulation_failure_is_router_attributable(detail, None, router);
+        assert!(!attributed);
     }
 }
