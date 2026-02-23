@@ -19,68 +19,44 @@ env:
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
 
-  CARGO_HOME: ${{ github.workspace }}/.cargo-home
-  RUSTUP_HOME: ${{ github.workspace }}/.rustup
-
 jobs:
   check:
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v4
-      - name: Install rustup into workspace
-        run: |
-          set -euo pipefail
-          mkdir -p "$CARGO_HOME/bin"
-          if [ ! -x "$CARGO_HOME/bin/rustup" ]; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-              | sh -s -- -y --no-modify-path --profile minimal
-          fi
-          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
-          rustup --version
-          cargo -V
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-        continue-on-error: true
 
       - name: Compile (locked)
         run: cargo check --workspace --all-targets --locked
 
   test:
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     needs: check
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Install rustup into workspace
-        run: |
-          set -euo pipefail
-          mkdir -p "$CARGO_HOME/bin"
-          if [ ! -x "$CARGO_HOME/bin/rustup" ]; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-              | sh -s -- -y --no-modify-path --profile minimal
-          fi
-          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
-          rustup --version
-          cargo -V
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
-        continue-on-error: true
 
       - name: Run tests
         run: cargo test --workspace --locked --all-targets --all-features

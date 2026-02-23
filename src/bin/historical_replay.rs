@@ -5,6 +5,7 @@ use alloy::primitives::{Address, U256};
 use clap::Parser;
 use oxidity_searcher::app::config::GlobalSettings;
 use oxidity_searcher::app::logging::setup_logging;
+use oxidity_searcher::common::parsing;
 use oxidity_searcher::domain::error::AppError;
 use oxidity_searcher::infrastructure::data::db::Database;
 use oxidity_searcher::services::strategy::decode::{RouterKind, decode_swap_input};
@@ -14,7 +15,6 @@ use serde_json::json;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::str::FromStr;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Historical block-window replay harness")]
@@ -306,7 +306,7 @@ impl JsonRpcClient {
         let hex = result.as_str().ok_or_else(|| {
             AppError::Initialization("eth_blockNumber result was not string".into())
         })?;
-        parse_u64_hex(hex).ok_or_else(|| {
+        parsing::parse_u64_hex(hex).ok_or_else(|| {
             AppError::Initialization(format!("Invalid eth_blockNumber hex value: {hex}"))
         })
     }
@@ -597,13 +597,17 @@ async fn replay_window(
 
     for block_number in start_block..=end_block {
         let block = rpc.block_with_txs(block_number).await?;
-        let _bn = parse_u64_hex(&block.number).unwrap_or(block_number);
-        if let Some(base) = block.base_fee_per_gas.as_deref().and_then(parse_u128_hex) {
+        let _bn = parsing::parse_u64_hex(&block.number).unwrap_or(block_number);
+        if let Some(base) = block
+            .base_fee_per_gas
+            .as_deref()
+            .and_then(parsing::parse_u128_hex)
+        {
             base_fees_gwei.push((base as f64) / 1e9f64);
         }
         if let (Some(gas_used), Some(gas_limit)) = (
-            parse_u128_hex(&block.gas_used),
-            parse_u128_hex(&block.gas_limit),
+            parsing::parse_u128_hex(&block.gas_used),
+            parsing::parse_u128_hex(&block.gas_limit),
         ) && gas_limit > 0
         {
             gas_ratios.push(gas_used as f64 / gas_limit as f64);
@@ -618,13 +622,13 @@ async fn replay_window(
                 continue;
             }
 
-            let input = decode_hex_bytes(&tx.input);
+            let input = parsing::parse_hex_bytes(&tx.input).unwrap_or_default();
             if input.len() < 4 {
                 continue;
             }
             tx_candidate = tx_candidate.saturating_add(1);
             candidate_routers.insert(to);
-            let value = parse_u256_hex(&tx.value).unwrap_or(U256::ZERO);
+            let value = parsing::parse_u256_hex(&tx.value).unwrap_or(U256::ZERO);
             if let Some(observed) = decode_swap_input(to, &input, value) {
                 tx_decoded = tx_decoded.saturating_add(1);
                 match observed.router_kind {
@@ -936,7 +940,7 @@ fn print_window_line(report: &WindowReport) {
 }
 
 fn parse_address(s: &str) -> Option<Address> {
-    Address::from_str(s).ok()
+    parsing::parse_address_hex(s)
 }
 
 fn tx_to_call_object(tx: &RpcTx) -> serde_json::Value {
@@ -990,7 +994,7 @@ fn parse_debug_trace_result(value: &serde_json::Value) -> TraceSimSample {
     let gas_used = value
         .get("gas")
         .and_then(serde_json::Value::as_str)
-        .and_then(parse_u64_hex)
+        .and_then(parsing::parse_u64_hex)
         .or_else(|| value.get("gasUsed").and_then(serde_json::Value::as_u64));
     let reason = value
         .get("error")
@@ -1044,26 +1048,8 @@ fn rpc_method_unavailable(err: &AppError) -> bool {
         || (msg.contains("namespace") && msg.contains("disabled"))
 }
 
-fn parse_u64_hex(s: &str) -> Option<u64> {
-    u64::from_str_radix(strip_0x(s), 16).ok()
-}
-
-fn parse_u128_hex(s: &str) -> Option<u128> {
-    u128::from_str_radix(strip_0x(s), 16).ok()
-}
-
-fn parse_u256_hex(s: &str) -> Option<U256> {
-    U256::from_str_radix(strip_0x(s), 16).ok()
-}
-
-fn decode_hex_bytes(raw: &str) -> Vec<u8> {
-    hex::decode(strip_0x(raw)).unwrap_or_default()
-}
-
-fn strip_0x(s: &str) -> &str {
-    s.strip_prefix("0x")
-        .or_else(|| s.strip_prefix("0X"))
-        .unwrap_or(s)
+fn percentile_index(len: usize, pct: f64) -> usize {
+    (((len as f64) - 1.0) * pct.clamp(0.0, 1.0)).round() as usize
 }
 
 fn percentile(values: &[f64], pct: f64) -> Option<f64> {
@@ -1072,7 +1058,7 @@ fn percentile(values: &[f64], pct: f64) -> Option<f64> {
     }
     let mut sorted = values.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
-    let idx = ((sorted.len() as f64 - 1.0) * pct.clamp(0.0, 1.0)).round() as usize;
+    let idx = percentile_index(sorted.len(), pct);
     sorted.get(idx).copied()
 }
 
@@ -1082,7 +1068,7 @@ fn percentile_u64(values: &[u64], pct: f64) -> Option<u64> {
     }
     let mut sorted = values.to_vec();
     sorted.sort_unstable();
-    let idx = ((sorted.len() as f64 - 1.0) * pct.clamp(0.0, 1.0)).round() as usize;
+    let idx = percentile_index(sorted.len(), pct);
     sorted.get(idx).copied()
 }
 
@@ -1113,10 +1099,11 @@ mod tests {
 
     #[test]
     fn hex_parsers_handle_prefixed_and_plain_values() {
-        assert_eq!(parse_u64_hex("0x2a"), Some(42));
-        assert_eq!(parse_u64_hex("2a"), Some(42));
-        assert_eq!(parse_u128_hex("0x64"), Some(100));
-        assert_eq!(parse_u256_hex("0x0"), Some(U256::ZERO));
+        assert_eq!(parsing::parse_u64_hex("0x2a"), Some(42));
+        assert_eq!(parsing::parse_u64_hex("0X2a"), Some(42));
+        assert_eq!(parsing::parse_u64_hex("2a"), Some(42));
+        assert_eq!(parsing::parse_u128_hex("0x64"), Some(100));
+        assert_eq!(parsing::parse_u256_hex("0x0"), Some(U256::ZERO));
     }
 
     #[test]

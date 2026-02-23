@@ -859,12 +859,7 @@ impl StrategyExecutor {
         };
 
         let mut gas_limit = gas_limit_hint.saturating_add(overhead);
-        if gas_limit < 450_000 {
-            gas_limit = 450_000;
-        }
-        if gas_limit > 1_800_000 {
-            gas_limit = 1_800_000;
-        }
+        gas_limit = gas_limit.clamp(450_000, 1_800_000);
 
         let request = Self::flashloan_request_template(
             self.signer.address(),

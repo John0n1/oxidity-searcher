@@ -52,13 +52,11 @@ fn wrap_line(line: &str, max_width: usize) -> Vec<String> {
     while remaining.chars().count() > max_width {
         let mut cut_byte = 0usize;
         let mut last_break = None::<usize>;
-        let mut chars_seen = 0usize;
 
-        for (idx, ch) in remaining.char_indices() {
+        for (chars_seen, (idx, ch)) in remaining.char_indices().enumerate() {
             if chars_seen >= max_width {
                 break;
             }
-            chars_seen += 1;
             cut_byte = idx + ch.len_utf8();
             if ch == ',' || ch == ' ' || ch == ';' || ch == '|' {
                 last_break = Some(idx + ch.len_utf8());

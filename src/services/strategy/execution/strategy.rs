@@ -5,6 +5,7 @@ use crate::app::logging::{
     ansi_tables_enabled, format_framed_table, format_framed_table_with_blue_title,
 };
 use crate::common::error::AppError;
+use crate::common::parsing::parse_boolish;
 use crate::core::executor::SharedBundleSender;
 use crate::core::portfolio::PortfolioManager;
 use crate::core::safety::SafetyGuard;
@@ -445,10 +446,8 @@ impl StrategyExecutor {
     fn env_bool(key: &str, default: bool) -> bool {
         std::env::var(key)
             .ok()
-            .map(|v| {
-                let t = v.trim().to_ascii_lowercase();
-                matches!(t.as_str(), "1" | "true" | "yes" | "on")
-            })
+            .as_deref()
+            .and_then(parse_boolish)
             .unwrap_or(default)
     }
 
@@ -1260,7 +1259,7 @@ impl StrategyExecutor {
 
     pub async fn run(self) -> Result<(), AppError> {
         tracing::info!("StrategyExecutor: waiting for pending transactions");
-        let panel_lines = vec![
+        let panel_lines = [
             "Strategy configured".to_string(),
             format!(
                 "chain={} backend={} sandwiches_enabled={} strict_atomic_mode={}",

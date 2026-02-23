@@ -153,7 +153,18 @@ impl Database {
             let block: i64 = row.get("block_number");
             let next: i64 = row.get("next_nonce");
             let touched: String = row.get("touched_pools");
-            return Ok(Some((block as u64, next as u64, touched)));
+            if block < 0 || next < 0 {
+                return Err(AppError::Initialization(format!(
+                    "Nonce state row contains negative value(s): block_number={block} next_nonce={next}"
+                )));
+            }
+            let block_u64 = u64::try_from(block).map_err(|e| {
+                AppError::Initialization(format!("Nonce state block_number conversion failed: {e}"))
+            })?;
+            let next_u64 = u64::try_from(next).map_err(|e| {
+                AppError::Initialization(format!("Nonce state next_nonce conversion failed: {e}"))
+            })?;
+            return Ok(Some((block_u64, next_u64, touched)));
         }
         Ok(None)
     }
@@ -439,5 +450,30 @@ mod tests {
             .await
             .unwrap();
         assert!(price_id > 0);
+    }
+
+    #[tokio::test]
+    async fn load_nonce_state_rejects_negative_values() {
+        let db = Database::new("sqlite::memory:").await.expect("db");
+        sqlx::query(
+            "INSERT INTO nonce_state (chain_id, block_number, next_nonce, touched_pools) VALUES (?, ?, ?, ?)",
+        )
+        .bind(1i64)
+        .bind(-1i64)
+        .bind(7i64)
+        .bind("[]")
+        .execute(&db.pool)
+        .await
+        .expect("insert nonce_state");
+
+        let err = db
+            .load_nonce_state(1)
+            .await
+            .expect_err("negative nonce row should fail");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("negative value"),
+            "unexpected error message: {msg}"
+        );
     }
 }

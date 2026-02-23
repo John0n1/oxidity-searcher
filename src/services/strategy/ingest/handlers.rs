@@ -67,6 +67,11 @@ impl StrategyExecutor {
             .unwrap_or(default)
     }
 
+    fn record_sim_latency_ms(&self, source: &'static str, started_at: std::time::Instant) {
+        let sim_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        self.stats.record_sim_latency(source, sim_ms);
+    }
+
     fn selector(input: &[u8]) -> Option<[u8; 4]> {
         input
             .get(..4)
@@ -1210,13 +1215,11 @@ impl StrategyExecutor {
         {
             Some(p) => p,
             None => {
-                let sim_ms = sim_start.elapsed().as_millis() as u64;
-                self.stats.record_sim_latency("mempool", sim_ms);
+                self.record_sim_latency_ms("mempool", sim_start);
                 return Ok(None);
             }
         };
-        let sim_ms = sim_start.elapsed().as_millis() as u64;
-        self.stats.record_sim_latency("mempool", sim_ms);
+        self.record_sim_latency_ms("mempool", sim_start);
 
         tracing::info!(
             target: "strategy",
@@ -1579,13 +1582,11 @@ impl StrategyExecutor {
         {
             Some(p) => p,
             None => {
-                let sim_ms = sim_start.elapsed().as_millis() as u64;
-                self.stats.record_sim_latency("mev_share", sim_ms);
+                self.record_sim_latency_ms("mev_share", sim_start);
                 return Ok(None);
             }
         };
-        let sim_ms = sim_start.elapsed().as_millis() as u64;
-        self.stats.record_sim_latency("mev_share", sim_ms);
+        self.record_sim_latency_ms("mev_share", sim_start);
 
         tracing::info!(
             target: "strategy",
@@ -2033,22 +2034,20 @@ impl StrategyExecutor {
             req.value
                 .unwrap_or(U256::ZERO)
                 .saturating_sub(backrun.value)
+        } else if Some(backrun.to) == self.executor {
+            backrun
+                .request
+                .input
+                .clone()
+                .into_input()
+                .and_then(|input| {
+                    UnifiedHardenedExecutor::executeBundleCall::abi_decode(&input)
+                        .ok()
+                        .map(|call| call.bribeAmount)
+                })
+                .unwrap_or(U256::ZERO)
         } else {
-            if Some(backrun.to) == self.executor {
-                backrun
-                    .request
-                    .input
-                    .clone()
-                    .into_input()
-                    .and_then(|input| {
-                        UnifiedHardenedExecutor::executeBundleCall::abi_decode(&input)
-                            .ok()
-                            .map(|call| call.bribeAmount)
-                    })
-                    .unwrap_or(U256::ZERO)
-            } else {
-                U256::ZERO
-            }
+            U256::ZERO
         };
         let main_request_for_gas = executor_request.as_ref().map(|(_, req, _)| req.clone());
         let refined_bundle_gas = self.adaptive_min_bundle_gas_from_plan(

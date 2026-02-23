@@ -83,7 +83,7 @@ fn log_chainlink_feed_summary(chain_id: u64, feeds: &HashMap<String, alloy::prim
         .collect::<Vec<_>>()
         .join(",");
 
-    let panel_lines = vec![
+    let panel_lines = [
         "Selected canonical Chainlink feeds".to_string(),
         format!("chain_id={chain_id}"),
         format!("feed_count={feed_count}"),
@@ -335,7 +335,16 @@ async fn main() -> Result<(), AppError> {
         };
 
         let metrics_port = if chains.len() > 1 {
-            metrics_base.saturating_add(idx as u16)
+            let idx_u16 = u16::try_from(idx).map_err(|_| {
+                AppError::Config(format!(
+                    "Too many chains configured for metrics port indexing: idx={idx}"
+                ))
+            })?;
+            metrics_base.checked_add(idx_u16).ok_or_else(|| {
+                AppError::Config(format!(
+                    "Metrics port overflow: base={metrics_base} idx={idx}"
+                ))
+            })?
         } else {
             metrics_base
         };

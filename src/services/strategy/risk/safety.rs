@@ -37,7 +37,7 @@ impl SafetyGuard {
                 .as_secs();
             let last = self.last_failure_ts.load(Ordering::Relaxed) as u64;
 
-            if now - last > self.reset_interval_sec {
+            if now.saturating_sub(last) > self.reset_interval_sec {
                 self.reset();
             } else {
                 return Err(AppError::Strategy(

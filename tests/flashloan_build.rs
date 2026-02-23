@@ -27,6 +27,13 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use url::Url;
 
+fn rpc_access_list_unsupported(msg: &str) -> bool {
+    let normalized = msg.to_ascii_lowercase();
+    normalized.contains("access list")
+        || normalized.contains("eip-2930")
+        || normalized.contains("eip2930")
+}
+
 /// Build a flash-loan transaction and assert the encoded callbacks round-trip.
 #[tokio::test]
 async fn flashloan_builder_encodes_callbacks() {
@@ -379,7 +386,14 @@ async fn live_executor_flashloan_smoke_mainnet() {
 
     let res: Result<Bytes, _> = http.call(req).await;
     println!("flashloan_smoke_result={res:?}");
-    assert!(res.is_ok(), "flashloan smoke call reverted");
+    if let Err(e) = res {
+        let msg = format!("{e:?}");
+        if rpc_access_list_unsupported(&msg) {
+            eprintln!("skipping flashloan smoke: access-list simulation unsupported by node");
+            return;
+        }
+        panic!("flashloan smoke call reverted: {msg}");
+    }
 }
 
 /// Live smoke check for Aave simple flashloan entry on deployed executor.
@@ -430,6 +444,10 @@ async fn live_executor_aave_smoke_mainnet() {
             // This smoke uses amount=1 and empty callbacks; Aave premium can make
             // repayment impossible. That should surface as InsufficientFundsForRepayment.
             let msg = format!("{e:?}");
+            if rpc_access_list_unsupported(&msg) {
+                eprintln!("skipping aave smoke: access-list simulation unsupported by node");
+                return;
+            }
             assert!(
                 msg.contains("0x6756dd0a"),
                 "unexpected aave smoke revert: {msg}"

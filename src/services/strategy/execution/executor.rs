@@ -848,9 +848,9 @@ impl BundleSender {
         sig_bytes[32..64].copy_from_slice(&signature.s().to_be_bytes::<32>());
         sig_bytes[64] = signature.v() as u8;
         Ok(format!(
-            "{}:{}",
+            "{}:0x{}",
             self.signer.address(),
-            format!("0x{}", hex::encode(sig_bytes))
+            hex::encode(sig_bytes)
         ))
     }
 }

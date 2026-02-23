@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use crate::common::data_path::{resolve_data_path, resolve_required_data_path};
+use crate::common::parsing::parse_boolish;
 use crate::domain::constants;
 use crate::domain::error::AppError;
 use alloy::primitives::Address;
@@ -833,13 +834,7 @@ impl GlobalSettings {
 }
 
 fn env_bool(key: &str) -> Option<bool> {
-    let value = std::env::var(key).ok()?;
-    let normalized = value.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    }
+    std::env::var(key).ok().as_deref().and_then(parse_boolish)
 }
 
 fn resolve_config_path(path: Option<&str>) -> Option<String> {

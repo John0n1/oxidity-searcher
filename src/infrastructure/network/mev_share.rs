@@ -2,13 +2,16 @@
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use crate::common::error::AppError;
+use crate::common::parsing::{
+    parse_address_hex, parse_b256_hex, parse_hex_bytes, parse_u64_hex, parse_u128_hex,
+    parse_u256_hex,
+};
 use alloy::primitives::{Address, B256, U256};
 use dashmap::DashSet;
 use futures::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::VecDeque;
-use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
@@ -356,16 +359,16 @@ impl MevShareClient {
     }
 
     fn convert_hint(&self, raw: RawTx) -> Option<MevShareHint> {
-        let tx_hash = raw.hash.as_deref().and_then(parse_b256)?;
-        let router = raw.to.as_deref().and_then(parse_address)?;
+        let tx_hash = raw.hash.as_deref().and_then(parse_b256_hex)?;
+        let router = raw.to.as_deref().and_then(parse_address_hex)?;
 
-        // Fix: If chain_id is missing, assume it matches our stream (unwrap_or(true)).
-        let chain_ok = raw
-            .chain_id
-            .as_deref()
-            .and_then(parse_u64_hex)
-            .map(|cid| cid == self.chain_id)
-            .unwrap_or(true);
+        // Missing chainId is accepted, but malformed/invalid chainId is rejected.
+        let chain_ok = match raw.chain_id.as_deref() {
+            Some(raw_chain_id) => parse_u64_hex(raw_chain_id)
+                .map(|cid| cid == self.chain_id)
+                .unwrap_or(false),
+            None => true,
+        };
 
         if !chain_ok {
             return None;
@@ -388,7 +391,7 @@ impl MevShareClient {
             .max_priority_fee_per_gas
             .as_deref()
             .and_then(parse_u128_hex);
-        let from = raw.from.as_deref().and_then(parse_address);
+        let from = raw.from.as_deref().and_then(parse_address_hex);
 
         Some(MevShareHint {
             tx_hash,
@@ -409,38 +412,6 @@ struct HistoricalRecord {
     hint: Option<RawEvent>,
 }
 
-fn strip_0x(s: &str) -> &str {
-    s.strip_prefix("0x").unwrap_or(s)
-}
-
-fn parse_hex_bytes(s: &str) -> Option<Vec<u8>> {
-    hex::decode(strip_0x(s)).ok()
-}
-
-fn parse_b256(s: &str) -> Option<B256> {
-    let bytes = parse_hex_bytes(s)?;
-    if bytes.len() != 32 {
-        return None;
-    }
-    Some(B256::from_slice(&bytes))
-}
-
-fn parse_address(s: &str) -> Option<Address> {
-    Address::from_str(strip_0x(s)).ok()
-}
-
-fn parse_u256_hex(s: &str) -> Option<U256> {
-    U256::from_str_radix(strip_0x(s), 16).ok()
-}
-
-fn parse_u128_hex(s: &str) -> Option<u128> {
-    u128::from_str_radix(strip_0x(s), 16).ok()
-}
-
-fn parse_u64_hex(s: &str) -> Option<u64> {
-    u64::from_str_radix(strip_0x(s), 16).ok()
-}
-
 fn retry_after_delay(resp: &reqwest::Response) -> Option<Duration> {
     resp.headers()
         .get(reqwest::header::RETRY_AFTER)
@@ -452,6 +423,7 @@ fn retry_after_delay(resp: &reqwest::Response) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::strategy::execution::work_queue::WorkQueue;
 
     #[test]
     fn parses_null_txs_hint() {
@@ -464,5 +436,58 @@ mod tests {
     fn parses_null_event_payload() {
         let evt: Option<RawEvent> = serde_json::from_str("null").expect("parse");
         assert!(evt.is_none());
+    }
+
+    fn test_client(chain_id: u64) -> MevShareClient {
+        MevShareClient::new(
+            "http://localhost:9000".to_string(),
+            chain_id,
+            Arc::new(WorkQueue::new(8)),
+            Arc::new(StrategyStats::default()),
+            8,
+            0,
+            CancellationToken::new(),
+        )
+        .expect("client")
+    }
+
+    fn base_raw_tx() -> RawTx {
+        RawTx {
+            hash: Some(
+                "0x1111111111111111111111111111111111111111111111111111111111111111".to_string(),
+            ),
+            to: Some("0x2222222222222222222222222222222222222222".to_string()),
+            from: Some("0x3333333333333333333333333333333333333333".to_string()),
+            call_data: Some("0xaabbcc".to_string()),
+            value: Some("0x2a".to_string()),
+            gas: Some("0x5208".to_string()),
+            max_fee_per_gas: Some("0x3b9aca00".to_string()),
+            max_priority_fee_per_gas: Some("0x77359400".to_string()),
+            chain_id: Some("0x1".to_string()),
+        }
+    }
+
+    #[test]
+    fn convert_hint_rejects_malformed_chain_id() {
+        let client = test_client(1);
+        let mut raw = base_raw_tx();
+        raw.chain_id = Some("not-hex".to_string());
+        assert!(client.convert_hint(raw).is_none());
+    }
+
+    #[test]
+    fn convert_hint_accepts_uppercase_hex_prefixes() {
+        let client = test_client(1);
+        let mut raw = base_raw_tx();
+        raw.hash =
+            Some("0Xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string());
+        raw.to = Some("0X4444444444444444444444444444444444444444".to_string());
+        raw.call_data = Some("0Xdeadbeef".to_string());
+        raw.chain_id = Some("0X1".to_string());
+        raw.value = Some("0X2A".to_string());
+
+        let hint = client.convert_hint(raw).expect("hint");
+        assert_eq!(hint.call_data, vec![0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(hint.value, U256::from(42u64));
     }
 }
