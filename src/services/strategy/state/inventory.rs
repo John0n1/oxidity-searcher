@@ -94,32 +94,12 @@ impl StrategyExecutor {
         let router_contract = UniV2Router::new(router, self.http_provider.clone());
         let sell_path = vec![token, self.wrapped_native];
         let sell_amount = bal;
-        let expected_out =
-            if let Some(q) = self.reserve_cache.quote_v2_path(&sell_path, sell_amount) {
-                q
-            } else {
-                let quote_path = sell_path.clone();
-                let quote_contract = router_contract.clone();
-                let quote_value = sell_amount;
-                let quote: Vec<U256> = match retry_async(
-                    move |_| {
-                        let c = quote_contract.clone();
-                        let p = quote_path.clone();
-                        async move { c.getAmountsOut(quote_value, p.clone()).call().await }
-                    },
-                    2,
-                    Duration::from_millis(100),
-                )
-                .await
-                {
-                    Ok(v) => v,
-                    Err(_) => return Ok(()),
-                };
-                let Some(expected_out) = quote.last().copied() else {
-                    return Ok(());
-                };
-                expected_out
-            };
+        let Some(expected_out) = self
+            .quote_v2_path_with_router_fallback(router, &sell_path, sell_amount)
+            .await
+        else {
+            return Ok(());
+        };
 
         let gas_floor = U256::from(180_000u64).saturating_mul(U256::from(gas_fees.max_fee_per_gas));
         let min_eth = gas_floor

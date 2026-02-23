@@ -35,11 +35,6 @@ const DEFAULT_ATOMIC_ARB_MAX_ATTEMPTS: usize = 2;
 const DEFAULT_ATOMIC_ARB_GAS_HINT: u64 = 260_000;
 const DEFAULT_ATOMIC_ARB_SEED_WEI: u128 = 3_000_000_000_000_000u128; // 0.003 ETH
 
-static LAST_ATOMIC_ARB_SCAN_UNIX: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-static LAST_LIQUIDATION_SCAN_UNIX: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
-
 impl StrategyExecutor {
     fn env_usize_bounded(key: &str, default: usize, min: usize, max: usize) -> usize {
         std::env::var(key)
@@ -119,9 +114,9 @@ impl StrategyExecutor {
         };
         let cooldown = Self::env_u64_bounded_local(cooldown_key, default_cooldown, 1, 120);
         let counter = if liquidation {
-            &LAST_LIQUIDATION_SCAN_UNIX
+            &self.last_liquidation_scan_unix
         } else {
-            &LAST_ATOMIC_ARB_SCAN_UNIX
+            &self.last_atomic_arb_scan_unix
         };
         let last = counter.load(std::sync::atomic::Ordering::Relaxed);
         if now_unix < last.saturating_add(cooldown) {
@@ -2508,6 +2503,7 @@ struct ProfitOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::strategy::execution::strategy::dummy_executor_for_tests;
     use alloy::rpc::types::eth::TransactionRequest;
 
     #[test]
@@ -2611,5 +2607,18 @@ mod tests {
         );
         // (100_000*10 + 50) + (200_000*20 + 70) = 5_000_120
         assert_eq!(total, U256::from(5_000_120u64));
+    }
+
+    #[tokio::test]
+    async fn signal_scan_cooldown_is_executor_local() {
+        let exec_a = dummy_executor_for_tests().await;
+        let exec_b = dummy_executor_for_tests().await;
+        let now = 1_700_000_000u64;
+
+        assert!(exec_a.should_run_signal_scan(false, now));
+        // Separate executor should not be throttled by another instance.
+        assert!(exec_b.should_run_signal_scan(false, now));
+        // Same executor should still obey cooldown.
+        assert!(!exec_a.should_run_signal_scan(false, now));
     }
 }

@@ -6,6 +6,7 @@ use crate::common::parsing::{
     parse_address_hex, parse_b256_hex, parse_hex_bytes, parse_u64_hex, parse_u128_hex,
     parse_u256_hex,
 };
+use crate::common::seen_cache::remember_with_bounded_order;
 use alloy::primitives::{Address, B256, U256};
 use dashmap::DashSet;
 use futures::StreamExt;
@@ -306,24 +307,13 @@ impl MevShareClient {
         Err(AppError::Connection("SSE stream ended unexpectedly".into()))
     }
 
-    async fn record_seen(&self, key: B256) {
-        let mut order = self.seen_order.lock().await;
-        order.push_back(key);
-        if order.len() > SEEN_MAX
-            && let Some(oldest) = order.pop_front()
-        {
-            self.seen.remove(&oldest);
-        }
-    }
-
     async fn handle_event(&self, evt: RawEvent) {
         let Some(txs) = evt.txs else { return };
 
         for tx in txs {
             if let Some(hint) = self.convert_hint(tx) {
                 let key = hint.tx_hash;
-                if self.seen.insert(key) {
-                    self.record_seen(key).await;
+                if remember_with_bounded_order(&self.seen, &self.seen_order, key, SEEN_MAX).await {
                     self.enqueue(StrategyWork::MevShareHint {
                         hint: Box::new(hint),
                         received_at: std::time::Instant::now(),

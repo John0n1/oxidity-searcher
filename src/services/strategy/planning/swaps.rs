@@ -5,7 +5,7 @@ use crate::common::constants;
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
 use crate::network::gas::GasFees;
-use crate::services::strategy::routers::{UniV2Router, UniV3Quoter, UniV3Router};
+use crate::services::strategy::routers::{UniV3Quoter, UniV3Router};
 use crate::services::strategy::strategy::{StrategyExecutor, V3_QUOTE_CACHE_TTL_MS};
 use crate::services::strategy::time_utils::current_unix;
 use alloy::eips::eip2930::AccessList;
@@ -128,30 +128,12 @@ impl StrategyExecutor {
         strict_liquidity: bool,
         gas_fees: &GasFees,
     ) -> Result<Option<V2SwapBuild>, AppError> {
-        let router_contract = UniV2Router::new(router, self.http_provider.clone());
         let access_list = Self::build_access_list(router, &path);
 
-        let expected_out = if let Some(q) = self.reserve_cache.quote_v2_path(&path, amount_in) {
-            q
-        } else {
-            let quote_path = path.clone();
-            let quote_contract = router_contract.clone();
-            let quote_value = amount_in;
-            let quote: Vec<U256> = retry_async(
-                move |_| {
-                    let c = quote_contract.clone();
-                    let p = quote_path.clone();
-                    async move { c.getAmountsOut(quote_value, p.clone()).call().await }
-                },
-                3,
-                Duration::from_millis(100),
-            )
+        let expected_out = self
+            .quote_v2_path_with_router_fallback(router, &path, amount_in)
             .await
-            .map_err(|e| AppError::Strategy(format!("V2 quote failed: {}", e)))?;
-            *quote
-                .last()
-                .ok_or_else(|| AppError::Strategy("V2 quote missing amounts".into()))?
-        };
+            .ok_or_else(|| AppError::Strategy("V2 quote failed".into()))?;
 
         if expected_out.is_zero() {
             if strict_liquidity {

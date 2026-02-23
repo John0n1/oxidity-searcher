@@ -38,6 +38,7 @@ use tokio_util::sync::CancellationToken;
 const INGEST_QUEUE_BOUND: usize = 2048;
 const DEFAULT_FEED_AUDIT_MAX_LAG_BLOCKS: u64 = 20;
 const DEFAULT_FEED_AUDIT_RECHECK_SECS: u64 = 20;
+const DEFAULT_FEED_AUDIT_PUBLIC_TIP_LAG_BLOCKS: u64 = 2;
 
 #[derive(Default, Debug, Clone)]
 struct SyncLagState {
@@ -370,6 +371,14 @@ impl Engine {
         None
     }
 
+    fn feed_audit_public_tip_lag_blocks() -> u64 {
+        std::env::var("FEED_AUDIT_PUBLIC_TIP_LAG_BLOCKS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_FEED_AUDIT_PUBLIC_TIP_LAG_BLOCKS)
+            .clamp(1, 64)
+    }
+
     fn parse_block_field(value: &Value) -> Option<u64> {
         match value {
             Value::String(s) => {
@@ -390,6 +399,7 @@ impl Engine {
         chain_id: u64,
         max_lag_blocks: u64,
         public_tip_rpc: Option<&str>,
+        public_tip_lag_blocks: u64,
     ) -> SyncLagState {
         let mut state = SyncLagState::default();
         let syncing: Result<Value, _> = provider
@@ -450,10 +460,12 @@ impl Engine {
                         {
                             let lag = public_tip.saturating_sub(local_tip);
                             state.public_tip_lag = Some(lag);
-                            state.reasons.push(format!(
-                                "public_tip_ahead_by={} (public={} local={})",
-                                lag, public_tip, local_tip
-                            ));
+                            if lag > public_tip_lag_blocks {
+                                state.reasons.push(format!(
+                                    "public_tip_ahead_by={} (public={} local={} threshold={})",
+                                    lag, public_tip, local_tip, public_tip_lag_blocks
+                                ));
+                            }
                         }
                     }
                     Err(e) => {
@@ -483,7 +495,10 @@ impl Engine {
                 .protocol_lag
                 .map(|lag| lag > max_lag_blocks)
                 .unwrap_or(false)
-            || state.public_tip_lag.map(|lag| lag > 0).unwrap_or(false);
+            || state
+                .public_tip_lag
+                .map(|lag| lag > public_tip_lag_blocks)
+                .unwrap_or(false);
         state
     }
 
@@ -526,12 +541,14 @@ impl Engine {
         }
 
         let feed_audit_max_lag_blocks = Self::feed_audit_max_lag_blocks();
+        let feed_audit_public_tip_lag_blocks = Self::feed_audit_public_tip_lag_blocks();
         let feed_audit_public_rpc = self.feed_audit_public_tip_rpc();
         let sync_state = Self::check_sync_lag_state(
             &self.http_provider,
             self.chain_id,
             feed_audit_max_lag_blocks,
             feed_audit_public_rpc.as_deref(),
+            feed_audit_public_tip_lag_blocks,
         )
         .await;
         if sync_state.is_lagging {
@@ -571,6 +588,7 @@ impl Engine {
                         chain_id,
                         feed_audit_max_lag_blocks,
                         public_rpc_for_monitor.as_deref(),
+                        feed_audit_public_tip_lag_blocks,
                     )
                     .await;
                     if state.is_lagging {

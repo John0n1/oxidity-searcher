@@ -716,6 +716,17 @@ impl GlobalSettings {
         if out.is_empty() {
             out = constants::default_chainlink_feeds(chain_id);
         }
+        let mut stable_aliases: Vec<(String, Address)> = Vec::new();
+        for (key, addr) in out.iter() {
+            if let Some((base, quote)) = key.rsplit_once('_')
+                && stable_quote(quote)
+            {
+                stable_aliases.push((base.to_uppercase(), *addr));
+            }
+        }
+        for (base, addr) in stable_aliases {
+            out.entry(base).or_insert(addr);
+        }
 
         Ok(out)
     }
@@ -949,6 +960,10 @@ fn quote_priority(quote: &str) -> usize {
     }
 }
 
+fn stable_quote(quote: &str) -> bool {
+    matches!(quote, "USD" | "USDT" | "USDC")
+}
+
 #[derive(Clone, Debug)]
 struct NormalizedChainlinkFeedEntry {
     base: String,
@@ -1145,10 +1160,13 @@ fn load_chainlink_feeds_from_file(
         return Ok(None);
     }
 
-    let out = selected
-        .into_iter()
-        .map(|(base, (_, addr, _, _))| (base, addr))
-        .collect();
+    let mut out = HashMap::new();
+    for (base, (quote, addr, _, _)) in selected {
+        out.insert(format!("{base}_{quote}"), addr);
+        if stable_quote(&quote) {
+            out.entry(base).or_insert(addr);
+        }
+    }
 
     Ok(Some(out))
 }
@@ -1371,9 +1389,15 @@ mod tests {
 
     #[test]
     fn chainlink_feed_conflict_strict_applies_globally() {
+        let _env_lock = env_lock_guard();
+        let old = std::env::var("CHAINLINK_FEED_CONFLICT_STRICT").ok();
+        unsafe { std::env::remove_var("CHAINLINK_FEED_CONFLICT_STRICT") };
         let settings = base_settings();
         assert!(settings.chainlink_feed_conflict_strict_for_chain(1));
         assert!(settings.chainlink_feed_conflict_strict_for_chain(137));
+        if let Some(v) = old {
+            unsafe { std::env::set_var("CHAINLINK_FEED_CONFLICT_STRICT", v) };
+        }
     }
 
     #[test]
@@ -1469,8 +1493,29 @@ mod tests {
             .expect("loader result")
             .expect("selected feeds");
         std::fs::remove_file(&tmp).ok();
-        assert_eq!(selected.len(), 1);
+        assert_eq!(selected.len(), 2);
         assert!(selected.contains_key("ETH"));
+        assert!(selected.contains_key("ETH_USD"));
+    }
+
+    #[test]
+    fn chainlink_loader_non_usd_does_not_alias_base_key() {
+        let tmp = std::env::temp_dir().join(format!(
+            "chainlink-feeds-non-usd-test-{}.json",
+            std::process::id()
+        ));
+        let body = r#"
+[
+  {"base":"FOO","quote":"ETH","chainId":1,"address":"0x1111111111111111111111111111111111111111"}
+]
+"#;
+        std::fs::write(&tmp, body).expect("write temp chainlink file");
+        let selected = load_chainlink_feeds_from_file(tmp.to_str().expect("utf8 path"), 1, false)
+            .expect("loader result")
+            .expect("selected feeds");
+        std::fs::remove_file(&tmp).ok();
+        assert!(selected.contains_key("FOO_ETH"));
+        assert!(!selected.contains_key("FOO"));
     }
 
     #[test]

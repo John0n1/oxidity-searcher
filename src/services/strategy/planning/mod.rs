@@ -98,7 +98,7 @@ impl StrategyExecutor {
             .unwrap_or(false)
     }
 
-    async fn quote_v2_path_with_router_fallback(
+    pub(in crate::services::strategy) async fn quote_v2_path_with_router_fallback(
         &self,
         router: Address,
         path: &[Address],
@@ -1688,35 +1688,16 @@ impl StrategyExecutor {
                             .copied()
                             .unwrap_or(self.wrapped_native)
                     };
-                    let router_contract = UniV2Router::new(exec_router, self.http_provider.clone());
                     let sell_path = if has_wrapped {
                         vec![target_token, self.wrapped_native]
                     } else {
                         observed.path.iter().copied().rev().collect()
                     };
                     let sell_amount = tokens_in;
-                    let expected_out = if let Some(q) =
-                        self.reserve_cache.quote_v2_path(&sell_path, sell_amount)
-                    {
-                        q
-                    } else {
-                        let quote_path = sell_path.clone();
-                        let quote_contract = router_contract.clone();
-                        let quote: Vec<U256> = retry_async(
-                            move |_| {
-                                let c = quote_contract.clone();
-                                let p = quote_path.clone();
-                                async move { c.getAmountsOut(sell_amount, p.clone()).call().await }
-                            },
-                            3,
-                            Duration::from_millis(100),
-                        )
+                    let expected_out = self
+                        .quote_v2_path_with_router_fallback(exec_router, &sell_path, sell_amount)
                         .await
-                        .map_err(|e| AppError::Strategy(format!("Sell quote failed: {}", e)))?;
-                        *quote.last().ok_or_else(|| {
-                            AppError::Strategy("Sell quote missing amounts".into())
-                        })?
-                    };
+                        .ok_or_else(|| AppError::Strategy("Sell quote failed".into()))?;
                     let ratio_ppm = StrategyExecutor::price_ratio_ppm(expected_out, sell_amount);
                     // Ratio-only checks are pathological for ultra-low unit-price tokens.
                     // Keep a dust floor for native-out paths and a very loose ratio guard otherwise.
@@ -1747,6 +1728,7 @@ impl StrategyExecutor {
                         .saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
                         / U256::from(10_000u64);
                     let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 3600);
+                    let router_contract = UniV2Router::new(exec_router, self.http_provider.clone());
                     let calldata = if has_wrapped {
                         router_contract
                             .swapExactTokensForETH(

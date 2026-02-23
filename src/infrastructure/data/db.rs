@@ -112,9 +112,15 @@ impl Database {
         next_nonce: u64,
         touched_pools: &str,
     ) -> Result<(), AppError> {
-        let chain_id_i64 = chain_id as i64;
-        let block_i64 = block_number as i64;
-        let next_i64 = next_nonce as i64;
+        let chain_id_i64 = i64::try_from(chain_id).map_err(|e| {
+            AppError::Initialization(format!("Nonce state chain_id conversion failed: {e}"))
+        })?;
+        let block_i64 = i64::try_from(block_number).map_err(|e| {
+            AppError::Initialization(format!("Nonce state block_number conversion failed: {e}"))
+        })?;
+        let next_i64 = i64::try_from(next_nonce).map_err(|e| {
+            AppError::Initialization(format!("Nonce state next_nonce conversion failed: {e}"))
+        })?;
         sqlx::query(
             r#"
             INSERT INTO nonce_state (chain_id, block_number, next_nonce, touched_pools)
@@ -475,5 +481,16 @@ mod tests {
             msg.contains("negative value"),
             "unexpected error message: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn upsert_nonce_state_rejects_values_outside_i64() {
+        let db = Database::new("sqlite::memory:").await.expect("db");
+        let err = db
+            .upsert_nonce_state(1, u64::MAX, 7, "[]")
+            .await
+            .expect_err("u64::MAX block_number should fail conversion");
+        let msg = format!("{err}");
+        assert!(msg.contains("conversion failed"));
     }
 }

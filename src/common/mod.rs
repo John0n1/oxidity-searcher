@@ -4,6 +4,7 @@
 pub mod data_path;
 pub mod parsing;
 pub mod retry;
+pub mod seen_cache;
 
 // Re-export frequently used modules for backward compatibility
 pub use crate::app::logging as logger;

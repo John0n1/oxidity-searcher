@@ -88,6 +88,104 @@ impl BundleSender {
         }
     }
 
+    async fn post_json_with_retries(
+        &self,
+        url: &str,
+        body_bytes: &[u8],
+        signature_header: Option<&str>,
+        relay_name: Option<&str>,
+        retry_context: &str,
+    ) -> Result<(reqwest::StatusCode, String, u64, bool), (AppError, u64, bool)> {
+        let client = reqwest::Client::new();
+        let mut attempts = 0u64;
+        let mut saw_timeout = false;
+
+        loop {
+            attempts += 1;
+            let mut request = client.post(url).header("Content-Type", "application/json");
+            if let Some(sig) = signature_header {
+                let sig = HeaderValue::from_str(sig).map_err(|e| {
+                    (
+                        AppError::Connection(format!("Signature header invalid: {}", e)),
+                        attempts,
+                        saw_timeout,
+                    )
+                })?;
+                request = request.header("X-Flashbots-Signature", sig);
+            }
+
+            let response = request
+                .body(body_bytes.to_vec())
+                .timeout(Duration::from_millis(RELAY_TIMEOUT_MS))
+                .send()
+                .await;
+
+            let response = match response {
+                Ok(resp) => resp,
+                Err(e) => {
+                    saw_timeout |= e.is_timeout();
+                    if attempts < RELAY_MAX_ATTEMPTS {
+                        if let Some(name) = relay_name {
+                            tracing::warn!(
+                                target: "executor",
+                                relay = %url,
+                                name = %name,
+                                context = %retry_context,
+                                error = %e,
+                                attempt = attempts,
+                                "Relay POST failed, retrying"
+                            );
+                        } else {
+                            tracing::warn!(
+                                target: "executor",
+                                relay = %url,
+                                context = %retry_context,
+                                error = %e,
+                                attempt = attempts,
+                                "Relay POST failed, retrying"
+                            );
+                        }
+                        continue;
+                    }
+                    return Err((
+                        AppError::Connection(format!("Relay POST failed: {}", e)),
+                        attempts,
+                        saw_timeout,
+                    ));
+                }
+            };
+
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            if status.is_success() || attempts >= RELAY_MAX_ATTEMPTS {
+                return Ok((status, body, attempts, saw_timeout));
+            }
+
+            if let Some(name) = relay_name {
+                tracing::warn!(
+                    target: "executor",
+                    relay = %url,
+                    name = %name,
+                    context = %retry_context,
+                    status = %status,
+                    body = %body,
+                    attempt = attempts,
+                    "Relay rejected request, retrying"
+                );
+            } else {
+                tracing::warn!(
+                    target: "executor",
+                    relay = %url,
+                    context = %retry_context,
+                    status = %status,
+                    body = %body,
+                    attempt = attempts,
+                    "Relay rejected request, retrying"
+                );
+            }
+        }
+    }
+
     /// Send a MEV-Share bundle that references tx hashes (instead of raw bytes).
     pub async fn send_mev_share_bundle(&self, body: &[BundleItem]) -> Result<(), AppError> {
         let hash_count = body
@@ -138,75 +236,43 @@ impl BundleSender {
             serde_json::to_vec(&payload).map_err(|e| AppError::Initialization(e.to_string()))?;
         let sig_header = self.sign_request(&body_bytes)?;
 
-        let client = reqwest::Client::new();
-        let mut attempts = 0u64;
-        let mut saw_timeout = false;
-        loop {
-            attempts += 1;
-            let resp = client
-                .post(&self.mev_share_relay_url)
-                .header("Content-Type", "application/json")
-                .header(
-                    "X-Flashbots-Signature",
-                    HeaderValue::from_str(&sig_header).map_err(|e| {
-                        AppError::Connection(format!("Signature header invalid: {}", e))
-                    })?,
-                )
-                .body(body_bytes.clone())
-                .timeout(Duration::from_millis(RELAY_TIMEOUT_MS))
-                .send()
-                .await;
-
-            let resp = match resp {
-                Ok(r) => r,
-                Err(e) => {
-                    saw_timeout |= e.is_timeout();
-                    if attempts < RELAY_MAX_ATTEMPTS {
-                        tracing::warn!(
-                            target: "executor",
-                            relay=%self.mev_share_relay_url,
-                            error=%e,
-                            attempt=attempts,
-                            "Relay POST failed for mev_sendBundle, retrying"
-                        );
-                        continue;
-                    }
-                    self.stats.record_relay_attempt(
-                        "mev_share",
-                        false,
-                        saw_timeout,
-                        attempts.saturating_sub(1),
-                    );
-                    return Err(AppError::Connection(format!("Relay POST failed: {}", e)));
-                }
-            };
-
-            let status = resp.status();
-            let body_text = resp.text().await.unwrap_or_default();
-            if status.is_success() {
-                tracing::info!(target: "executor", relay=%self.mev_share_relay_url, block=block_number + 1, legs=body.len(), body=%body_text, "MEV-Share bundle submitted");
-                self.stats.record_relay_attempt(
-                    "mev_share",
-                    true,
-                    false,
-                    attempts.saturating_sub(1),
-                );
-                break;
-            } else if attempts < RELAY_MAX_ATTEMPTS {
-                tracing::warn!(target: "executor", status=%status, body=%body_text, attempt=attempts, "Relay rejected mev_sendBundle, retrying");
-                continue;
-            } else {
+        let (status, body_text, attempts, saw_timeout) = match self
+            .post_json_with_retries(
+                &self.mev_share_relay_url,
+                &body_bytes,
+                Some(&sig_header),
+                None,
+                "mev_sendBundle",
+            )
+            .await
+        {
+            Ok(v) => v,
+            Err((e, attempts, saw_timeout)) => {
                 self.stats.record_relay_attempt(
                     "mev_share",
                     false,
-                    false,
+                    saw_timeout,
                     attempts.saturating_sub(1),
                 );
-                return Err(AppError::Connection(format!(
-                    "Relay rejected mev_sendBundle: {} body={}",
-                    status, body_text
-                )));
+                return Err(e);
             }
+        };
+
+        if status.is_success() {
+            tracing::info!(target: "executor", relay=%self.mev_share_relay_url, block=block_number + 1, legs=body.len(), body=%body_text, "MEV-Share bundle submitted");
+            self.stats
+                .record_relay_attempt("mev_share", true, false, attempts.saturating_sub(1));
+        } else {
+            self.stats.record_relay_attempt(
+                "mev_share",
+                false,
+                saw_timeout,
+                attempts.saturating_sub(1),
+            );
+            return Err(AppError::Connection(format!(
+                "Relay rejected mev_sendBundle: {} body={}",
+                status, body_text
+            )));
         }
 
         Ok(())
@@ -345,6 +411,15 @@ impl BundleSender {
         None
     }
 
+    fn should_cancel_previous_bundle(
+        with_sig: bool,
+        cancel_previous_bundle: bool,
+        target_offset: u64,
+        previous_uuid: Option<&str>,
+    ) -> bool {
+        with_sig && cancel_previous_bundle && target_offset == 1 && previous_uuid.is_some()
+    }
+
     async fn send_mainnet_builders(&self, raw_txs: &[Vec<u8>]) -> Result<(), AppError> {
         let block_number =
             self.provider.get_block_number().await.map_err(|e| {
@@ -389,6 +464,19 @@ impl BundleSender {
                 "quasar".to_string(),
             ),
         ];
+        // Snapshot previous replacement UUIDs once per send cycle so multi-block
+        // submissions do not cancel earlier offsets from the same cycle.
+        let previous_replacement_uuids: HashMap<String, Option<String>> = relays
+            .iter()
+            .map(|(_, with_sig, name)| {
+                let prev = if *with_sig && self.cancel_previous_bundle {
+                    self.relay_last_replacement_uuid(name)
+                } else {
+                    None
+                };
+                (name.clone(), prev)
+            })
+            .collect();
 
         let mut accepted = 0usize;
         let mut failures: Vec<String> = Vec::new();
@@ -420,10 +508,16 @@ impl BundleSender {
 
             let mut requests = Vec::with_capacity(relays.len());
             for (url, with_sig, name) in &relays {
-                if *with_sig
-                    && self.cancel_previous_bundle
-                    && let Some(prev_uuid) = self.relay_last_replacement_uuid(name)
-                    && let Err(err) = self.cancel_bundle_with_sig(url, name, &prev_uuid).await
+                let previous_uuid = previous_replacement_uuids
+                    .get(name)
+                    .and_then(|value| value.as_deref());
+                if Self::should_cancel_previous_bundle(
+                    *with_sig,
+                    self.cancel_previous_bundle,
+                    offset,
+                    previous_uuid,
+                ) && let Some(prev_uuid) = previous_uuid
+                    && let Err(err) = self.cancel_bundle_with_sig(url, name, prev_uuid).await
                 {
                     tracing::warn!(
                         target: "executor",
@@ -496,84 +590,52 @@ impl BundleSender {
         replacement_uuid: Option<&str>,
     ) -> Result<(), AppError> {
         let sig_header = self.sign_request(body_bytes)?;
-        let client = reqwest::Client::new();
-        let mut attempts = 0u64;
-        let mut saw_timeout = false;
-        loop {
-            attempts += 1;
-            let resp = client
-                .post(url)
-                .header("Content-Type", "application/json")
-                .header(
-                    "X-Flashbots-Signature",
-                    HeaderValue::from_str(&sig_header).map_err(|e| {
-                        AppError::Connection(format!("Signature header invalid: {}", e))
-                    })?,
-                )
-                .body(body_bytes.to_vec())
-                .timeout(Duration::from_millis(RELAY_TIMEOUT_MS))
-                .send()
-                .await;
-
-            let resp = match resp {
-                Ok(r) => r,
-                Err(e) => {
-                    saw_timeout |= e.is_timeout();
-                    if attempts < RELAY_MAX_ATTEMPTS {
-                        tracing::warn!(
-                            target: "executor",
-                            relay=%url,
-                            name=%name,
-                            error=%e,
-                            attempt=attempts,
-                            "Relay POST failed, retrying"
-                        );
-                        continue;
-                    }
-                    self.stats.record_relay_attempt(
-                        name,
-                        false,
-                        saw_timeout,
-                        attempts.saturating_sub(1),
-                    );
-                    self.stats.record_relay_bundle_status(
-                        name,
-                        "post_error",
-                        replacement_uuid,
-                        None,
-                    );
-                    return Err(AppError::Connection(format!("Relay POST failed: {}", e)));
-                }
-            };
-
-            let status = resp.status();
-            let body_text = resp.text().await.unwrap_or_default();
-            if status.is_success() {
-                let bundle_id = Self::extract_bundle_id(&body_text);
-                tracing::info!(target: "executor", relay=%url, name=%name, block=target_block, txs=txs, body=%body_text, "Bundle submitted");
-                self.stats
-                    .record_relay_attempt(name, true, false, attempts.saturating_sub(1));
-                self.stats.record_relay_bundle_status(
+        let (status, body_text, attempts, saw_timeout) = match self
+            .post_json_with_retries(
+                url,
+                body_bytes,
+                Some(&sig_header),
+                Some(name),
+                "eth_sendBundle_signed",
+            )
+            .await
+        {
+            Ok(v) => v,
+            Err((e, attempts, saw_timeout)) => {
+                self.stats.record_relay_attempt(
                     name,
-                    "accepted",
-                    replacement_uuid,
-                    bundle_id.as_deref(),
+                    false,
+                    saw_timeout,
+                    attempts.saturating_sub(1),
                 );
-                return Ok(());
-            } else if attempts < RELAY_MAX_ATTEMPTS {
-                tracing::warn!(target: "executor", relay=%url, status=%status, body=%body_text, attempt=attempts, "Relay rejected bundle, retrying");
-                continue;
-            } else {
                 self.stats
-                    .record_relay_attempt(name, false, false, attempts.saturating_sub(1));
-                self.stats
-                    .record_relay_bundle_status(name, "rejected", replacement_uuid, None);
-                return Err(AppError::Connection(format!(
-                    "Relay {} rejected bundle: {} body={}",
-                    name, status, body_text
-                )));
+                    .record_relay_bundle_status(name, "post_error", replacement_uuid, None);
+                return Err(e);
             }
+        };
+
+        if status.is_success() {
+            let bundle_id = Self::extract_bundle_id(&body_text);
+            tracing::info!(target: "executor", relay=%url, name=%name, block=target_block, txs=txs, body=%body_text, "Bundle submitted");
+            self.stats
+                .record_relay_attempt(name, true, false, attempts.saturating_sub(1));
+            self.stats.record_relay_bundle_status(
+                name,
+                "accepted",
+                replacement_uuid,
+                bundle_id.as_deref(),
+            );
+            return Ok(());
         }
+
+        self.stats
+            .record_relay_attempt(name, false, saw_timeout, attempts.saturating_sub(1));
+        self.stats
+            .record_relay_bundle_status(name, "rejected", replacement_uuid, None);
+        Err(AppError::Connection(format!(
+            "Relay {} rejected bundle: {} body={}",
+            name, status, body_text
+        )))
     }
 
     async fn post_bundle_optional(
@@ -592,85 +654,52 @@ impl BundleSender {
                 .await;
         }
 
-        let client = reqwest::Client::new();
-        let mut attempts = 0u64;
-        let mut saw_timeout = false;
-        loop {
-            attempts += 1;
-            let resp = client
-                .post(url)
-                .header("Content-Type", "application/json")
-                .body(body_bytes.to_vec())
-                .timeout(Duration::from_millis(RELAY_TIMEOUT_MS))
-                .send()
-                .await;
-            let resp = match resp {
-                Ok(r) => r,
-                Err(e) => {
-                    saw_timeout |= e.is_timeout();
-                    if attempts < RELAY_MAX_ATTEMPTS {
-                        tracing::warn!(
-                            target: "executor",
-                            relay=%url,
-                            name=%name,
-                            error=%e,
-                            attempt=attempts,
-                            "Best-effort relay POST failed, retrying"
-                        );
-                        continue;
-                    }
-                    self.stats.record_relay_attempt(
-                        name,
-                        false,
-                        saw_timeout,
-                        attempts.saturating_sub(1),
-                    );
-                    self.stats.record_relay_bundle_status(
-                        name,
-                        "post_error",
-                        replacement_uuid,
-                        None,
-                    );
-                    return Err(AppError::Connection(format!("Relay POST failed: {}", e)));
-                }
-            };
-
-            let status = resp.status();
-            let body_text = resp.text().await.unwrap_or_default();
-            if status.is_success() {
-                let bundle_id = Self::extract_bundle_id(&body_text);
-                tracing::info!(target: "executor", relay=%url, name=%name, block=target_block, txs=txs, body=%body_text, "Bundle submitted (best-effort)");
-                self.stats
-                    .record_relay_attempt(name, true, false, attempts.saturating_sub(1));
-                self.stats.record_relay_bundle_status(
+        let (status, body_text, attempts, saw_timeout) = match self
+            .post_json_with_retries(
+                url,
+                body_bytes,
+                None,
+                Some(name),
+                "eth_sendBundle_best_effort",
+            )
+            .await
+        {
+            Ok(v) => v,
+            Err((e, attempts, saw_timeout)) => {
+                self.stats.record_relay_attempt(
                     name,
-                    "accepted",
-                    replacement_uuid,
-                    bundle_id.as_deref(),
+                    false,
+                    saw_timeout,
+                    attempts.saturating_sub(1),
                 );
-                return Ok(());
+                self.stats
+                    .record_relay_bundle_status(name, "post_error", replacement_uuid, None);
+                return Err(e);
             }
-            if attempts < RELAY_MAX_ATTEMPTS {
-                tracing::warn!(
-                    target: "executor",
-                    relay=%url,
-                    name=%name,
-                    status=%status,
-                    body=%body_text,
-                    attempt=attempts,
-                    "Best-effort relay rejected bundle, retrying"
-                );
-                continue;
-            }
+        };
+
+        if status.is_success() {
+            let bundle_id = Self::extract_bundle_id(&body_text);
+            tracing::info!(target: "executor", relay=%url, name=%name, block=target_block, txs=txs, body=%body_text, "Bundle submitted (best-effort)");
             self.stats
-                .record_relay_attempt(name, false, false, attempts.saturating_sub(1));
-            self.stats
-                .record_relay_bundle_status(name, "rejected", replacement_uuid, None);
-            return Err(AppError::Connection(format!(
-                "Relay {} rejected bundle: {} body={}",
-                name, status, body_text
-            )));
+                .record_relay_attempt(name, true, false, attempts.saturating_sub(1));
+            self.stats.record_relay_bundle_status(
+                name,
+                "accepted",
+                replacement_uuid,
+                bundle_id.as_deref(),
+            );
+            return Ok(());
         }
+
+        self.stats
+            .record_relay_attempt(name, false, saw_timeout, attempts.saturating_sub(1));
+        self.stats
+            .record_relay_bundle_status(name, "rejected", replacement_uuid, None);
+        Err(AppError::Connection(format!(
+            "Relay {} rejected bundle: {} body={}",
+            name, status, body_text
+        )))
     }
 
     async fn cancel_bundle_with_sig(
@@ -1029,5 +1058,30 @@ mod tests {
             BundleSender::extract_bundle_id(raw_uuid).as_deref(),
             Some("uuid-123")
         );
+    }
+
+    #[test]
+    fn cancel_previous_only_on_first_target_block() {
+        assert!(BundleSender::should_cancel_previous_bundle(
+            true,
+            true,
+            1,
+            Some("prev-uuid")
+        ));
+        assert!(!BundleSender::should_cancel_previous_bundle(
+            true,
+            true,
+            2,
+            Some("prev-uuid")
+        ));
+        assert!(!BundleSender::should_cancel_previous_bundle(
+            false,
+            true,
+            1,
+            Some("prev-uuid")
+        ));
+        assert!(!BundleSender::should_cancel_previous_bundle(
+            true, true, 1, None
+        ));
     }
 }

@@ -468,8 +468,12 @@ impl PriceFeed {
             status: 0,
         })?;
 
-        let price = ticker.price.parse().unwrap_or(0.0);
-        Ok(Some(PriceQuote {
+        let price = ticker
+            .price
+            .parse::<f64>()
+            .ok()
+            .filter(|p| p.is_finite() && *p > 0.0);
+        Ok(price.map(|price| PriceQuote {
             price,
             source: "binance".into(),
         }))
@@ -698,12 +702,10 @@ impl PriceFeed {
     async fn try_chainlink(&self, symbol: &str) -> Result<Option<PriceQuote>, AppError> {
         let key = symbol.to_uppercase();
         let fallback_keys = [
-            key.clone(),
             format!("{key}_USD"),
             format!("{key}_USDT"),
             format!("{key}_USDC"),
-            format!("{key}_ETH"),
-            format!("{key}_BTC"),
+            key.clone(),
         ];
         let Some(addr) = fallback_keys
             .iter()

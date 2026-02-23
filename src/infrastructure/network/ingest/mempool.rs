@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use crate::common::error::AppError;
+use crate::common::seen_cache::remember_with_bounded_order;
 use crate::core::strategy::StrategyStats;
 use crate::core::strategy::StrategyWork;
 use crate::network::provider::WsProvider;
@@ -263,17 +264,7 @@ impl MempoolScanner {
     }
 
     async fn mark_seen(&self, hash: B256) -> bool {
-        if !self.seen.insert(hash) {
-            return false;
-        }
-        let mut order = self.seen_order.lock().await;
-        order.push_back(hash);
-        if order.len() > SEEN_MAX
-            && let Some(oldest) = order.pop_front()
-        {
-            self.seen.remove(&oldest);
-        }
-        true
+        remember_with_bounded_order(&self.seen, &self.seen_order, hash, SEEN_MAX).await
     }
 
     async fn enqueue(&self, work: StrategyWork) {
@@ -305,23 +296,6 @@ impl MempoolScanner {
 mod tests {
     use super::*;
     use url::Url;
-
-    #[tokio::test]
-    async fn retries_until_success() {
-        let counter = std::sync::atomic::AtomicUsize::new(0);
-        let res: Result<u32, ()> = crate::common::retry::retry_async(
-            |_| {
-                let current = counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                async move { if current < 2 { Err(()) } else { Ok(7) } }
-            },
-            4,
-            Duration::from_millis(1),
-        )
-        .await;
-
-        assert_eq!(res.unwrap(), 7);
-        assert!(counter.load(std::sync::atomic::Ordering::Relaxed) >= 3);
-    }
 
     #[tokio::test]
     async fn dedup_marks_and_bounds() {
