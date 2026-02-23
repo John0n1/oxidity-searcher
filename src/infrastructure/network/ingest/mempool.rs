@@ -269,25 +269,13 @@ impl MempoolScanner {
 
     async fn enqueue(&self, work: StrategyWork) {
         let pushed = self.work_queue.push(work).await;
+        self.stats.record_ingest_enqueue(pushed.dropped_oldest);
         if pushed.dropped_oldest {
-            self.stats
-                .ingest_queue_full
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.stats
-                .ingest_queue_dropped
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.stats
-                .ingest_backpressure
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tracing::warn!(
                 target: "mempool",
                 capacity = self.capacity,
                 "ingest queue full; dropped oldest work item"
             );
-        } else {
-            self.stats
-                .ingest_queue_depth
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }

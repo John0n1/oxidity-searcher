@@ -264,10 +264,10 @@ impl MevShareClient {
             let chunk_str = String::from_utf8_lossy(&chunk);
             buffer.push_str(&chunk_str);
 
-            while let Some(idx) = buffer.find("\n\n") {
+            while let Some((idx, delimiter_len)) = next_sse_event_boundary(&buffer) {
                 let event_str = buffer[..idx].to_string();
-                // Advance buffer past the double newline
-                buffer.drain(..idx + 2);
+                // Advance buffer past the event boundary (LF-LF or CRLF-CRLF).
+                buffer.drain(..idx + delimiter_len);
 
                 let mut data_lines = Vec::new();
                 for line in event_str.lines() {
@@ -326,25 +326,13 @@ impl MevShareClient {
 
     async fn enqueue(&self, work: StrategyWork) {
         let pushed = self.work_queue.push(work).await;
+        self.stats.record_ingest_enqueue(pushed.dropped_oldest);
         if pushed.dropped_oldest {
-            self.stats
-                .ingest_queue_full
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.stats
-                .ingest_queue_dropped
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.stats
-                .ingest_backpressure
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             tracing::warn!(
                 target: "mev_share",
                 capacity = self.capacity,
                 "ingest queue full; dropped oldest hint"
             );
-        } else {
-            self.stats
-                .ingest_queue_depth
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -408,6 +396,17 @@ fn retry_after_delay(resp: &reqwest::Response) -> Option<Duration> {
         .and_then(|h| h.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
         .map(Duration::from_secs)
+}
+
+fn next_sse_event_boundary(buffer: &str) -> Option<(usize, usize)> {
+    let lf = buffer.find("\n\n").map(|idx| (idx, 2usize));
+    let crlf = buffer.find("\r\n\r\n").map(|idx| (idx, 4usize));
+    match (lf, crlf) {
+        (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
 }
 
 #[cfg(test)]
@@ -479,5 +478,20 @@ mod tests {
         let hint = client.convert_hint(raw).expect("hint");
         assert_eq!(hint.call_data, vec![0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(hint.value, U256::from(42u64));
+    }
+
+    #[test]
+    fn sse_boundary_detects_lf_and_crlf_events() {
+        let lf = next_sse_event_boundary("data: {}\n\nnext");
+        assert_eq!(lf, Some((8, 2)));
+
+        let crlf = next_sse_event_boundary("data: {}\r\n\r\nnext");
+        assert_eq!(crlf, Some((8, 4)));
+    }
+
+    #[test]
+    fn sse_boundary_picks_earliest_delimiter() {
+        let boundary = next_sse_event_boundary("a\r\n\r\nb\n\n");
+        assert_eq!(boundary, Some((1, 4)));
     }
 }

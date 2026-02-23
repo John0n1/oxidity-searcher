@@ -373,49 +373,68 @@ impl GlobalSettings {
         Self::load_with_path(None)
     }
 
-    /// Best-effort primary HTTP RPC URL for chain auto-detection.
-    pub fn primary_http_provider(&self) -> Option<String> {
-        // Prefer explicit map entry with smallest key
-        if let Some(map) = &self.http_providers {
-            if let Some((_, v)) = map.iter().min_by_key(|(k, _)| k.parse::<u64>().ok()) {
-                return Some(v.clone());
-            }
-            if let Some((_, v)) = map.iter().next() {
-                return Some(v.clone());
+    fn first_non_empty_env<I, S>(keys: I) -> Option<String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        for key in keys {
+            if let Ok(value) = std::env::var(key.as_ref()) {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
             }
         }
-        // Environment fallbacks
-        std::env::var("http_provider")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                std::env::var("http_provider_1")
-                    .ok()
-                    .filter(|s| !s.is_empty())
-            })
+        None
+    }
+
+    fn provider_from_map(map: Option<&HashMap<String, String>>, chain_id: u64) -> Option<String> {
+        map.and_then(|m| m.get(&chain_id.to_string()).cloned())
+    }
+
+    fn primary_provider_from_map(map: &HashMap<String, String>) -> Option<String> {
+        if let Some((_, url)) = map
+            .iter()
+            .filter_map(|(k, v)| k.parse::<u64>().ok().map(|chain_id| (chain_id, v)))
+            .min_by_key(|(chain_id, _)| *chain_id)
+        {
+            return Some(url.clone());
+        }
+        map.iter().next().map(|(_, url)| url.clone())
+    }
+
+    /// Best-effort primary HTTP RPC URL for chain auto-detection.
+    pub fn primary_http_provider(&self) -> Option<String> {
+        // Prefer explicit map entry with smallest numeric key.
+        if let Some(map) = &self.http_providers
+            && let Some(url) = Self::primary_provider_from_map(map)
+        {
+            return Some(url);
+        }
+        // Environment fallbacks (accept legacy lowercase and uppercase aliases).
+        Self::first_non_empty_env([
+            "HTTP_PROVIDER",
+            "http_provider",
+            "HTTP_PROVIDER_1",
+            "http_provider_1",
+        ])
     }
 
     /// Helper to get RPC URL for a specific chain
     pub fn get_http_provider(&self, chain_id: u64) -> Result<String, AppError> {
-        // Try looking for explicit map
-        if let Some(urls) = &self.http_providers
-            && let Some(url) = urls.get(&chain_id.to_string())
-        {
-            return Ok(url.clone());
+        if let Some(url) = Self::provider_from_map(self.http_providers.as_ref(), chain_id) {
+            return Ok(url);
         }
 
-        // Fallback to env var convention: http_provider_1, http_provider_137, then generic http_provider
         let candidates = [
+            format!("HTTP_PROVIDER_{}", chain_id),
             format!("http_provider_{}", chain_id),
+            "HTTP_PROVIDER".to_string(),
             "http_provider".to_string(),
         ];
-        for key in candidates {
-            if let Ok(v) = std::env::var(&key) {
-                let trimmed = v.trim();
-                if !trimmed.is_empty() {
-                    return Ok(trimmed.to_string());
-                }
-            }
+        if let Some(url) = Self::first_non_empty_env(candidates) {
+            return Ok(url);
         }
 
         Err(AppError::Config(format!(
@@ -426,10 +445,8 @@ impl GlobalSettings {
 
     /// Helper to get WS URL for a specific chain
     pub fn get_websocket_provider(&self, chain_id: u64) -> Result<String, AppError> {
-        if let Some(urls) = &self.websocket_providers
-            && let Some(url) = urls.get(&chain_id.to_string())
-        {
-            return Ok(url.clone());
+        if let Some(url) = Self::provider_from_map(self.websocket_providers.as_ref(), chain_id) {
+            return Ok(url);
         }
 
         let candidates = [
@@ -439,13 +456,8 @@ impl GlobalSettings {
             "WEBSOCKET_URL".to_string(),
         ];
 
-        for key in candidates {
-            if let Ok(v) = std::env::var(&key) {
-                let trimmed = v.trim();
-                if !trimmed.is_empty() {
-                    return Ok(trimmed.to_string());
-                }
-            }
+        if let Some(url) = Self::first_non_empty_env(candidates) {
+            return Ok(url);
         }
 
         Err(AppError::Config(format!(
@@ -456,10 +468,8 @@ impl GlobalSettings {
 
     /// Optional IPC URL for a specific chain, preferring explicit config and then env.
     pub fn get_ipc_provider(&self, chain_id: u64) -> Option<String> {
-        if let Some(urls) = &self.ipc_providers
-            && let Some(url) = urls.get(&chain_id.to_string())
-        {
-            return Some(url.clone());
+        if let Some(url) = Self::provider_from_map(self.ipc_providers.as_ref(), chain_id) {
+            return Some(url);
         }
 
         let candidates = [
@@ -469,15 +479,7 @@ impl GlobalSettings {
             "IPC_PATH".to_string(),
         ];
 
-        for key in candidates {
-            if let Ok(v) = std::env::var(&key)
-                && !v.trim().is_empty()
-            {
-                return Some(v);
-            }
-        }
-
-        None
+        Self::first_non_empty_env(candidates)
     }
 
     pub fn get_chainlink_feed(&self, symbol: &str) -> Option<String> {
@@ -1273,6 +1275,63 @@ mod tests {
             settings.get_ipc_provider(1).as_deref(),
             Some("/tmp/test.ipc")
         );
+    }
+
+    #[test]
+    fn primary_http_provider_prefers_smallest_numeric_map_key() {
+        let mut settings = base_settings();
+        settings.http_providers = Some(HashMap::from([
+            ("abc".to_string(), "https://non-numeric.example".to_string()),
+            ("137".to_string(), "https://polygon.example".to_string()),
+            ("1".to_string(), "https://mainnet.example".to_string()),
+        ]));
+        assert_eq!(
+            settings.primary_http_provider().as_deref(),
+            Some("https://mainnet.example")
+        );
+    }
+
+    #[test]
+    fn http_provider_accepts_uppercase_env_aliases() {
+        let _env_lock = env_lock_guard();
+        let old_upper_chain = std::env::var("HTTP_PROVIDER_1").ok();
+        let old_lower_chain = std::env::var("http_provider_1").ok();
+        let old_upper_default = std::env::var("HTTP_PROVIDER").ok();
+        let old_lower_default = std::env::var("http_provider").ok();
+        unsafe {
+            std::env::remove_var("HTTP_PROVIDER_1");
+            std::env::remove_var("http_provider_1");
+            std::env::remove_var("HTTP_PROVIDER");
+            std::env::remove_var("http_provider");
+            std::env::set_var("HTTP_PROVIDER_1", "https://upper-chain.example");
+        }
+
+        let settings = base_settings();
+        assert_eq!(
+            settings.get_http_provider(1).unwrap_or_default(),
+            "https://upper-chain.example"
+        );
+
+        if let Some(v) = old_upper_chain {
+            unsafe { std::env::set_var("HTTP_PROVIDER_1", v) };
+        } else {
+            unsafe { std::env::remove_var("HTTP_PROVIDER_1") };
+        }
+        if let Some(v) = old_lower_chain {
+            unsafe { std::env::set_var("http_provider_1", v) };
+        } else {
+            unsafe { std::env::remove_var("http_provider_1") };
+        }
+        if let Some(v) = old_upper_default {
+            unsafe { std::env::set_var("HTTP_PROVIDER", v) };
+        } else {
+            unsafe { std::env::remove_var("HTTP_PROVIDER") };
+        }
+        if let Some(v) = old_lower_default {
+            unsafe { std::env::set_var("http_provider", v) };
+        } else {
+            unsafe { std::env::remove_var("http_provider") };
+        }
     }
 
     #[test]

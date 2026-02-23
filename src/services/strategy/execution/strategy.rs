@@ -280,6 +280,16 @@ impl StrategyStats {
         }
     }
 
+    pub fn record_ingest_enqueue(&self, dropped_oldest: bool) {
+        if dropped_oldest {
+            self.ingest_queue_full.fetch_add(1, Ordering::Relaxed);
+            self.ingest_queue_dropped.fetch_add(1, Ordering::Relaxed);
+            self.ingest_backpressure.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.ingest_queue_depth.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     pub fn record_bundle(&self, entry: BundleTelemetry) {
         let mut guard = self.bundles.lock().unwrap_or_else(|e| e.into_inner());
         guard.push(entry);

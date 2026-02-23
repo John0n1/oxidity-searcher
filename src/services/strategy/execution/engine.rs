@@ -502,6 +502,41 @@ impl Engine {
         state
     }
 
+    async fn prune_allowlist_without_code(
+        &self,
+        category: &'static str,
+        allowlist: &DashSet<Address>,
+    ) {
+        let mut invalid = Vec::new();
+        for addr in allowlist.iter() {
+            match self.http_provider.get_code_at(*addr).await {
+                Ok(code) if code.is_empty() => invalid.push(*addr),
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        target: "router",
+                        category,
+                        address = %format!("{:#x}", *addr),
+                        error = %e,
+                        "Failed to validate allowlist entry; dropping"
+                    );
+                    invalid.push(*addr);
+                }
+            }
+        }
+        for addr in invalid.iter() {
+            allowlist.remove(addr);
+        }
+        if !invalid.is_empty() {
+            tracing::warn!(
+                target: "router",
+                category,
+                count = invalid.len(),
+                "Dropped allowlist entries with missing code"
+            );
+        }
+    }
+
     pub async fn run(self) -> Result<(), AppError> {
         if self.flashloan_enabled && self.executor.is_none() {
             return Err(AppError::Config(
@@ -786,86 +821,12 @@ impl Engine {
         }
 
         // Validate categorized allowlists against on-chain code.
-        let mut invalid_routers = Vec::new();
-        for addr in self.router_allowlist.iter() {
-            match self.http_provider.get_code_at(*addr).await {
-                Ok(code) if code.is_empty() => invalid_routers.push(*addr),
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        target: "router",
-                        address = %format!("{:#x}", *addr),
-                        error = %e,
-                        "Failed to validate router; dropping"
-                    );
-                    invalid_routers.push(*addr);
-                }
-            }
-        }
-        for addr in invalid_routers.iter() {
-            self.router_allowlist.remove(addr);
-        }
-        if !invalid_routers.is_empty() {
-            tracing::warn!(
-                target: "router",
-                count = invalid_routers.len(),
-                "Dropped router-category allowlist entries with missing code"
-            );
-        }
-
-        let mut invalid_wrappers = Vec::new();
-        for addr in self.wrapper_allowlist.iter() {
-            match self.http_provider.get_code_at(*addr).await {
-                Ok(code) if code.is_empty() => invalid_wrappers.push(*addr),
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        target: "router",
-                        address = %format!("{:#x}", *addr),
-                        error = %e,
-                        "Failed to validate wrapper; dropping"
-                    );
-                    invalid_wrappers.push(*addr);
-                }
-            }
-        }
-        for addr in invalid_wrappers.iter() {
-            self.wrapper_allowlist.remove(addr);
-        }
-        if !invalid_wrappers.is_empty() {
-            tracing::warn!(
-                target: "router",
-                count = invalid_wrappers.len(),
-                "Dropped wrapper-category allowlist entries with missing code"
-            );
-        }
-
-        let mut invalid_infra = Vec::new();
-        for addr in self.infra_allowlist.iter() {
-            match self.http_provider.get_code_at(*addr).await {
-                Ok(code) if code.is_empty() => invalid_infra.push(*addr),
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        target: "router",
-                        address = %format!("{:#x}", *addr),
-                        error = %e,
-                        "Failed to validate infra; dropping"
-                    );
-                    invalid_infra.push(*addr);
-                }
-            }
-        }
-        for addr in invalid_infra.iter() {
-            self.infra_allowlist.remove(addr);
-        }
-        if !invalid_infra.is_empty() {
-            tracing::warn!(
-                target: "router",
-                count = invalid_infra.len(),
-                "Dropped infra-category allowlist entries with missing code"
-            );
-        }
+        self.prune_allowlist_without_code("routers", &self.router_allowlist)
+            .await;
+        self.prune_allowlist_without_code("wrappers", &self.wrapper_allowlist)
+            .await;
+        self.prune_allowlist_without_code("infra", &self.infra_allowlist)
+            .await;
         let reserve_listener = {
             let cache = reserve_cache.clone();
             let ws_for_cache = self.websocket_provider.clone();
