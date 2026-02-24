@@ -164,22 +164,22 @@ fn default_metrics_port() -> u16 {
     9000
 }
 fn default_slippage_bps() -> u64 {
-    0
+    12
 }
 fn default_profit_guard_base_floor_multiplier_bps() -> u64 {
-    7_000
+    1_000
 }
 fn default_profit_guard_cost_multiplier_bps() -> u64 {
     10_000
 }
 fn default_profit_guard_min_margin_bps() -> u64 {
-    700
+    0
 }
 fn default_liquidity_ratio_floor_ppm() -> u64 {
-    700
+    0
 }
 fn default_sell_min_native_out_wei() -> u64 {
-    3_000_000_000_000
+    1
 }
 fn default_gas_cap_multiplier_bps() -> u64 {
     12_000
@@ -191,7 +191,7 @@ fn default_allow_non_wrapped_swaps() -> bool {
     true
 }
 fn default_sim_backend() -> String {
-    "revm".to_string()
+    "debug_tracecall".to_string()
 }
 fn default_flashloan_provider() -> String {
     "auto,aavev3,balancer".to_string()
@@ -250,7 +250,7 @@ fn default_router_discovery_check_interval_secs() -> u64 {
     300
 }
 fn default_router_discovery_auto_allow() -> bool {
-    true
+    false
 }
 fn default_router_discovery_max_entries() -> usize {
     10_000
@@ -639,23 +639,23 @@ impl GlobalSettings {
 
     pub fn profit_guard_base_floor_multiplier_bps_value(&self) -> u64 {
         self.profit_guard_base_floor_multiplier_bps
-            .clamp(75, 20_000)
+            .clamp(0, 20_000)
     }
 
     pub fn profit_guard_cost_multiplier_bps_value(&self) -> u64 {
-        self.profit_guard_cost_multiplier_bps.clamp(1_000, 20_000)
+        self.profit_guard_cost_multiplier_bps.clamp(0, 20_000)
     }
 
     pub fn profit_guard_min_margin_bps_value(&self) -> u64 {
-        self.profit_guard_min_margin_bps.clamp(35, 5_000)
+        self.profit_guard_min_margin_bps.clamp(0, 5_000)
     }
 
     pub fn liquidity_ratio_floor_ppm_value(&self) -> u64 {
-        self.liquidity_ratio_floor_ppm.clamp(35, 10_000)
+        self.liquidity_ratio_floor_ppm.clamp(0, 10_000)
     }
 
     pub fn sell_min_native_out_wei_value(&self) -> u64 {
-        self.sell_min_native_out_wei.max(500_000_000_000)
+        self.sell_min_native_out_wei.max(1)
     }
 
     pub fn skip_log_every_value(&self) -> u64 {

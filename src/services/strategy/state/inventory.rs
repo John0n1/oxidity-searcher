@@ -269,6 +269,19 @@ impl StrategyExecutor {
         if self.toxic_tokens.contains(&token) {
             return Ok(false);
         }
+        // Toxicity probes are only meaningful when signer has enough inventory to sell.
+        // For flashloan/search paths signer usually has zero balance pre-trade.
+        let signer_token_balance = match ERC20::new(token, self.http_provider.clone())
+            .balanceOf(self.signer.address())
+            .call()
+            .await
+        {
+            Ok(bal) => bal,
+            Err(_) => return Ok(true),
+        };
+        if signer_token_balance < sell_amount {
+            return Ok(true);
+        }
         let approve_calldata = ERC20::new(token, self.http_provider.clone())
             .approve(router, U256::MAX)
             .calldata()

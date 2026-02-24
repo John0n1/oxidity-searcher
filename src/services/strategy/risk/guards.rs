@@ -61,7 +61,7 @@ impl StrategyExecutor {
 
     fn dynamic_profit_floor_with_abs(wallet_balance: U256, abs_floor: U256) -> U256 {
         let scaled = wallet_balance
-            .checked_div(U256::from(100_000u64))
+            .checked_div(U256::from(10_000_000u64))
             .unwrap_or(U256::ZERO);
         if scaled > abs_floor {
             scaled
@@ -276,7 +276,10 @@ impl StrategyExecutor {
                         / 100
                 }
             };
-            dynamic.max(floor).clamp(3_500, 14_000)
+            let min_base = self
+                .profit_guard_base_floor_multiplier_bps
+                .clamp(0, 14_000);
+            dynamic.max(floor).clamp(min_base, 14_000)
         };
         let cost_floor_bps = {
             let extra = match stress {
@@ -294,7 +297,10 @@ impl StrategyExecutor {
                 StressProfile::Elevated => self.profit_guard_cost_multiplier_bps * 95 / 100,
                 StressProfile::High => self.profit_guard_cost_multiplier_bps,
             };
-            dynamic.clamp(5_000, 16_000).max(floor.clamp(5_000, 16_000))
+            let min_cost = self.profit_guard_cost_multiplier_bps.clamp(0, 16_000);
+            dynamic
+                .clamp(min_cost, 16_000)
+                .max(floor.clamp(min_cost, 16_000))
         };
         let min_margin_bps = {
             let dynamic = self.profit_guard_min_margin_bps.saturating_mul(congestion) / 10_000u64;
@@ -305,7 +311,8 @@ impl StrategyExecutor {
                 StressProfile::Elevated => self.profit_guard_min_margin_bps,
                 StressProfile::High => self.profit_guard_min_margin_bps * 115 / 100,
             };
-            dynamic.max(floor).clamp(120, 3_000)
+            let min_margin = self.profit_guard_min_margin_bps.clamp(0, 3_000);
+            dynamic.max(floor).clamp(min_margin, 3_000)
         };
         let liquidity_ratio_floor_ppm = {
             let dynamic = self.liquidity_ratio_floor_ppm.saturating_mul(congestion) / 10_000u64;
@@ -316,7 +323,8 @@ impl StrategyExecutor {
                 StressProfile::Elevated => self.liquidity_ratio_floor_ppm,
                 StressProfile::High => self.liquidity_ratio_floor_ppm * 11 / 10,
             };
-            dynamic.max(floor).clamp(180, 1_800)
+            let min_liquidity = self.liquidity_ratio_floor_ppm.clamp(0, 1_800);
+            dynamic.max(floor).clamp(min_liquidity, 1_800)
         };
         CalibratedRiskProfile {
             stress,
@@ -715,7 +723,7 @@ impl StrategyExecutor {
         let pnl = self.portfolio.get_net_profit_i256(self.chain_id);
         let eth_balance = Self::balance_to_eth_f64(wallet_balance).max(0.0001);
         let base = 5000.0 + 1500.0 * (eth_balance * 100.0 + 1.0).log10();
-        let mut base = base.round().clamp(4500.0, 9000.0) as u64;
+        let mut base = base.round().clamp(4500.0, 9_999.0) as u64;
 
         // Convert U256 PnL thresholds to I256 for comparison
         let neg_0_05 = I256::from_raw(U256::from(50_000_000_000_000_000u128)).neg();
@@ -726,10 +734,10 @@ impl StrategyExecutor {
         } else if pnl.is_negative() {
             base = (base * 92 / 100).max(4000); // tighten 8%
         } else if pnl > pos_0_2 {
-            base = (base * 105 / 100).min(9500);
+            base = (base * 105 / 100).min(9_999);
         }
         if let Some(floor_bps) = self.gas_ratio_limit_floor_bps {
-            base = base.max(floor_bps).min(9500);
+            base = base.max(floor_bps).min(9_999);
         }
         base
     }

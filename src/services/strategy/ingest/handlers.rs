@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
+use crate::common::constants::default_routers_for_chain;
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
 use crate::core::executor::BundleItem;
@@ -958,6 +959,18 @@ impl StrategyExecutor {
             self.log_skip(
                 SkipReason::ToxicToken,
                 &format!("token={:#x}", target_token),
+            );
+            return None;
+        }
+        if Self::strategy_flag_enabled("STRATEGY_REQUIRE_TOKENLIST", true)
+            && self
+                .token_manager
+                .info(self.chain_id, target_token)
+                .is_none()
+        {
+            self.log_skip(
+                SkipReason::DecodeFailed,
+                &format!("token_not_in_tokenlist={:#x}", target_token),
             );
             return None;
         }
@@ -2028,8 +2041,221 @@ impl StrategyExecutor {
         {
             Ok(b) => b,
             Err(e) => {
-                self.log_skip(SkipReason::BackrunBuildFailed, &e.to_string());
-                return Ok(None);
+                let err_msg = e.to_string();
+                let flashloan_insolvent_like = use_flashloan
+                    && (err_msg.contains("Flashloan quoted roundtrip insolvent")
+                        || err_msg.contains("Flashloan quoted V3 roundtrip insolvent")
+                        || err_msg.contains("Flashloan prefilter failed")
+                        || err_msg.contains("Flashloan V3 prefilter failed"));
+
+                let recovered_flashloan_scaled: Option<BackrunTx> = 'adaptive_retry: {
+                    if !flashloan_insolvent_like {
+                        break 'adaptive_retry None;
+                    }
+                    // Borderline insolvency often clears at lower notional; retry with
+                    // progressively smaller effective sizing before hard-skipping.
+                    let retry_scales_bps = [8_000u64, 6_000, 4_500, 3_000, 2_000, 1_500, 1_000];
+                    for scale_bps in retry_scales_bps {
+                        let retry_trade_balance = trade_balance
+                            .saturating_mul(U256::from(scale_bps))
+                            .checked_div(U256::from(10_000u64))
+                            .unwrap_or(trade_balance);
+                        if retry_trade_balance.is_zero() || retry_trade_balance >= trade_balance {
+                            continue;
+                        }
+                        match self
+                            .build_backrun_tx(
+                                observed_swap,
+                                &gas_fees,
+                                retry_trade_balance,
+                                gas_limit_hint,
+                                front_run.as_ref().map(|f| f.expected_tokens),
+                                true,
+                                0,
+                            )
+                            .await
+                        {
+                            Ok(backrun) => {
+                                tracing::debug!(
+                                    target: "strategy",
+                                    initial_error = %err_msg,
+                                    original_trade_balance = %trade_balance,
+                                    retry_trade_balance = %retry_trade_balance,
+                                    scale_bps,
+                                    "Recovered flashloan backrun via adaptive notional downshift"
+                                );
+                                break 'adaptive_retry Some(backrun);
+                            }
+                            Err(inner) => {
+                                tracing::debug!(
+                                    target: "strategy",
+                                    scale_bps,
+                                    retry_trade_balance = %retry_trade_balance,
+                                    retry_error = %inner,
+                                    "Adaptive flashloan downshift retry failed"
+                                );
+                            }
+                        }
+                    }
+                    None
+                };
+
+                if let Some(backrun) = recovered_flashloan_scaled {
+                    backrun
+                } else {
+                    let mut recovered_non_flash: Option<BackrunTx> = None;
+                    let allow_non_flash_fallback =
+                        Self::strategy_flag_enabled("FLASHLOAN_ALLOW_NONFLASH_FALLBACK", false);
+                    if use_flashloan && allow_non_flash_fallback {
+                        match self
+                            .build_backrun_tx(
+                                observed_swap,
+                                &gas_fees,
+                                wallet_chain_balance,
+                                gas_limit_hint,
+                                front_run.as_ref().map(|f| f.expected_tokens),
+                                false,
+                                0,
+                            )
+                            .await
+                        {
+                            Ok(backrun) => {
+                                tracing::debug!(
+                                    target: "strategy",
+                                    flashloan_error = %err_msg,
+                                    "Recovered candidate via non-flashloan fallback after flashloan build failure"
+                                );
+                                recovered_non_flash = Some(backrun);
+                            }
+                            Err(non_flash_err) => {
+                                tracing::debug!(
+                                    target: "strategy",
+                                    flashloan_error = %err_msg,
+                                    non_flash_error = %non_flash_err,
+                                    "Flashloan-first build failed and non-flashloan fallback also failed"
+                                );
+                            }
+                        }
+                    } else if use_flashloan {
+                        tracing::debug!(
+                            target: "strategy",
+                            flashloan_error = %err_msg,
+                            "Flashloan build failed and non-flashloan fallback is disabled"
+                        );
+                    }
+
+                    if let Some(backrun) = recovered_non_flash {
+                        backrun
+                    } else {
+                        let is_v3_liquidity_err = observed_swap.router_kind == RouterKind::V3Like
+                            && err_msg.contains("V3 liquidity too low");
+                        if !is_v3_liquidity_err {
+                            self.log_skip(SkipReason::BackrunBuildFailed, &err_msg);
+                            return Ok(None);
+                        }
+
+                        let routers = default_routers_for_chain(self.chain_id);
+                        let mut alt_v2_candidates: Vec<(u8, String, Address)> = routers
+                            .iter()
+                            .filter_map(|(name, addr)| {
+                                let n = name.to_ascii_lowercase();
+                                let is_non_v2_surface = n.contains("universal")
+                                    || n.contains("aggregation")
+                                    || n.contains("aggregator")
+                                    || n.contains("proxy")
+                                    || n.contains("permit")
+                                    || n.contains("quoter")
+                                    || n.contains("vault")
+                                    || n.contains("relay");
+                                if is_non_v2_surface {
+                                    return None;
+                                }
+                                let priority = match n.as_str() {
+                                    "uniswap_v2_router02" | "uniswap_v2_router" => Some(0),
+                                    "sushiswap_router" => Some(1),
+                                    "pancakeswap_v2_router" => Some(2),
+                                    _ => {
+                                        let generic_v2 = (n.contains("v2_router")
+                                            || n.contains("router_v2"))
+                                            && !n.contains("universal");
+                                        if generic_v2 { Some(10) } else { None }
+                                    }
+                                }?;
+                                Some((priority, n, *addr))
+                            })
+                            .collect();
+                        alt_v2_candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+                        let mut alt_v2_routers: Vec<Address> = Vec::new();
+                        for (_, _, addr) in alt_v2_candidates {
+                            if !alt_v2_routers.contains(&addr) {
+                                alt_v2_routers.push(addr);
+                            }
+                        }
+                        if alt_v2_routers.is_empty() {
+                            self.log_skip(SkipReason::BackrunBuildFailed, &err_msg);
+                            return Ok(None);
+                        }
+
+                        let mut fallback_errors: Vec<String> = Vec::new();
+                        let recovered_backrun = 'fallback: {
+                            for alt_router in alt_v2_routers {
+                                let mut alt_observed = observed_swap.clone();
+                                alt_observed.router_kind = RouterKind::V2Like;
+                                alt_observed.router = alt_router;
+                                alt_observed.v3_fees.clear();
+                                alt_observed.v3_path = None;
+                                let token_in = observed_swap
+                                    .path
+                                    .first()
+                                    .copied()
+                                    .unwrap_or(self.wrapped_native);
+                                let token_out =
+                                    observed_swap.path.last().copied().unwrap_or(target_token);
+                                alt_observed.path = vec![token_in, token_out];
+
+                                match self
+                                    .build_backrun_tx(
+                                        &alt_observed,
+                                        &gas_fees,
+                                        trade_balance,
+                                        gas_limit_hint,
+                                        front_run.as_ref().map(|f| f.expected_tokens),
+                                        use_flashloan,
+                                        0,
+                                    )
+                                    .await
+                                {
+                                    Ok(backrun) => break 'fallback Some((alt_router, backrun)),
+                                    Err(inner) => {
+                                        fallback_errors
+                                            .push(format!("router={:#x}: {}", alt_router, inner));
+                                    }
+                                }
+                            }
+                            None
+                        };
+
+                        if let Some((alt_router, backrun)) = recovered_backrun {
+                            tracing::debug!(
+                                target: "strategy",
+                                fallback_router = %format!("{:#x}", alt_router),
+                                original_router = %format!("{:#x}", observed_swap.router),
+                                "Recovered backrun via automatic V2 fallback route"
+                            );
+                            backrun
+                        } else {
+                            self.log_skip(
+                                SkipReason::BackrunBuildFailed,
+                                &format!(
+                                    "{}; v2_fallback_failed=[{}]",
+                                    err_msg,
+                                    fallback_errors.join(" | ")
+                                ),
+                            );
+                            return Ok(None);
+                        }
+                    }
+                }
             }
         };
 

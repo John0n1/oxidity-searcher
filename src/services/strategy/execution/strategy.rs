@@ -4,6 +4,7 @@
 use crate::app::logging::{
     ansi_tables_enabled, format_framed_table, format_framed_table_with_blue_title,
 };
+use crate::common::constants::default_routers_for_chain;
 use crate::common::error::AppError;
 use crate::common::parsing::parse_boolish;
 use crate::core::executor::SharedBundleSender;
@@ -954,6 +955,11 @@ impl StrategyExecutor {
         &self,
         observed: &ObservedSwap,
     ) -> Address {
+        if Self::env_bool("FORCE_CANONICAL_EXEC_ROUTER", false)
+            && let Some(exec_router) = self.canonical_exec_router_for_kind(observed.router_kind)
+        {
+            return exec_router;
+        }
         if self.universal_routers.contains(&observed.router) {
             match observed.router_kind {
                 crate::services::strategy::decode::RouterKind::V2Like => {
@@ -1007,9 +1013,20 @@ impl StrategyExecutor {
         &self,
         kind: RouterKind,
     ) -> Option<Address> {
+        let chain_defaults = default_routers_for_chain(self.chain_id);
         match kind {
-            RouterKind::V2Like => self.exec_router_v2,
-            RouterKind::V3Like => self.exec_router_v3,
+            RouterKind::V2Like => self.exec_router_v2.or_else(|| {
+                chain_defaults
+                    .get("UNISWAP_V2_ROUTER02")
+                    .copied()
+                    .or_else(|| chain_defaults.get("UNISWAP_V2_ROUTER").copied())
+            }),
+            RouterKind::V3Like => self.exec_router_v3.or_else(|| {
+                chain_defaults
+                    .get("UNISWAP_V3_ROUTER")
+                    .copied()
+                    .or_else(|| chain_defaults.get("UNISWAP_V3_ROUTER02").copied())
+            }),
         }
     }
 
@@ -1156,12 +1173,8 @@ impl StrategyExecutor {
             .ok()
             .and_then(|v| v.trim().parse::<f64>().ok())
             .and_then(f64_native_to_wei)
-            .unwrap_or(*constants::MIN_PROFIT_THRESHOLD_WEI);
-        let default_mult_gas = if chain_id == constants::CHAIN_ETHEREUM {
-            15u64
-        } else {
-            10u64
-        };
+            .unwrap_or(U256::ZERO);
+        let default_mult_gas = 1u64;
         let profit_floor_mult_gas = std::env::var("PROFIT_FLOOR_MULT_GAS")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
@@ -1174,7 +1187,7 @@ impl StrategyExecutor {
         let gas_ratio_limit_floor_bps = std::env::var("GAS_RATIO_LIMIT_FLOOR_BPS")
             .ok()
             .and_then(|v| v.trim().parse::<u64>().ok())
-            .map(|v| v.clamp(3_500, 9_500));
+            .map(|v| v.clamp(0, 9_999));
         let universal_router = constants::default_uniswap_universal_router(chain_id);
         let mut universal_routers: HashSet<Address> =
             constants::default_uniswap_universal_routers(chain_id)
@@ -1220,11 +1233,11 @@ impl StrategyExecutor {
             nonce_manager,
             slippage_bps,
             profit_guard_base_floor_multiplier_bps: profit_guard_base_floor_multiplier_bps
-                .clamp(75, 20_000),
-            profit_guard_cost_multiplier_bps: profit_guard_cost_multiplier_bps.clamp(1_000, 20_000),
-            profit_guard_min_margin_bps: profit_guard_min_margin_bps.clamp(35, 5_000),
-            liquidity_ratio_floor_ppm: liquidity_ratio_floor_ppm.clamp(35, 10_000),
-            sell_min_native_out_wei: sell_min_native_out_wei.max(500_000_000_000),
+                .clamp(0, 20_000),
+            profit_guard_cost_multiplier_bps: profit_guard_cost_multiplier_bps.clamp(0, 20_000),
+            profit_guard_min_margin_bps: profit_guard_min_margin_bps.clamp(0, 5_000),
+            liquidity_ratio_floor_ppm: liquidity_ratio_floor_ppm.clamp(0, 10_000),
+            sell_min_native_out_wei: sell_min_native_out_wei.max(1),
             http_provider,
             dry_run,
             router_allowlist,
@@ -1456,6 +1469,19 @@ impl StrategyExecutor {
             Some(t) => t,
             None => return Ok(true),
         };
+        // Toxicity probe requires signer inventory to emulate a real sell path.
+        // Skip probing for flashloan/search flows where signer has no pre-trade tokens.
+        let signer_token_balance = match ERC20::new(token_in, self.http_provider.clone())
+            .balanceOf(self.signer.address())
+            .call()
+            .await
+        {
+            Ok(bal) => bal,
+            Err(_) => return Ok(true),
+        };
+        if signer_token_balance < amount_in {
+            return Ok(true);
+        }
         let approve_calldata = ERC20::new(token_in, self.http_provider.clone())
             .approve(router, amount_in)
             .calldata()
