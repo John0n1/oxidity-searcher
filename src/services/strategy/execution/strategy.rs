@@ -402,6 +402,7 @@ pub struct StrategyExecutor {
     pub(in crate::services::strategy) inventory_tokens: DashSet<Address>,
     pub(in crate::services::strategy) toxic_tokens: DashSet<Address>,
     pub(in crate::services::strategy) toxic_probe_failures: DashMap<Address, (u32, Instant)>,
+    pub(in crate::services::strategy) flashloan_asset_scale_bps: DashMap<Address, u64>,
     pub(in crate::services::strategy) executor: Option<Address>,
     pub(in crate::services::strategy) executor_bribe_bps: u64,
     pub(in crate::services::strategy) executor_bribe_recipient: Option<Address>,
@@ -440,6 +441,15 @@ impl StrategyExecutor {
             .clamp(min, max)
     }
 
+    fn env_f64_bounded(key: &str, default: f64, min: f64, max: f64) -> f64 {
+        std::env::var(key)
+            .ok()
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .filter(|v| v.is_finite())
+            .unwrap_or(default)
+            .clamp(min, max)
+    }
+
     fn env_u32_bounded(key: &str, default: u32, min: u32, max: u32) -> u32 {
         std::env::var(key)
             .ok()
@@ -462,6 +472,69 @@ impl StrategyExecutor {
             .as_deref()
             .and_then(parse_boolish)
             .unwrap_or(default)
+    }
+
+    pub(in crate::services::strategy) fn flashloan_adaptive_scale_enabled(&self) -> bool {
+        Self::env_bool("FLASHLOAN_ADAPTIVE_SCALE_ENABLED", true)
+    }
+
+    pub(in crate::services::strategy) fn flashloan_adaptive_min_scale_bps(&self) -> u64 {
+        Self::env_u64_bounded("FLASHLOAN_ADAPTIVE_MIN_SCALE_BPS", 1_500, 500, 10_000)
+    }
+
+    pub(in crate::services::strategy) fn flashloan_adaptive_downshift_step_bps(&self) -> u64 {
+        Self::env_u64_bounded("FLASHLOAN_ADAPTIVE_DOWNSHIFT_STEP_BPS", 700, 50, 5_000)
+    }
+
+    pub(in crate::services::strategy) fn flashloan_asset_scale_bps(&self, asset: Address) -> u64 {
+        self.flashloan_asset_scale_bps
+            .get(&asset)
+            .map(|v| *v)
+            .unwrap_or(10_000)
+            .clamp(self.flashloan_adaptive_min_scale_bps(), 10_000)
+    }
+
+    pub(in crate::services::strategy) fn apply_adaptive_flashloan_scale(
+        &self,
+        amount: U256,
+        asset: Address,
+    ) -> U256 {
+        if amount.is_zero() || !self.flashloan_adaptive_scale_enabled() {
+            return amount;
+        }
+        let scale_bps = self.flashloan_asset_scale_bps(asset);
+        if scale_bps >= 10_000 {
+            return amount;
+        }
+        amount
+            .saturating_mul(U256::from(scale_bps))
+            .checked_div(U256::from(10_000u64))
+            .unwrap_or(amount)
+    }
+
+    pub(in crate::services::strategy) fn record_flashloan_insolvency(
+        &self,
+        asset: Address,
+        reason: &str,
+    ) -> u64 {
+        let min_bps = self.flashloan_adaptive_min_scale_bps();
+        let step_bps = self.flashloan_adaptive_downshift_step_bps();
+        let updated = {
+            let mut entry = self.flashloan_asset_scale_bps.entry(asset).or_insert(10_000u64);
+            let next = entry.saturating_sub(step_bps).clamp(min_bps, 10_000);
+            *entry = next;
+            next
+        };
+        tracing::debug!(
+            target: "strategy",
+            asset = %format!("{asset:#x}"),
+            scale_bps = updated,
+            min_scale_bps = min_bps,
+            step_bps = step_bps,
+            reason = %reason,
+            "Adaptive flashloan notional downshift recorded after insolvency-like failure"
+        );
+        updated
     }
 
     pub(in crate::services::strategy) fn router_risk_min_samples(&self) -> u64 {
@@ -561,10 +634,12 @@ impl StrategyExecutor {
 
     pub(in crate::services::strategy) fn balance_cap_multiplier_bps(&self, balance: U256) -> u64 {
         let eth_balance = wei_to_eth_f64(balance).max(0.0001);
+        let curve_k = Self::env_f64_bounded("BALANCE_CAP_CURVE_K", 0.8, 0.01, 10.0);
+        let min_bps = Self::env_u64_bounded("BALANCE_CAP_MIN_BPS", 8_000, 1, 20_000) as f64;
+        let max_bps = Self::env_u64_bounded("BALANCE_CAP_MAX_BPS", 14_000, 1, 20_000)
+            .max(min_bps as u64) as f64;
         let sqrt = eth_balance.sqrt();
-        let scale = sqrt / (sqrt + 0.8);
-        let min_bps = 8_000.0;
-        let max_bps = 14_000.0;
+        let scale = sqrt / (sqrt + curve_k);
         let bps = min_bps + (max_bps - min_bps) * scale;
         bps.round().clamp(min_bps, max_bps) as u64
     }
@@ -575,9 +650,15 @@ impl StrategyExecutor {
         }
         let wallet_balance = self.portfolio.get_eth_balance_cached(self.chain_id);
         let eth_balance = wei_to_eth_f64(wallet_balance).max(0.0001);
-        let base = 120.0 - 30.0 * (eth_balance * 100.0 + 1.0).log10();
+        let base_bps = Self::env_f64_bounded("AUTO_SLIPPAGE_BASE_BPS", 120.0, 1.0, 5_000.0);
+        let log_slope =
+            Self::env_f64_bounded("AUTO_SLIPPAGE_BALANCE_LOG_SLOPE", 30.0, 0.0, 500.0);
+        let balance_scale =
+            Self::env_f64_bounded("AUTO_SLIPPAGE_BALANCE_SCALE", 100.0, 1.0, 10_000.0);
+        let base = base_bps - log_slope * (eth_balance * balance_scale + 1.0).log10();
         let volatility = self.price_feed.volatility_bps_cached("ETH").unwrap_or(0) as f64;
-        let vol_adjust = volatility * 0.35;
+        let vol_mult_bps = Self::env_u64_bounded("AUTO_SLIPPAGE_VOL_MULT_BPS", 3_500, 0, 50_000);
+        let vol_adjust = volatility * (vol_mult_bps as f64) / 10_000f64;
         let mut slippage = base + vol_adjust;
         if let Some(gas_fees) = self.cached_gas_fees() {
             let stress_mult_bps = match self.classify_stress_profile(&gas_fees) {
@@ -589,7 +670,12 @@ impl StrategyExecutor {
             } as f64;
             slippage *= stress_mult_bps / 10_000f64;
         }
-        slippage.round().clamp(15.0, 500.0) as u64
+        let min_slippage = Self::env_u64_bounded("AUTO_SLIPPAGE_MIN_BPS", 15, 1, 9_999);
+        let max_slippage =
+            Self::env_u64_bounded("AUTO_SLIPPAGE_MAX_BPS", 500, min_slippage, 9_999);
+        slippage
+            .round()
+            .clamp(min_slippage as f64, max_slippage as f64) as u64
     }
 
     pub(in crate::services::strategy) fn max_price_impact_bps(&self) -> u64 {
@@ -1254,6 +1340,7 @@ impl StrategyExecutor {
             inventory_tokens: DashSet::new(),
             toxic_tokens: DashSet::new(),
             toxic_probe_failures: DashMap::new(),
+            flashloan_asset_scale_bps: DashMap::new(),
             executor,
             executor_bribe_bps,
             executor_bribe_recipient,
@@ -2365,6 +2452,23 @@ mod tests {
         exec.boost_fees(&mut fees, None, None);
         assert_eq!(fees.max_fee_per_gas, 19_800_000_000);
         assert_eq!(fees.max_priority_fee_per_gas, 0);
+    }
+
+    #[tokio::test]
+    async fn flashloan_adaptive_scale_downshifts_after_insolvency() {
+        let exec = dummy_executor_for_tests().await;
+        let asset = weth_mainnet();
+        let before = exec.flashloan_asset_scale_bps(asset);
+        let expected = before
+            .saturating_sub(exec.flashloan_adaptive_downshift_step_bps())
+            .clamp(exec.flashloan_adaptive_min_scale_bps(), 10_000);
+        let after = exec.record_flashloan_insolvency(asset, "INSOLVENT");
+        assert_eq!(after, expected);
+        assert_eq!(exec.flashloan_asset_scale_bps(asset), expected);
+
+        let amount = U256::from(10_000u64);
+        let scaled = exec.apply_adaptive_flashloan_scale(amount, asset);
+        assert_eq!(scaled, U256::from(expected));
     }
 
     pub(crate) async fn dummy_executor_for_tests() -> StrategyExecutor {

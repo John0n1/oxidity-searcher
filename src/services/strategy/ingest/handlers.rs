@@ -63,6 +63,28 @@ impl StrategyExecutor {
             .unwrap_or(default)
     }
 
+    fn deadline_min_seconds_ahead() -> u64 {
+        Self::env_u64_bounded_local("DEADLINE_MIN_SECONDS_AHEAD", 2, 0, 300)
+    }
+
+    fn deadline_allow_past_secs() -> u64 {
+        Self::env_u64_bounded_local("DEADLINE_ALLOW_PAST_SECS", 0, 0, 900)
+    }
+
+    fn deadline_guard_threshold(now: u64) -> u64 {
+        now.saturating_add(Self::deadline_min_seconds_ahead())
+            .saturating_sub(Self::deadline_allow_past_secs())
+    }
+
+    fn simulation_failure_is_flashloan_insolvency_like(detail: &str) -> bool {
+        let d = detail.to_ascii_lowercase();
+        d.contains("insolvent")
+            || d.contains("insufficientfundsforrepayment")
+            || d.contains("transfer_from_failed")
+            || d.contains("standard revert: stf")
+            || d.contains("stf")
+    }
+
     fn record_sim_latency_ms(&self, source: &'static str, started_at: std::time::Instant) {
         let sim_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         self.stats.record_sim_latency(source, sim_ms);
@@ -521,7 +543,11 @@ impl StrategyExecutor {
         let main_gas = main_req.gas.unwrap_or(main_default).clamp(100_000, 500_000);
         planned = planned.saturating_add(main_gas);
 
-        if backrun.uses_flashloan {
+        if backrun.uses_flashloan
+            // Flashloan requests produced by planner already include provider overhead
+            // inside the request gas limit. Avoid double-counting that overhead here.
+            && main_req.gas.is_none()
+        {
             planned = planned.saturating_add(backrun.flashloan_overhead_gas.max(50_000));
         }
 
@@ -1042,10 +1068,15 @@ impl StrategyExecutor {
     ) -> Result<Option<String>, AppError> {
         if let Some(deadline) = extract_swap_deadline(tx.input()) {
             let now = crate::services::strategy::time_utils::current_unix();
-            if deadline <= now.saturating_add(2) {
+            let threshold = Self::deadline_guard_threshold(now);
+            if deadline <= threshold {
                 self.log_skip(
                     SkipReason::SimulationFailed,
-                    &format!("victim_deadline_passed deadline={deadline} now={now}"),
+                    &format!(
+                        "victim_deadline_passed deadline={deadline} now={now} threshold={threshold} min_ahead={} allow_past={}",
+                        Self::deadline_min_seconds_ahead(),
+                        Self::deadline_allow_past_secs()
+                    ),
                 );
                 return Ok(None);
             }
@@ -1422,10 +1453,15 @@ impl StrategyExecutor {
     ) -> Result<Option<String>, AppError> {
         if let Some(deadline) = extract_swap_deadline(&hint.call_data) {
             let now = crate::services::strategy::time_utils::current_unix();
-            if deadline <= now.saturating_add(2) {
+            let threshold = Self::deadline_guard_threshold(now);
+            if deadline <= threshold {
                 self.log_skip(
                     SkipReason::SimulationFailed,
-                    &format!("hint_deadline_passed deadline={deadline} now={now}"),
+                    &format!(
+                        "hint_deadline_passed deadline={deadline} now={now} threshold={threshold} min_ahead={} allow_past={}",
+                        Self::deadline_min_seconds_ahead(),
+                        Self::deadline_allow_past_secs()
+                    ),
                 );
                 return Ok(None);
             }
@@ -2046,7 +2082,17 @@ impl StrategyExecutor {
                     && (err_msg.contains("Flashloan quoted roundtrip insolvent")
                         || err_msg.contains("Flashloan quoted V3 roundtrip insolvent")
                         || err_msg.contains("Flashloan prefilter failed")
-                        || err_msg.contains("Flashloan V3 prefilter failed"));
+                        || err_msg.contains("Flashloan V3 prefilter failed")
+                        || err_msg.contains("Flashloan same-router roundtrip non-positive")
+                        || err_msg.contains("Flashloan same-router V3 roundtrip non-positive"));
+                if flashloan_insolvent_like {
+                    let flashloan_asset = observed_swap
+                        .path
+                        .first()
+                        .copied()
+                        .unwrap_or(self.wrapped_native);
+                    self.record_flashloan_insolvency(flashloan_asset, &err_msg);
+                }
 
                 let recovered_flashloan_scaled: Option<BackrunTx> = 'adaptive_retry: {
                     if !flashloan_insolvent_like {
@@ -2147,9 +2193,11 @@ impl StrategyExecutor {
                     if let Some(backrun) = recovered_non_flash {
                         backrun
                     } else {
-                        let is_v3_liquidity_err = observed_swap.router_kind == RouterKind::V3Like
-                            && err_msg.contains("V3 liquidity too low");
-                        if !is_v3_liquidity_err {
+                        let is_v3_fallback_eligible = observed_swap.router_kind == RouterKind::V3Like
+                            && (err_msg.contains("V3 liquidity too low")
+                                || err_msg.contains("Flashloan same-router V3 roundtrip non-positive")
+                                || err_msg.contains("Flashloan quoted V3 roundtrip insolvent"));
+                        if !is_v3_fallback_eligible {
                             self.log_skip(SkipReason::BackrunBuildFailed, &err_msg);
                             return Ok(None);
                         }
@@ -2544,6 +2592,12 @@ impl StrategyExecutor {
                 );
             }
             self.log_skip(SkipReason::SimulationFailed, &detail);
+            if backrun.uses_flashloan
+                && Self::simulation_failure_is_flashloan_insolvency_like(&detail)
+                && let Ok(asset) = failed_flashloan_asset.parse::<Address>()
+            {
+                self.record_flashloan_insolvency(asset, &detail);
+            }
             tracing::debug!(
                 target: "simulation",
                 fail_idx = failed_idx,
@@ -2908,5 +2962,40 @@ mod tests {
         let attributed =
             StrategyExecutor::simulation_failure_is_router_attributable(detail, None, router);
         assert!(!attributed);
+    }
+
+    #[tokio::test]
+    async fn adaptive_min_bundle_gas_avoids_flashloan_overhead_double_count_when_gas_is_set() {
+        let exec = dummy_executor_for_tests().await;
+        let backrun = BackrunTx {
+            raw: Vec::new(),
+            hash: B256::ZERO,
+            to: Address::from([0x33; 20]),
+            value: U256::ZERO,
+            request: TransactionRequest {
+                gas: Some(500_000),
+                ..Default::default()
+            },
+            expected_out: U256::ZERO,
+            expected_out_token: Address::ZERO,
+            unwrap_to_native: false,
+            uses_flashloan: true,
+            flashloan_premium: U256::ZERO,
+            flashloan_overhead_gas: 200_000,
+            router_kind: crate::services::strategy::decode::RouterKind::V2Like,
+            route_plan: None,
+        };
+
+        let planned = exec.adaptive_min_bundle_gas_from_plan(
+            120_000,
+            220_000,
+            &[],
+            &None,
+            &backrun,
+            &None,
+        );
+
+        // 500k main gas with 5% headroom; no extra flashloan overhead should be added.
+        assert_eq!(planned, 525_000);
     }
 }

@@ -154,6 +154,16 @@ impl StrategyExecutor {
         }
     }
 
+    fn reject_same_router_negative_roundtrip() -> bool {
+        std::env::var("FLASHLOAN_REJECT_SAME_ROUTER_NEGATIVE")
+            .ok()
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                matches!(v.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(true)
+    }
+
     fn registry_v2_router_candidates(chain_id: u64) -> Vec<Address> {
         let routers = default_routers_for_chain(chain_id);
         let mut candidates: Vec<(u8, String, Address)> = routers
@@ -1260,13 +1270,19 @@ impl StrategyExecutor {
                         )?,
                     };
                     if use_flashloan && has_wrapped {
-                        let scaled = Self::maybe_scale_flashloan_value(value);
+                        let flashloan_asset =
+                            observed.path.first().copied().unwrap_or(self.wrapped_native);
+                        let env_scaled = Self::maybe_scale_flashloan_value(value);
+                        let scaled = self.apply_adaptive_flashloan_scale(env_scaled, flashloan_asset);
                         if scaled < value {
+                            let adaptive_scale_bps = self.flashloan_asset_scale_bps(flashloan_asset);
                             tracing::debug!(
                                 target: "strategy",
                                 original = %value,
                                 scaled = %scaled,
                                 scale_bps = Self::flashloan_value_scale_bps(),
+                                adaptive_scale_bps,
+                                asset = %format!("{flashloan_asset:#x}"),
                                 "Scaled flashloan notional for safer roundtrip viability"
                             );
                             value = scaled;
@@ -1330,6 +1346,12 @@ impl StrategyExecutor {
                                 else {
                                     continue;
                                 };
+                                if Self::reject_same_router_negative_roundtrip()
+                                    && candidate_forward_router == candidate_reverse_router
+                                    && reverse_quote <= value
+                                {
+                                    continue;
+                                }
                                 let any_better = best_any_roundtrip
                                     .map(|(_, _, out)| reverse_quote > out)
                                     .unwrap_or(true);
@@ -1547,6 +1569,17 @@ impl StrategyExecutor {
                             value.saturating_mul(U256::from(9_980u64)) / U256::from(10_000u64)
                         });
                         if use_flashloan {
+                            if Self::reject_same_router_negative_roundtrip()
+                                && forward_router == reverse_router
+                                && reverse_expected_out <= value
+                            {
+                                return Err(AppError::Strategy(format!(
+                                    "Flashloan same-router roundtrip non-positive: expected_out={} principal={} router={:#x}",
+                                    reverse_expected_out,
+                                    value,
+                                    forward_router
+                                )));
+                            }
                             if !self.dry_run
                                 && !self
                                     .probe_v2_sell_for_toxicity(
@@ -1822,13 +1855,19 @@ impl StrategyExecutor {
                         )?,
                     };
                     if use_flashloan && has_wrapped {
-                        let scaled = Self::maybe_scale_flashloan_value(value);
+                        let flashloan_asset =
+                            observed.path.first().copied().unwrap_or(self.wrapped_native);
+                        let env_scaled = Self::maybe_scale_flashloan_value(value);
+                        let scaled = self.apply_adaptive_flashloan_scale(env_scaled, flashloan_asset);
                         if scaled < value {
+                            let adaptive_scale_bps = self.flashloan_asset_scale_bps(flashloan_asset);
                             tracing::debug!(
                                 target: "strategy",
                                 original = %value,
                                 scaled = %scaled,
                                 scale_bps = Self::flashloan_value_scale_bps(),
+                                adaptive_scale_bps,
+                                asset = %format!("{flashloan_asset:#x}"),
                                 "Scaled flashloan notional for safer roundtrip viability"
                             );
                             value = scaled;
@@ -1871,6 +1910,16 @@ impl StrategyExecutor {
                         let reverse_expected_out =
                             self.quote_v3_path(&reverse_path, reverse_amount_in).await?;
                         if use_flashloan {
+                            if Self::reject_same_router_negative_roundtrip()
+                                && reverse_expected_out <= value
+                            {
+                                return Err(AppError::Strategy(format!(
+                                    "Flashloan same-router V3 roundtrip non-positive: expected_out={} principal={} router={:#x}",
+                                    reverse_expected_out,
+                                    value,
+                                    exec_router
+                                )));
+                            }
                             if !self.dry_run
                                 && !self
                                     .probe_v3_sell_for_toxicity(
