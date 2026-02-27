@@ -36,6 +36,7 @@ pub enum BundleItem {
 /// Sends bundles or raw transactions to the network/relays.
 pub struct BundleSender {
     provider: HttpProvider,
+    relay_client: reqwest::Client,
     dry_run: bool,
     relay_url: String,
     mev_share_relay_url: String,
@@ -44,6 +45,7 @@ pub struct BundleSender {
     stats: Arc<StrategyStats>,
     use_replacement_uuid: bool,
     cancel_previous_bundle: bool,
+    target_blocks: u64,
     relay_replacement_uuids: StdMutex<HashMap<String, String>>,
 }
 
@@ -54,6 +56,7 @@ const DEFAULT_MEVSHARE_BUILDERS: [&str; 4] = ["flashbots", "beaverbuild.org", "r
 impl BundleSender {
     pub fn new(
         provider: HttpProvider,
+        relay_client: reqwest::Client,
         dry_run: bool,
         relay_url: String,
         mev_share_relay_url: String,
@@ -62,6 +65,7 @@ impl BundleSender {
         stats: Arc<StrategyStats>,
         use_replacement_uuid: bool,
         cancel_previous_bundle: bool,
+        target_blocks: u64,
     ) -> Self {
         let mut builders: Vec<String> = mevshare_builders
             .into_iter()
@@ -76,6 +80,7 @@ impl BundleSender {
         }
         Self {
             provider,
+            relay_client,
             dry_run,
             relay_url,
             mev_share_relay_url,
@@ -84,6 +89,7 @@ impl BundleSender {
             stats,
             use_replacement_uuid,
             cancel_previous_bundle,
+            target_blocks: target_blocks.clamp(1, 5),
             relay_replacement_uuids: StdMutex::new(HashMap::new()),
         }
     }
@@ -96,13 +102,15 @@ impl BundleSender {
         relay_name: Option<&str>,
         retry_context: &str,
     ) -> Result<(reqwest::StatusCode, String, u64, bool), (AppError, u64, bool)> {
-        let client = reqwest::Client::new();
         let mut attempts = 0u64;
         let mut saw_timeout = false;
 
         loop {
             attempts += 1;
-            let mut request = client.post(url).header("Content-Type", "application/json");
+            let mut request = self
+                .relay_client
+                .post(url)
+                .header("Content-Type", "application/json");
             if let Some(sig) = signature_header {
                 let sig = HeaderValue::from_str(sig).map_err(|e| {
                     (
@@ -425,11 +433,7 @@ impl BundleSender {
             self.provider.get_block_number().await.map_err(|e| {
                 AppError::Connection(format!("Failed to fetch block number: {}", e))
             })?;
-        let target_blocks = std::env::var("BUNDLE_TARGET_BLOCKS")
-            .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .unwrap_or(1)
-            .clamp(1, 5);
+        let target_blocks = self.target_blocks;
 
         let relays: Vec<(String, bool, String)> = vec![
             (self.relay_url.clone(), true, "flashbots".to_string()),
@@ -720,8 +724,8 @@ impl BundleSender {
             serde_json::to_vec(&payload).map_err(|e| AppError::Initialization(e.to_string()))?;
         let sig_header = self.sign_request(&body_bytes)?;
 
-        let client = reqwest::Client::new();
-        let resp = client
+        let resp = self
+            .relay_client
             .post(url)
             .header("Content-Type", "application/json")
             .header(
@@ -899,6 +903,7 @@ mod tests {
         let stats = Arc::new(StrategyStats::default());
         BundleSender::new(
             provider,
+            reqwest::Client::new(),
             true,
             "https://relay.flashbots.net".to_string(),
             "https://mev-share.flashbots.net".to_string(),
@@ -912,6 +917,7 @@ mod tests {
             stats,
             true,
             false,
+            1,
         )
     }
 

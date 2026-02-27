@@ -7,7 +7,9 @@ use crate::core::executor::{BundleSender, SharedBundleSender};
 use crate::core::portfolio::PortfolioManager;
 use crate::core::safety::SafetyGuard;
 use crate::core::simulation::{RpcCapabilities, Simulator};
-use crate::core::strategy::{StrategyExecutor, StrategyStats};
+use crate::core::strategy::{
+    StrategyConfig, StrategyExecutor, StrategyRuntimeSettings, StrategyStats,
+};
 use crate::data::db::Database;
 use crate::infrastructure::data::address_registry::AddressRegistry;
 use crate::infrastructure::data::token_manager::TokenManager;
@@ -27,6 +29,7 @@ use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use alloy_rpc_client::NoParams;
 use dashmap::DashSet;
+use reqwest::Client;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -36,10 +39,6 @@ use tokio::time::{Duration, sleep};
 use tokio_util::sync::CancellationToken;
 
 const INGEST_QUEUE_BOUND: usize = 2048;
-const DEFAULT_FEED_AUDIT_MAX_LAG_BLOCKS: u64 = 20;
-const DEFAULT_FEED_AUDIT_RECHECK_SECS: u64 = 20;
-const DEFAULT_FEED_AUDIT_PUBLIC_TIP_LAG_BLOCKS: u64 = 2;
-
 #[derive(Default, Debug, Clone)]
 struct SyncLagState {
     is_lagging: bool,
@@ -51,6 +50,75 @@ struct SyncLagState {
     protocol_lag: Option<u64>,
     public_tip_lag: Option<u64>,
     reasons: Vec<String>,
+}
+
+pub struct EngineConfig {
+    pub http_provider: HttpProvider,
+    pub websocket_provider: WsProvider,
+    pub db: Database,
+    pub nonce_manager: NonceManager,
+    pub portfolio: Arc<PortfolioManager>,
+    pub safety_guard: Arc<SafetyGuard>,
+    pub dry_run: bool,
+    pub gas_oracle: GasOracle,
+    pub price_feed: PriceFeed,
+    pub chain_id: u64,
+    pub relay_url: String,
+    pub mev_share_relay_url: String,
+    pub wallet_signer: PrivateKeySigner,
+    pub bundle_signer: PrivateKeySigner,
+    pub executor: Option<Address>,
+    pub executor_bribe_bps: u64,
+    pub executor_bribe_recipient: Option<Address>,
+    pub flashloan_enabled: bool,
+    pub flashloan_providers: Vec<crate::services::strategy::strategy::FlashloanProvider>,
+    pub aave_pool: Option<Address>,
+    pub max_gas_price_gwei: u64,
+    pub gas_cap_multiplier_bps: u64,
+    pub simulator: Simulator,
+    pub token_manager: Arc<TokenManager>,
+    pub metrics_port: u16,
+    pub metrics_bind: Option<String>,
+    pub metrics_token: Option<String>,
+    pub metrics_enable_shutdown: bool,
+    pub strategy_enabled: bool,
+    pub slippage_bps: u64,
+    pub profit_guard_base_floor_multiplier_bps: u64,
+    pub profit_guard_cost_multiplier_bps: u64,
+    pub profit_guard_min_margin_bps: u64,
+    pub liquidity_ratio_floor_ppm: u64,
+    pub sell_min_native_out_wei: u64,
+    pub router_allowlist: Arc<DashSet<Address>>,
+    pub wrapper_allowlist: Arc<DashSet<Address>>,
+    pub infra_allowlist: Arc<DashSet<Address>>,
+    pub router_discovery: Option<Arc<RouterDiscovery>>,
+    pub skip_log_every: u64,
+    pub wrapped_native: Address,
+    pub allow_non_wrapped_swaps: bool,
+    pub mev_share_stream_url: String,
+    pub mev_share_history_limit: u32,
+    pub mev_share_enabled: bool,
+    pub mevshare_builders: Vec<String>,
+    pub sandwich_attacks_enabled: bool,
+    pub simulation_backend: String,
+    pub chainlink_feed_strict: bool,
+    pub bundle_use_replacement_uuid: bool,
+    pub bundle_cancel_previous: bool,
+    pub worker_limit: usize,
+    pub address_registry_path: String,
+    pub pairs_path: String,
+    pub receipt_poll_ms: u64,
+    pub receipt_timeout_ms: u64,
+    pub receipt_confirm_blocks: u64,
+    pub emergency_exit_on_unknown_receipt: bool,
+    pub runtime_settings: StrategyRuntimeSettings,
+    pub rpc_capability_strict: bool,
+    pub feed_audit_max_lag_blocks: u64,
+    pub feed_audit_recheck_secs: u64,
+    pub feed_audit_public_rpc_url: Option<String>,
+    pub feed_audit_public_tip_lag_blocks: u64,
+    pub bundle_target_blocks: u64,
+    pub relay_http_client: Client,
 }
 
 pub struct Engine {
@@ -79,6 +147,9 @@ pub struct Engine {
     simulator: Simulator,
     token_manager: Arc<TokenManager>,
     metrics_port: u16,
+    metrics_bind: Option<String>,
+    metrics_token: Option<String>,
+    metrics_enable_shutdown: bool,
     strategy_enabled: bool,
     slippage_bps: u64,
     profit_guard_base_floor_multiplier_bps: u64,
@@ -109,126 +180,88 @@ pub struct Engine {
     receipt_timeout_ms: u64,
     receipt_confirm_blocks: u64,
     emergency_exit_on_unknown_receipt: bool,
+    runtime_settings: StrategyRuntimeSettings,
     rpc_capability_strict: bool,
+    feed_audit_max_lag_blocks: u64,
+    feed_audit_recheck_secs: u64,
+    feed_audit_public_rpc_url: Option<String>,
+    feed_audit_public_tip_lag_blocks: u64,
+    bundle_target_blocks: u64,
+    relay_http_client: Client,
 }
 
 impl Engine {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        http_provider: HttpProvider,
-        websocket_provider: WsProvider,
-        db: Database,
-        nonce_manager: NonceManager,
-        portfolio: Arc<PortfolioManager>,
-        safety_guard: Arc<SafetyGuard>,
-        dry_run: bool,
-        gas_oracle: GasOracle,
-        price_feed: PriceFeed,
-        chain_id: u64,
-        relay_url: String,
-        mev_share_relay_url: String,
-        wallet_signer: PrivateKeySigner,
-        bundle_signer: PrivateKeySigner,
-        executor: Option<Address>,
-        executor_bribe_bps: u64,
-        executor_bribe_recipient: Option<Address>,
-        flashloan_enabled: bool,
-        flashloan_providers: Vec<crate::services::strategy::strategy::FlashloanProvider>,
-        aave_pool: Option<Address>,
-        max_gas_price_gwei: u64,
-        gas_cap_multiplier_bps: u64,
-        simulator: Simulator,
-        token_manager: Arc<TokenManager>,
-        metrics_port: u16,
-        strategy_enabled: bool,
-        slippage_bps: u64,
-        profit_guard_base_floor_multiplier_bps: u64,
-        profit_guard_cost_multiplier_bps: u64,
-        profit_guard_min_margin_bps: u64,
-        liquidity_ratio_floor_ppm: u64,
-        sell_min_native_out_wei: u64,
-        router_allowlist: Arc<DashSet<Address>>,
-        wrapper_allowlist: Arc<DashSet<Address>>,
-        infra_allowlist: Arc<DashSet<Address>>,
-        router_discovery: Option<Arc<RouterDiscovery>>,
-        skip_log_every: u64,
-        wrapped_native: Address,
-        allow_non_wrapped_swaps: bool,
-        mev_share_stream_url: String,
-        mev_share_history_limit: u32,
-        mev_share_enabled: bool,
-        mevshare_builders: Vec<String>,
-        sandwich_attacks_enabled: bool,
-        simulation_backend: String,
-        chainlink_feed_strict: bool,
-        bundle_use_replacement_uuid: bool,
-        bundle_cancel_previous: bool,
-        worker_limit: usize,
-        address_registry_path: String,
-        pairs_path: String,
-        receipt_poll_ms: u64,
-        receipt_timeout_ms: u64,
-        receipt_confirm_blocks: u64,
-        emergency_exit_on_unknown_receipt: bool,
-        rpc_capability_strict: bool,
-    ) -> Self {
+    pub fn new(config: EngineConfig) -> Self {
         Self {
-            http_provider,
-            websocket_provider,
-            db,
-            nonce_manager,
-            portfolio,
-            safety_guard,
-            dry_run,
-            gas_oracle,
-            price_feed,
-            chain_id,
-            relay_url,
-            mev_share_relay_url,
-            wallet_signer,
-            bundle_signer,
-            executor,
-            executor_bribe_bps,
-            executor_bribe_recipient,
-            flashloan_enabled,
-            flashloan_providers,
-            aave_pool,
-            max_gas_price_gwei,
-            gas_cap_multiplier_bps,
-            simulator,
-            token_manager,
-            metrics_port,
-            strategy_enabled,
-            slippage_bps,
-            profit_guard_base_floor_multiplier_bps,
-            profit_guard_cost_multiplier_bps,
-            profit_guard_min_margin_bps,
-            liquidity_ratio_floor_ppm,
-            sell_min_native_out_wei,
-            router_allowlist,
-            wrapper_allowlist,
-            infra_allowlist,
-            router_discovery,
-            skip_log_every,
-            wrapped_native,
-            allow_non_wrapped_swaps,
-            mev_share_stream_url,
-            mev_share_history_limit,
-            mev_share_enabled,
-            mevshare_builders,
-            sandwich_attacks_enabled,
-            simulation_backend,
-            chainlink_feed_strict,
-            bundle_use_replacement_uuid,
-            bundle_cancel_previous,
-            worker_limit,
-            address_registry_path,
-            pairs_path,
-            receipt_poll_ms,
-            receipt_timeout_ms,
-            receipt_confirm_blocks,
-            emergency_exit_on_unknown_receipt,
-            rpc_capability_strict,
+            http_provider: config.http_provider,
+            websocket_provider: config.websocket_provider,
+            db: config.db,
+            nonce_manager: config.nonce_manager,
+            portfolio: config.portfolio,
+            safety_guard: config.safety_guard,
+            dry_run: config.dry_run,
+            gas_oracle: config.gas_oracle,
+            price_feed: config.price_feed,
+            chain_id: config.chain_id,
+            relay_url: config.relay_url,
+            mev_share_relay_url: config.mev_share_relay_url,
+            wallet_signer: config.wallet_signer,
+            bundle_signer: config.bundle_signer,
+            executor: config.executor,
+            executor_bribe_bps: config.executor_bribe_bps,
+            executor_bribe_recipient: config.executor_bribe_recipient,
+            flashloan_enabled: config.flashloan_enabled,
+            flashloan_providers: config.flashloan_providers,
+            aave_pool: config.aave_pool,
+            max_gas_price_gwei: config.max_gas_price_gwei,
+            gas_cap_multiplier_bps: config.gas_cap_multiplier_bps,
+            simulator: config.simulator,
+            token_manager: config.token_manager,
+            metrics_port: config.metrics_port,
+            metrics_bind: config.metrics_bind,
+            metrics_token: config.metrics_token,
+            metrics_enable_shutdown: config.metrics_enable_shutdown,
+            strategy_enabled: config.strategy_enabled,
+            slippage_bps: config.slippage_bps,
+            profit_guard_base_floor_multiplier_bps: config.profit_guard_base_floor_multiplier_bps,
+            profit_guard_cost_multiplier_bps: config.profit_guard_cost_multiplier_bps,
+            profit_guard_min_margin_bps: config.profit_guard_min_margin_bps,
+            liquidity_ratio_floor_ppm: config.liquidity_ratio_floor_ppm,
+            sell_min_native_out_wei: config.sell_min_native_out_wei,
+            router_allowlist: config.router_allowlist,
+            wrapper_allowlist: config.wrapper_allowlist,
+            infra_allowlist: config.infra_allowlist,
+            router_discovery: config.router_discovery,
+            skip_log_every: config.skip_log_every,
+            wrapped_native: config.wrapped_native,
+            allow_non_wrapped_swaps: config.allow_non_wrapped_swaps,
+            mev_share_stream_url: config.mev_share_stream_url,
+            mev_share_history_limit: config.mev_share_history_limit,
+            mev_share_enabled: config.mev_share_enabled,
+            mevshare_builders: config.mevshare_builders,
+            sandwich_attacks_enabled: config.sandwich_attacks_enabled,
+            simulation_backend: config.simulation_backend,
+            chainlink_feed_strict: config.chainlink_feed_strict,
+            bundle_use_replacement_uuid: config.bundle_use_replacement_uuid,
+            bundle_cancel_previous: config.bundle_cancel_previous,
+            worker_limit: config.worker_limit,
+            address_registry_path: config.address_registry_path,
+            pairs_path: config.pairs_path,
+            receipt_poll_ms: config.receipt_poll_ms,
+            receipt_timeout_ms: config.receipt_timeout_ms,
+            receipt_confirm_blocks: config.receipt_confirm_blocks,
+            emergency_exit_on_unknown_receipt: config.emergency_exit_on_unknown_receipt,
+            runtime_settings: config.runtime_settings,
+            rpc_capability_strict: config.rpc_capability_strict,
+            feed_audit_max_lag_blocks: config.feed_audit_max_lag_blocks.max(1),
+            feed_audit_recheck_secs: config.feed_audit_recheck_secs.max(5),
+            feed_audit_public_rpc_url: config
+                .feed_audit_public_rpc_url
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            feed_audit_public_tip_lag_blocks: config.feed_audit_public_tip_lag_blocks.clamp(1, 64),
+            bundle_target_blocks: config.bundle_target_blocks.clamp(1, 5),
+            relay_http_client: config.relay_http_client,
         }
     }
 
@@ -343,40 +376,14 @@ impl Engine {
         }
     }
 
-    fn feed_audit_max_lag_blocks() -> u64 {
-        std::env::var("FEED_AUDIT_MAX_LAG_BLOCKS")
-            .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .unwrap_or(DEFAULT_FEED_AUDIT_MAX_LAG_BLOCKS)
-            .max(1)
-    }
-
-    fn feed_audit_recheck_secs() -> u64 {
-        std::env::var("FEED_AUDIT_RECHECK_SECS")
-            .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .unwrap_or(DEFAULT_FEED_AUDIT_RECHECK_SECS)
-            .max(5)
-    }
-
     fn feed_audit_public_tip_rpc(&self) -> Option<String> {
-        if let Ok(url) = std::env::var("FEED_AUDIT_PUBLIC_RPC_URL")
-            && !url.trim().is_empty()
-        {
+        if let Some(url) = self.feed_audit_public_rpc_url.clone() {
             return Some(url);
         }
         if self.chain_id == crate::common::constants::CHAIN_ETHEREUM {
             return Some("https://ethereum-rpc.publicnode.com".to_string());
         }
         None
-    }
-
-    fn feed_audit_public_tip_lag_blocks() -> u64 {
-        std::env::var("FEED_AUDIT_PUBLIC_TIP_LAG_BLOCKS")
-            .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .unwrap_or(DEFAULT_FEED_AUDIT_PUBLIC_TIP_LAG_BLOCKS)
-            .clamp(1, 64)
     }
 
     fn parse_block_field(value: &Value) -> Option<u64> {
@@ -575,8 +582,8 @@ impl Engine {
             });
         }
 
-        let feed_audit_max_lag_blocks = Self::feed_audit_max_lag_blocks();
-        let feed_audit_public_tip_lag_blocks = Self::feed_audit_public_tip_lag_blocks();
+        let feed_audit_max_lag_blocks = self.feed_audit_max_lag_blocks;
+        let feed_audit_public_tip_lag_blocks = self.feed_audit_public_tip_lag_blocks;
         let feed_audit_public_rpc = self.feed_audit_public_tip_rpc();
         let sync_state = Self::check_sync_lag_state(
             &self.http_provider,
@@ -612,7 +619,7 @@ impl Engine {
             let shutdown_monitor = shutdown.clone();
             let public_rpc_for_monitor = feed_audit_public_rpc.clone();
             tokio::spawn(async move {
-                let poll_interval = Duration::from_secs(Self::feed_audit_recheck_secs());
+                let poll_interval = Duration::from_secs(self.feed_audit_recheck_secs);
                 loop {
                     tokio::select! {
                         _ = shutdown_monitor.cancelled() => break,
@@ -713,6 +720,7 @@ impl Engine {
         );
         let bundle_sender: SharedBundleSender = Arc::new(BundleSender::new(
             self.http_provider.clone(),
+            self.relay_http_client.clone(),
             self.dry_run,
             self.relay_url.clone(),
             self.mev_share_relay_url.clone(),
@@ -721,6 +729,7 @@ impl Engine {
             stats.clone(),
             self.bundle_use_replacement_uuid,
             self.bundle_cancel_previous,
+            self.bundle_target_blocks,
         ));
         let reserve_cache = Arc::new(ReserveCache::new(self.http_provider.clone()));
         if Path::new(&self.pairs_path).exists() {
@@ -844,6 +853,9 @@ impl Engine {
             shutdown.clone(),
             stats.clone(),
             self.portfolio.clone(),
+            self.metrics_bind.clone(),
+            self.metrics_token.clone(),
+            self.metrics_enable_shutdown,
         )
         .await;
         if self.strategy_enabled {
@@ -861,54 +873,55 @@ impl Engine {
                 );
             }
 
-            let strategy = StrategyExecutor::new(
-                work_queue.clone(),
-                block_receiver,
-                self.safety_guard.clone(),
-                bundle_sender.clone(),
-                self.db.clone(),
-                self.portfolio.clone(),
-                self.gas_oracle.clone(),
-                self.price_feed,
-                self.chain_id,
-                self.max_gas_price_gwei,
-                self.gas_cap_multiplier_bps,
-                self.simulator,
-                self.token_manager.clone(),
-                stats.clone(),
-                self.wallet_signer.clone(),
-                self.nonce_manager.clone(),
-                self.slippage_bps,
-                self.profit_guard_base_floor_multiplier_bps,
-                self.profit_guard_cost_multiplier_bps,
-                self.profit_guard_min_margin_bps,
-                self.liquidity_ratio_floor_ppm,
-                self.sell_min_native_out_wei,
-                self.http_provider.clone(),
-                self.dry_run,
-                self.router_allowlist.clone(),
-                self.wrapper_allowlist.clone(),
-                self.infra_allowlist.clone(),
-                self.router_discovery.clone(),
-                self.skip_log_every,
-                self.wrapped_native,
-                self.allow_non_wrapped_swaps,
-                self.executor,
-                self.executor_bribe_bps,
-                self.executor_bribe_recipient,
-                self.flashloan_enabled,
-                self.flashloan_providers.clone(),
+            let strategy = StrategyExecutor::from_config(StrategyConfig {
+                work_queue: work_queue.clone(),
+                block_rx: block_receiver,
+                safety_guard: self.safety_guard.clone(),
+                bundle_sender: bundle_sender.clone(),
+                db: self.db.clone(),
+                portfolio: self.portfolio.clone(),
+                gas_oracle: self.gas_oracle.clone(),
+                price_feed: self.price_feed.clone(),
+                chain_id: self.chain_id,
+                max_gas_price_gwei: self.max_gas_price_gwei,
+                gas_cap_multiplier_bps: self.gas_cap_multiplier_bps,
+                simulator: self.simulator.clone(),
+                token_manager: self.token_manager.clone(),
+                stats: stats.clone(),
+                signer: self.wallet_signer.clone(),
+                nonce_manager: self.nonce_manager.clone(),
+                slippage_bps: self.slippage_bps,
+                profit_guard_base_floor_multiplier_bps: self.profit_guard_base_floor_multiplier_bps,
+                profit_guard_cost_multiplier_bps: self.profit_guard_cost_multiplier_bps,
+                profit_guard_min_margin_bps: self.profit_guard_min_margin_bps,
+                liquidity_ratio_floor_ppm: self.liquidity_ratio_floor_ppm,
+                sell_min_native_out_wei: self.sell_min_native_out_wei,
+                http_provider: self.http_provider.clone(),
+                dry_run: self.dry_run,
+                router_allowlist: self.router_allowlist.clone(),
+                wrapper_allowlist: self.wrapper_allowlist.clone(),
+                infra_allowlist: self.infra_allowlist.clone(),
+                router_discovery: self.router_discovery.clone(),
+                skip_log_every: self.skip_log_every,
+                wrapped_native: self.wrapped_native,
+                allow_non_wrapped_swaps: self.allow_non_wrapped_swaps,
+                executor: self.executor,
+                executor_bribe_bps: self.executor_bribe_bps,
+                executor_bribe_recipient: self.executor_bribe_recipient,
+                flashloan_enabled: self.flashloan_enabled,
+                flashloan_providers: self.flashloan_providers.clone(),
                 aave_pool,
-                reserve_cache.clone(),
-                self.sandwich_attacks_enabled,
-                self.simulation_backend.clone(),
-                self.worker_limit,
-                shutdown.clone(),
-                self.receipt_poll_ms,
-                self.receipt_timeout_ms,
-                self.receipt_confirm_blocks,
-                self.emergency_exit_on_unknown_receipt,
-            );
+                reserve_cache: reserve_cache.clone(),
+                sandwich_attacks_enabled: self.sandwich_attacks_enabled,
+                simulation_backend: self.simulation_backend.clone(),
+                worker_limit: self.worker_limit,
+                shutdown: shutdown.clone(),
+                receipt_poll_ms: self.receipt_poll_ms,
+                receipt_timeout_ms: self.receipt_timeout_ms,
+                receipt_confirm_blocks: self.receipt_confirm_blocks,
+                emergency_exit_on_unknown_receipt: self.emergency_exit_on_unknown_receipt,
+                runtime: self.runtime_settings.clone(),
+            });
 
             if self.mev_share_enabled {
                 match MevShareClient::new(

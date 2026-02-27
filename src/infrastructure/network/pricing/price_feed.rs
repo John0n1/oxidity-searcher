@@ -10,7 +10,6 @@ use reqwest::Client;
 use reqwest::header;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -87,6 +86,7 @@ pub struct PriceFeed {
     decimals_cache: Arc<Mutex<HashMap<Address, u8>>>,
     api_keys: PriceApiKeys,
     rate: Arc<Mutex<HashMap<&'static str, RateState>>>,
+    provider_stats: Arc<Mutex<HashMap<String, ProviderRuntimeStats>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -102,6 +102,17 @@ pub struct PriceApiKeys {
     pub coinmarketcap: Option<String>,
     pub cryptocompare: Option<String>,
     pub coindesk: Option<String>,
+    pub etherscan: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ProviderRuntimeStats {
+    attempts: u64,
+    successes: u64,
+    failures: u64,
+    notok: u64,
+    last_latency_ms: u64,
+    last_quote_age_secs: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -135,6 +146,7 @@ impl PriceFeed {
             decimals_cache: Arc::new(Mutex::new(HashMap::new())),
             api_keys,
             rate: Arc::new(Mutex::new(HashMap::new())),
+            provider_stats: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -699,6 +711,45 @@ impl PriceFeed {
         state.count += 1;
         true
     }
+
+    fn record_provider_outcome(
+        &self,
+        provider: &str,
+        success: bool,
+        notok: bool,
+        latency: Duration,
+        quote_age: Option<Duration>,
+    ) {
+        let mut guard = self
+            .provider_stats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let entry = guard.entry(provider.to_string()).or_default();
+        entry.attempts = entry.attempts.saturating_add(1);
+        entry.last_latency_ms = latency.as_millis().min(u64::MAX as u128) as u64;
+        entry.last_quote_age_secs = quote_age.unwrap_or_default().as_secs();
+        if success {
+            entry.successes = entry.successes.saturating_add(1);
+        } else {
+            entry.failures = entry.failures.saturating_add(1);
+            if notok {
+                entry.notok = entry.notok.saturating_add(1);
+            }
+        }
+        tracing::debug!(
+            target: "price_feed_provider",
+            provider,
+            success,
+            notok,
+            latency_ms = entry.last_latency_ms,
+            quote_age_seconds = entry.last_quote_age_secs,
+            attempts = entry.attempts,
+            successes = entry.successes,
+            failures = entry.failures,
+            "price provider outcome recorded"
+        );
+    }
+
     async fn try_chainlink(&self, symbol: &str) -> Result<Option<PriceQuote>, AppError> {
         let key = symbol.to_uppercase();
         let fallback_keys = [
@@ -819,12 +870,25 @@ impl PriceFeed {
         if symbol.to_uppercase() != "ETH" {
             return Ok(None);
         }
-        let api_key = match env::var("ETHERSCAN_API_KEY") {
-            Ok(k) if !k.is_empty() => k,
-            _ => return Ok(None),
+        let Some(api_key) = self
+            .api_keys
+            .etherscan
+            .as_ref()
+            .map(|k| k.trim())
+            .filter(|k| !k.is_empty())
+            .map(ToString::to_string)
+        else {
+            tracing::debug!(
+                target: "price_feed",
+                "Etherscan fallback skipped: API key not configured"
+            );
+            return Ok(None);
         };
-        let url =
-            format!("https://api.etherscan.io/api?module=stats&action=ethprice&apikey={api_key}");
+        let url = format!(
+            "https://api.etherscan.io/v2/api?chainid={}&module=stats&action=ethprice&apikey={api_key}",
+            self.chain_id
+        );
+        let started = Instant::now();
         let resp = match self
             .client
             .get(&url)
@@ -834,6 +898,7 @@ impl PriceFeed {
         {
             Ok(resp) => resp,
             Err(e) => {
+                self.record_provider_outcome("etherscan_v2", false, false, started.elapsed(), None);
                 tracing::warn!(
                     target: "price_feed",
                     error = %e,
@@ -843,6 +908,7 @@ impl PriceFeed {
             }
         };
         if !resp.status().is_success() {
+            self.record_provider_outcome("etherscan_v2", false, false, started.elapsed(), None);
             tracing::warn!(
                 target: "price_feed",
                 status = resp.status().as_u16(),
@@ -853,6 +919,7 @@ impl PriceFeed {
         let parsed: EtherscanPriceResponse = match resp.json().await {
             Ok(parsed) => parsed,
             Err(e) => {
+                self.record_provider_outcome("etherscan_v2", false, false, started.elapsed(), None);
                 tracing::warn!(
                     target: "price_feed",
                     error = %e,
@@ -862,9 +929,21 @@ impl PriceFeed {
             }
         };
 
+        if parsed.message.as_deref() == Some("NOTOK") || parsed.status.as_deref() == Some("0") {
+            self.record_provider_outcome("etherscan_v2", false, true, started.elapsed(), None);
+            tracing::warn!(
+                target: "price_feed",
+                status = parsed.status.as_deref().unwrap_or(""),
+                message = parsed.message.as_deref().unwrap_or(""),
+                "Etherscan returned NOTOK; fallback remains non-fatal"
+            );
+            return Ok(None);
+        }
+
         let result = match parsed.result {
             Some(result) => result,
             None => {
+                self.record_provider_outcome("etherscan_v2", false, false, started.elapsed(), None);
                 tracing::warn!(target: "price_feed", "Etherscan price missing result; falling back");
                 return Ok(None);
             }
@@ -873,6 +952,7 @@ impl PriceFeed {
         let price: f64 = match result.ethusd.parse() {
             Ok(price) => price,
             Err(_) => {
+                self.record_provider_outcome("etherscan_v2", false, false, started.elapsed(), None);
                 tracing::warn!(
                     target: "price_feed",
                     "Invalid ethusd from Etherscan; falling back"
@@ -880,10 +960,25 @@ impl PriceFeed {
                 return Ok(None);
             }
         };
+        let quote_age_secs = result
+            .ethusd_timestamp
+            .as_deref()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .and_then(|timestamp| {
+                let now = chrono::Utc::now().timestamp() as u64;
+                (now >= timestamp).then_some(Duration::from_secs(now - timestamp))
+            });
+        self.record_provider_outcome(
+            "etherscan_v2",
+            true,
+            false,
+            started.elapsed(),
+            quote_age_secs,
+        );
 
         Ok(Some(PriceQuote {
             price,
-            source: "etherscan".into(),
+            source: "etherscan_v2".into(),
         }))
     }
 
@@ -947,12 +1042,16 @@ impl PriceFeed {
 
 #[derive(Debug, Deserialize)]
 struct EtherscanPriceResponse {
+    status: Option<String>,
+    message: Option<String>,
     result: Option<EtherscanPriceResult>,
 }
 
 #[derive(Debug, Deserialize)]
 struct EtherscanPriceResult {
     ethusd: String,
+    #[serde(rename = "ethusd_timestamp")]
+    ethusd_timestamp: Option<String>,
 }
 
 fn normalize_symbol(symbol: &str) -> NormalizedSymbols {

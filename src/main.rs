@@ -18,14 +18,19 @@ use oxidity_searcher::infrastructure::network::gas::GasOracle;
 use oxidity_searcher::infrastructure::network::nonce::NonceManager;
 use oxidity_searcher::infrastructure::network::price_feed::PriceFeed;
 use oxidity_searcher::infrastructure::network::provider::ConnectionFactory;
-use oxidity_searcher::services::strategy::engine::Engine;
+use oxidity_searcher::services::strategy::engine::{Engine, EngineConfig};
 use oxidity_searcher::services::strategy::portfolio::PortfolioManager;
+use oxidity_searcher::services::strategy::router_discovery::{
+    RouterDiscovery, RouterDiscoveryBudget, RouterDiscoveryConfig,
+};
 use oxidity_searcher::services::strategy::safety::SafetyGuard;
 use oxidity_searcher::services::strategy::simulation::{SimulationBackend, Simulator};
 use oxidity_searcher::services::strategy::strategy::{AllowlistCategory, classify_allowlist_entry};
+use serde_json::json;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "oxidity searcher")]
@@ -57,6 +62,10 @@ struct Cli {
     /// Base directory for data files (tokenlist, address registry, feeds, pairs)
     #[arg(long)]
     data_dir: Option<String>,
+
+    /// Print redacted effective configuration and exit
+    #[arg(long, default_value_t = false)]
+    print_effective_config: bool,
 }
 
 fn log_chainlink_feed_summary(chain_id: u64, feeds: &HashMap<String, alloy::primitives::Address>) {
@@ -110,34 +119,52 @@ fn log_chainlink_feed_summary(chain_id: u64, feeds: &HashMap<String, alloy::prim
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
     let cli = Cli::parse();
+    let loaded = GlobalSettings::load_with_report(cli.config.as_deref())?;
+    let effective_config = loaded.effective_config_json();
+    let config_debug = loaded.config_debug;
+    let config_hash = loaded.report.effective_config_hash.clone();
+    let config_warnings = loaded.report.warnings.clone();
+    let field_sources = loaded.report.field_sources.clone();
+    let config_report = json!({
+        "effective_config_hash": config_hash,
+        "warnings": config_warnings.clone(),
+        "field_sources": field_sources.clone(),
+        "effective_config": effective_config,
+    });
+    if cli.print_effective_config {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&config_report)
+                .map_err(|e| AppError::Initialization(format!("config print failed: {e}")))?
+        );
+        return Ok(());
+    }
+
+    let mut settings = loaded.settings;
     if let Some(data_dir) = cli.data_dir.as_deref()
         && !data_dir.trim().is_empty()
     {
-        unsafe {
-            std::env::set_var("DATA_DIR", data_dir);
-        }
+        settings.data_dir = Some(data_dir.trim().to_string());
     }
 
-    let settings = GlobalSettings::load_with_path(cli.config.as_deref())?;
-    if std::env::var("DATA_DIR").is_err()
-        && let Some(data_dir) = settings.data_dir()
-    {
-        unsafe {
-            std::env::set_var("DATA_DIR", data_dir);
+    setup_logging(&settings.log_level, false);
+    tracing::info!(
+        target: "config",
+        effective_config_hash = %config_hash,
+        "Effective config hash"
+    );
+    if !config_warnings.is_empty() {
+        for warning in &config_warnings {
+            tracing::warn!(target: "config", warning = %warning, "Config resolver warning");
         }
     }
-    setup_logging(if settings.debug { "debug" } else { "info" }, false);
-
-    if let Some(bind) = settings.metrics_bind_value() {
-        unsafe { std::env::set_var("METRICS_BIND", bind) };
-    }
-    if let Some(token) = settings.metrics_token_value() {
-        unsafe { std::env::set_var("METRICS_TOKEN", token) };
-    }
-    if let Some(key) = settings.etherscan_api_key_value()
-        && std::env::var("ETHERSCAN_API_KEY").is_err()
-    {
-        unsafe { std::env::set_var("ETHERSCAN_API_KEY", key) };
+    if config_debug {
+        tracing::info!(
+            target: "config",
+            effective_config_hash = %config_hash,
+            "Effective config debug enabled"
+        );
+        tracing::info!(target: "config", report = %config_report, "Redacted effective configuration");
     }
 
     let database_url = settings.database_url();
@@ -175,14 +202,7 @@ async fn main() -> Result<(), AppError> {
     let relay_url = settings.flashbots_relay_url();
     let bundle_signer = PrivateKeySigner::from_str(&settings.bundle_signer_key())
         .map_err(|e| AppError::Config(format!("Invalid bundle signer key: {}", e)))?;
-    let metrics_base: u16 = cli
-        .metrics_port
-        .or_else(|| {
-            std::env::var("METRICS_PORT")
-                .ok()
-                .and_then(|s| s.parse().ok())
-        })
-        .unwrap_or(settings.metrics_port);
+    let metrics_base: u16 = cli.metrics_port.unwrap_or(settings.metrics_port);
     let slippage_bps = cli.slippage_bps.unwrap_or(settings.slippage_bps);
     let strategy_enabled_flag =
         !cli.no_strategy && cli.strategy_enabled && settings.strategy_enabled;
@@ -201,6 +221,10 @@ async fn main() -> Result<(), AppError> {
         }),
     );
     let mut engine_tasks = Vec::new();
+    let relay_http_client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(2_500))
+        .build()
+        .map_err(|e| AppError::Initialization(format!("relay HTTP client init failed: {e}")))?;
 
     for (idx, chain_id) in chains.iter().copied().enumerate() {
         let http_provider_url = settings.get_http_provider(chain_id)?;
@@ -302,22 +326,36 @@ async fn main() -> Result<(), AppError> {
         }
 
         let router_discovery = if settings.router_discovery_enabled {
-            match oxidity_searcher::services::strategy::router_discovery::RouterDiscovery::new(
+            let discovery_budget = RouterDiscoveryBudget {
+                max_blocks_per_cycle: settings.router_discovery_bootstrap_lookback_blocks_value(),
+                max_rpc_calls_per_cycle: settings.router_discovery_max_rpc_calls_per_cycle_value(),
+                cycle_timeout: settings.router_discovery_cycle_timeout(),
+                failure_budget: settings.router_discovery_failure_budget_value(),
+                cooldown: settings.router_discovery_cooldown(),
+            };
+            let discovery_config = RouterDiscoveryConfig {
                 chain_id,
-                router_allowlist.clone(),
-                db.clone(),
-                Some(http_provider_url.clone()),
-                settings.etherscan_api_key_value(),
-                settings.router_discovery_enabled,
-                settings.router_discovery_auto_allow,
-                settings.router_discovery_min_hits,
-                settings.router_discovery_flush_every,
-                settings.router_discovery_check_interval(),
-                settings.router_discovery_max_entries,
-            ) {
+                allowlist: router_allowlist.clone(),
+                db: db.clone(),
+                http_provider: Some(http_provider_url.clone()),
+                etherscan_api_key: settings.etherscan_api_key_value(),
+                enabled: settings.router_discovery_enabled,
+                auto_allow: settings.router_discovery_auto_allow,
+                min_hits: settings.router_discovery_min_hits,
+                flush_every: settings.router_discovery_flush_every,
+                check_interval: settings.router_discovery_check_interval(),
+                max_entries: settings.router_discovery_max_entries,
+                budget: discovery_budget,
+                cache_path: settings.router_discovery_cache_path().ok(),
+                force_full_rescan: settings.router_discovery_force_full_rescan,
+            };
+            match RouterDiscovery::new(discovery_config) {
                 Ok(discovery) => {
                     let discovery = Arc::new(discovery);
-                    discovery.spawn_bootstrap_top_unknown(1000, 512);
+                    discovery.spawn_bootstrap_top_unknown(
+                        settings.router_discovery_bootstrap_limit_value(),
+                        settings.router_discovery_bootstrap_lookback_blocks_value(),
+                    );
                     Some(discovery)
                 }
                 Err(e) => {
@@ -349,66 +387,77 @@ async fn main() -> Result<(), AppError> {
             metrics_base
         };
 
-        let engine = Engine::new(
+        let engine = Engine::new(EngineConfig {
             http_provider,
             websocket_provider,
-            db.clone(),
+            db: db.clone(),
             nonce_manager,
             portfolio,
             safety_guard,
-            cli.dry_run,
+            dry_run: cli.dry_run,
             gas_oracle,
             price_feed,
             chain_id,
-            relay_url.clone(),
-            settings.mev_share_relay_url(),
-            wallet_signer.clone(),
-            bundle_signer.clone(),
-            settings.executor_address,
-            settings.executor_bribe_bps,
-            settings.executor_bribe_recipient,
-            settings.flashloan_enabled,
-            settings.flashloan_providers(),
-            settings.aave_pool_for_chain(chain_id),
-            settings
+            relay_url: relay_url.clone(),
+            mev_share_relay_url: settings.mev_share_relay_url(),
+            wallet_signer: wallet_signer.clone(),
+            bundle_signer: bundle_signer.clone(),
+            executor: settings.executor_address,
+            executor_bribe_bps: settings.executor_bribe_bps,
+            executor_bribe_recipient: settings.executor_bribe_recipient,
+            flashloan_enabled: settings.flashloan_enabled,
+            flashloan_providers: settings.flashloan_providers(),
+            aave_pool: settings.aave_pool_for_chain(chain_id),
+            max_gas_price_gwei: settings
                 .gas_cap_for_chain(chain_id)
                 .unwrap_or(settings.max_gas_price_gwei),
-            settings.gas_cap_multiplier_bps_value(),
+            gas_cap_multiplier_bps: settings.gas_cap_multiplier_bps_value(),
             simulator,
-            token_manager.clone(),
+            token_manager: token_manager.clone(),
             metrics_port,
+            metrics_bind: settings.metrics_bind_value(),
+            metrics_token: settings.metrics_token_value(),
+            metrics_enable_shutdown: settings.metrics_enable_shutdown_value(),
             strategy_enabled,
             slippage_bps,
-            settings.profit_guard_base_floor_multiplier_bps_value(),
-            settings.profit_guard_cost_multiplier_bps_value(),
-            settings.profit_guard_min_margin_bps_value(),
-            settings.liquidity_ratio_floor_ppm_value(),
-            settings.sell_min_native_out_wei_value(),
+            profit_guard_base_floor_multiplier_bps: settings
+                .profit_guard_base_floor_multiplier_bps_value(),
+            profit_guard_cost_multiplier_bps: settings.profit_guard_cost_multiplier_bps_value(),
+            profit_guard_min_margin_bps: settings.profit_guard_min_margin_bps_value(),
+            liquidity_ratio_floor_ppm: settings.liquidity_ratio_floor_ppm_value(),
+            sell_min_native_out_wei: settings.sell_min_native_out_wei_value(),
             router_allowlist,
             wrapper_allowlist,
             infra_allowlist,
             router_discovery,
-            settings.skip_log_every_value(),
+            skip_log_every: settings.skip_log_every_value(),
             wrapped_native,
-            settings.allow_non_wrapped_swaps,
-            settings.mev_share_stream_url.clone(),
-            settings.mev_share_history_limit,
-            settings.mev_share_enabled,
-            settings.mevshare_builders_value(),
-            settings.sandwich_attacks_enabled,
-            settings.simulation_backend.clone(),
-            settings.chainlink_feed_audit_strict_for_chain(chain_id),
-            settings.bundle_use_replacement_uuid_for_chain(chain_id),
-            settings.bundle_cancel_previous_for_chain(chain_id),
+            allow_non_wrapped_swaps: settings.allow_non_wrapped_swaps,
+            mev_share_stream_url: settings.mev_share_stream_url.clone(),
+            mev_share_history_limit: settings.mev_share_history_limit,
+            mev_share_enabled: settings.mev_share_enabled,
+            mevshare_builders: settings.mevshare_builders_value(),
+            sandwich_attacks_enabled: settings.sandwich_attacks_enabled,
+            simulation_backend: settings.simulation_backend.clone(),
+            chainlink_feed_strict: settings.chainlink_feed_audit_strict_for_chain(chain_id),
+            bundle_use_replacement_uuid: settings.bundle_use_replacement_uuid_for_chain(chain_id),
+            bundle_cancel_previous: settings.bundle_cancel_previous_for_chain(chain_id),
             worker_limit,
-            address_registry_path.clone(),
-            pairs_path.clone(),
-            settings.receipt_poll_ms_value(),
-            settings.receipt_timeout_ms_value(),
-            settings.receipt_confirm_blocks_value(),
-            settings.emergency_exit_on_unknown_receipt,
-            settings.rpc_capability_strict_for_chain(chain_id),
-        );
+            address_registry_path: address_registry_path.clone(),
+            pairs_path: pairs_path.clone(),
+            receipt_poll_ms: settings.receipt_poll_ms_value(),
+            receipt_timeout_ms: settings.receipt_timeout_ms_value(),
+            receipt_confirm_blocks: settings.receipt_confirm_blocks_value(),
+            emergency_exit_on_unknown_receipt: settings.emergency_exit_on_unknown_receipt,
+            runtime_settings: settings.strategy_runtime_settings(),
+            rpc_capability_strict: settings.rpc_capability_strict_for_chain(chain_id),
+            feed_audit_max_lag_blocks: settings.feed_audit_max_lag_blocks_value(),
+            feed_audit_recheck_secs: settings.feed_audit_recheck_secs_value(),
+            feed_audit_public_rpc_url: settings.feed_audit_public_rpc_url_value(),
+            feed_audit_public_tip_lag_blocks: settings.feed_audit_public_tip_lag_blocks_value(),
+            bundle_target_blocks: settings.bundle_target_blocks_value(),
+            relay_http_client: relay_http_client.clone(),
+        });
 
         engine_tasks.push(tokio::spawn(async move { engine.run().await }));
     }

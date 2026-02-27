@@ -2,10 +2,14 @@
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 pub mod bundles;
+pub mod execution_planner;
 pub mod graph;
 pub mod routes;
 pub mod swaps;
 
+pub use execution_planner::{
+    DecisionTrace, ExecutionPlanner, PlanCandidate, PlanScore, PlanType, PlannerInput,
+};
 pub use graph::{QuoteEdge, QuoteGraph, QuoteSearchOptions};
 pub use routes::{RouteLeg, RoutePlan, RouteVenue};
 
@@ -75,71 +79,40 @@ static BALANCER_FEE_CACHE: Lazy<DashMap<u64, (U256, std::time::Instant)>> = Lazy
 static AAVE_FEE_CACHE: Lazy<DashMap<Address, (U256, std::time::Instant)>> = Lazy::new(DashMap::new);
 
 impl StrategyExecutor {
-    fn env_u128(name: &str) -> Option<u128> {
-        std::env::var(name)
-            .ok()
-            .and_then(|v| v.trim().parse::<u128>().ok())
+    fn flashloan_value_scale_bps(&self) -> u64 {
+        self.runtime.flashloan_value_scale_bps
     }
 
-    fn env_u64(name: &str) -> Option<u64> {
-        std::env::var(name)
-            .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok())
+    fn flashloan_min_notional_wei(&self) -> U256 {
+        self.runtime.flashloan_min_notional_wei
     }
 
-    fn flashloan_prefer_wallet_max_wei() -> U256 {
-        // Default: if signer wallet is <= 0.05 ETH, prefer gas-only flashloan mode.
-        U256::from(
-            Self::env_u128("FLASHLOAN_PREFER_WALLET_MAX_WEI").unwrap_or(50_000_000_000_000_000u128),
-        )
-    }
-
-    fn flashloan_value_scale_bps() -> u64 {
-        Self::env_u64("FLASHLOAN_VALUE_SCALE_BPS")
-            .unwrap_or(7_000)
-            .clamp(50, 10_000)
-    }
-
-    fn flashloan_min_notional_wei() -> U256 {
-        U256::from(
-            Self::env_u128("FLASHLOAN_MIN_NOTIONAL_WEI").unwrap_or(30_000_000_000_000u128), // 0.00003 ETH
-        )
-    }
-
-    fn flashloan_min_repay_bps() -> u64 {
+    fn flashloan_min_repay_bps(&self) -> u64 {
         // Pre-filter only clearly toxic roundtrips. Victim impact can improve
         // execution-relative pricing, so keep this threshold below 100%.
-        Self::env_u64("FLASHLOAN_MIN_REPAY_BPS")
-            .unwrap_or(9_000)
-            .clamp(7_000, 12_000)
+        self.runtime.flashloan_min_repay_bps
     }
 
-    fn flashloan_reverse_input_bps() -> u64 {
+    fn flashloan_reverse_input_bps(&self) -> u64 {
         // For flashloan repayment safety, use near-full reverse input by default.
         // Lower this only if fee-on-transfer paths cause frequent transfer failures.
-        Self::env_u64("FLASHLOAN_REVERSE_INPUT_BPS")
-            .unwrap_or(10_000)
-            .clamp(9_500, 10_000)
+        self.runtime.flashloan_reverse_input_bps
     }
 
-    fn flashloan_prefilter_margin_bps() -> u64 {
-        Self::env_u64("FLASHLOAN_PREFILTER_MARGIN_BPS")
-            .unwrap_or(10)
-            .clamp(0, 2_000)
+    fn flashloan_prefilter_margin_bps(&self) -> u64 {
+        self.runtime.flashloan_prefilter_margin_bps
     }
 
-    fn flashloan_prefilter_margin_wei() -> U256 {
-        U256::from(Self::env_u128("FLASHLOAN_PREFILTER_MARGIN_WEI").unwrap_or(0u128))
+    fn flashloan_prefilter_margin_wei(&self) -> U256 {
+        self.runtime.flashloan_prefilter_margin_wei
     }
 
-    fn flashloan_prefilter_gas_cost_bps() -> u64 {
-        Self::env_u64("FLASHLOAN_PREFILTER_GAS_COST_BPS")
-            .unwrap_or(0)
-            .clamp(0, 10_000)
+    fn flashloan_prefilter_gas_cost_bps(&self) -> u64 {
+        self.runtime.flashloan_prefilter_gas_cost_bps
     }
 
-    fn maybe_scale_flashloan_value(value: U256) -> U256 {
-        let scale_bps = Self::flashloan_value_scale_bps();
+    fn maybe_scale_flashloan_value(&self, value: U256) -> U256 {
+        let scale_bps = self.flashloan_value_scale_bps();
         if scale_bps >= 10_000 {
             return value;
         }
@@ -147,21 +120,15 @@ impl StrategyExecutor {
             .saturating_mul(U256::from(scale_bps))
             .checked_div(U256::from(10_000u64))
             .unwrap_or(value);
-        if scaled < Self::flashloan_min_notional_wei() {
+        if scaled < self.flashloan_min_notional_wei() {
             value
         } else {
             scaled
         }
     }
 
-    fn reject_same_router_negative_roundtrip() -> bool {
-        std::env::var("FLASHLOAN_REJECT_SAME_ROUTER_NEGATIVE")
-            .ok()
-            .map(|v| {
-                let v = v.trim().to_ascii_lowercase();
-                matches!(v.as_str(), "1" | "true" | "yes" | "on")
-            })
-            .unwrap_or(true)
+    fn reject_same_router_negative_roundtrip(&self) -> bool {
+        self.runtime.flashloan_reject_same_router_negative
     }
 
     fn registry_v2_router_candidates(chain_id: u64) -> Vec<Address> {
@@ -202,16 +169,6 @@ impl StrategyExecutor {
             }
         }
         out
-    }
-
-    fn env_flag_true(name: &str) -> bool {
-        std::env::var(name)
-            .ok()
-            .map(|v| {
-                let v = v.trim().to_ascii_lowercase();
-                matches!(v.as_str(), "1" | "true" | "yes" | "on")
-            })
-            .unwrap_or(false)
     }
 
     pub(in crate::services::strategy) async fn quote_v2_path_with_router_fallback(
@@ -700,6 +657,7 @@ impl StrategyExecutor {
         Ok(Some((raw, request, hash)))
     }
 
+    #[allow(dead_code)]
     pub(crate) fn should_use_flashloan(
         &self,
         required_value: U256,
@@ -712,10 +670,10 @@ impl StrategyExecutor {
         if !self.has_usable_flashloan_provider() {
             return false;
         }
-        if Self::env_flag_true("FLASHLOAN_FORCE") || Self::env_flag_true("FLASHLOAN_AGGRESSIVE") {
+        if self.runtime.flashloan_force || self.runtime.flashloan_aggressive {
             return true;
         }
-        if wallet_balance <= Self::flashloan_prefer_wallet_max_wei() {
+        if wallet_balance <= self.runtime.flashloan_prefer_wallet_max_wei {
             return true;
         }
         // Caller passes total upfront requirement for current plan phase
@@ -1270,17 +1228,22 @@ impl StrategyExecutor {
                         )?,
                     };
                     if use_flashloan && has_wrapped {
-                        let flashloan_asset =
-                            observed.path.first().copied().unwrap_or(self.wrapped_native);
-                        let env_scaled = Self::maybe_scale_flashloan_value(value);
-                        let scaled = self.apply_adaptive_flashloan_scale(env_scaled, flashloan_asset);
+                        let flashloan_asset = observed
+                            .path
+                            .first()
+                            .copied()
+                            .unwrap_or(self.wrapped_native);
+                        let env_scaled = self.maybe_scale_flashloan_value(value);
+                        let scaled =
+                            self.apply_adaptive_flashloan_scale(env_scaled, flashloan_asset);
                         if scaled < value {
-                            let adaptive_scale_bps = self.flashloan_asset_scale_bps(flashloan_asset);
+                            let adaptive_scale_bps =
+                                self.flashloan_asset_scale_bps(flashloan_asset);
                             tracing::debug!(
                                 target: "strategy",
                                 original = %value,
                                 scaled = %scaled,
-                                scale_bps = Self::flashloan_value_scale_bps(),
+                                scale_bps = self.flashloan_value_scale_bps(),
                                 adaptive_scale_bps,
                                 asset = %format!("{flashloan_asset:#x}"),
                                 "Scaled flashloan notional for safer roundtrip viability"
@@ -1306,7 +1269,7 @@ impl StrategyExecutor {
                     let mut forward_router = exec_router;
                     let mut reverse_router = exec_router;
                     if use_flashloan && has_wrapped {
-                        let reverse_input_bps = Self::flashloan_reverse_input_bps();
+                        let reverse_input_bps = self.flashloan_reverse_input_bps();
                         let victim_router = observed.router;
                         let victim_buys_target =
                             observed.path.first() == Some(&self.wrapped_native);
@@ -1346,7 +1309,7 @@ impl StrategyExecutor {
                                 else {
                                     continue;
                                 };
-                                if Self::reject_same_router_negative_roundtrip()
+                                if self.reject_same_router_negative_roundtrip()
                                     && candidate_forward_router == candidate_reverse_router
                                     && reverse_quote <= value
                                 {
@@ -1515,7 +1478,7 @@ impl StrategyExecutor {
                         // quoted forward minimum. For flashloans we still need near-full unwind
                         // for repayment viability; keep non-flashloan path conservative.
                         let reverse_input_bps = if use_flashloan {
-                            Self::flashloan_reverse_input_bps()
+                            self.flashloan_reverse_input_bps()
                         } else {
                             9_000
                         };
@@ -1569,15 +1532,13 @@ impl StrategyExecutor {
                             value.saturating_mul(U256::from(9_980u64)) / U256::from(10_000u64)
                         });
                         if use_flashloan {
-                            if Self::reject_same_router_negative_roundtrip()
+                            if self.reject_same_router_negative_roundtrip()
                                 && forward_router == reverse_router
                                 && reverse_expected_out <= value
                             {
                                 return Err(AppError::Strategy(format!(
                                     "Flashloan same-router roundtrip non-positive: expected_out={} principal={} router={:#x}",
-                                    reverse_expected_out,
-                                    value,
-                                    forward_router
+                                    reverse_expected_out, value, forward_router
                                 )));
                             }
                             if !self.dry_run
@@ -1596,7 +1557,7 @@ impl StrategyExecutor {
                                 )));
                             }
                             let min_repay = value
-                                .saturating_mul(U256::from(Self::flashloan_min_repay_bps()))
+                                .saturating_mul(U256::from(self.flashloan_min_repay_bps()))
                                 .checked_div(U256::from(10_000u64))
                                 .unwrap_or(value);
                             if reverse_expected_out < min_repay && reverse_input_bps < 10_000 {
@@ -1630,14 +1591,14 @@ impl StrategyExecutor {
                                     reverse_expected_out,
                                     min_repay,
                                     value,
-                                    Self::flashloan_min_repay_bps()
+                                    self.flashloan_min_repay_bps()
                                 )));
                             }
                             let (flashloan_premium, flashloan_prefilter_gas_cost) = self
                                 .quote_best_flashloan_cost_components(path[0], value, gas_fees)
                                 .await?
                                 .map(|(premium, gas_cost, _)| {
-                                    let gas_cost_bps = Self::flashloan_prefilter_gas_cost_bps();
+                                    let gas_cost_bps = self.flashloan_prefilter_gas_cost_bps();
                                     let scaled_gas_cost = gas_cost
                                         .saturating_mul(U256::from(gas_cost_bps))
                                         .checked_div(U256::from(10_000u64))
@@ -1647,13 +1608,13 @@ impl StrategyExecutor {
                                 .unwrap_or((U256::ZERO, U256::ZERO));
                             let flashloan_cost =
                                 flashloan_premium.saturating_add(flashloan_prefilter_gas_cost);
-                            let margin_bps = Self::flashloan_prefilter_margin_bps();
+                            let margin_bps = self.flashloan_prefilter_margin_bps();
                             let margin_from_bps = value
                                 .saturating_mul(U256::from(margin_bps))
                                 .checked_div(U256::from(10_000u64))
                                 .unwrap_or(U256::ZERO);
                             let margin_wei =
-                                margin_from_bps.max(Self::flashloan_prefilter_margin_wei());
+                                margin_from_bps.max(self.flashloan_prefilter_margin_wei());
                             let required_out = min_repay
                                 .saturating_add(flashloan_cost)
                                 .saturating_add(margin_wei);
@@ -1667,7 +1628,7 @@ impl StrategyExecutor {
                                     flashloan_cost,
                                     flashloan_premium,
                                     flashloan_prefilter_gas_cost,
-                                    Self::flashloan_prefilter_gas_cost_bps(),
+                                    self.flashloan_prefilter_gas_cost_bps(),
                                     margin_wei,
                                     margin_bps
                                 )));
@@ -1855,17 +1816,22 @@ impl StrategyExecutor {
                         )?,
                     };
                     if use_flashloan && has_wrapped {
-                        let flashloan_asset =
-                            observed.path.first().copied().unwrap_or(self.wrapped_native);
-                        let env_scaled = Self::maybe_scale_flashloan_value(value);
-                        let scaled = self.apply_adaptive_flashloan_scale(env_scaled, flashloan_asset);
+                        let flashloan_asset = observed
+                            .path
+                            .first()
+                            .copied()
+                            .unwrap_or(self.wrapped_native);
+                        let env_scaled = self.maybe_scale_flashloan_value(value);
+                        let scaled =
+                            self.apply_adaptive_flashloan_scale(env_scaled, flashloan_asset);
                         if scaled < value {
-                            let adaptive_scale_bps = self.flashloan_asset_scale_bps(flashloan_asset);
+                            let adaptive_scale_bps =
+                                self.flashloan_asset_scale_bps(flashloan_asset);
                             tracing::debug!(
                                 target: "strategy",
                                 original = %value,
                                 scaled = %scaled,
-                                scale_bps = Self::flashloan_value_scale_bps(),
+                                scale_bps = self.flashloan_value_scale_bps(),
                                 adaptive_scale_bps,
                                 asset = %format!("{flashloan_asset:#x}"),
                                 "Scaled flashloan notional for safer roundtrip viability"
@@ -1910,14 +1876,12 @@ impl StrategyExecutor {
                         let reverse_expected_out =
                             self.quote_v3_path(&reverse_path, reverse_amount_in).await?;
                         if use_flashloan {
-                            if Self::reject_same_router_negative_roundtrip()
+                            if self.reject_same_router_negative_roundtrip()
                                 && reverse_expected_out <= value
                             {
                                 return Err(AppError::Strategy(format!(
                                     "Flashloan same-router V3 roundtrip non-positive: expected_out={} principal={} router={:#x}",
-                                    reverse_expected_out,
-                                    value,
-                                    exec_router
+                                    reverse_expected_out, value, exec_router
                                 )));
                             }
                             if !self.dry_run
@@ -1935,7 +1899,7 @@ impl StrategyExecutor {
                                 ));
                             }
                             let min_repay = value
-                                .saturating_mul(U256::from(Self::flashloan_min_repay_bps()))
+                                .saturating_mul(U256::from(self.flashloan_min_repay_bps()))
                                 .checked_div(U256::from(10_000u64))
                                 .unwrap_or(value);
                             if reverse_expected_out < min_repay {
@@ -1944,7 +1908,7 @@ impl StrategyExecutor {
                                     reverse_expected_out,
                                     min_repay,
                                     value,
-                                    Self::flashloan_min_repay_bps()
+                                    self.flashloan_min_repay_bps()
                                 )));
                             }
                             let flashloan_asset = observed
@@ -1960,7 +1924,7 @@ impl StrategyExecutor {
                                 )
                                 .await?
                                 .map(|(premium, gas_cost, _)| {
-                                    let gas_cost_bps = Self::flashloan_prefilter_gas_cost_bps();
+                                    let gas_cost_bps = self.flashloan_prefilter_gas_cost_bps();
                                     let scaled_gas_cost = gas_cost
                                         .saturating_mul(U256::from(gas_cost_bps))
                                         .checked_div(U256::from(10_000u64))
@@ -1970,13 +1934,13 @@ impl StrategyExecutor {
                                 .unwrap_or((U256::ZERO, U256::ZERO));
                             let flashloan_cost =
                                 flashloan_premium.saturating_add(flashloan_prefilter_gas_cost);
-                            let margin_bps = Self::flashloan_prefilter_margin_bps();
+                            let margin_bps = self.flashloan_prefilter_margin_bps();
                             let margin_from_bps = value
                                 .saturating_mul(U256::from(margin_bps))
                                 .checked_div(U256::from(10_000u64))
                                 .unwrap_or(U256::ZERO);
                             let margin_wei =
-                                margin_from_bps.max(Self::flashloan_prefilter_margin_wei());
+                                margin_from_bps.max(self.flashloan_prefilter_margin_wei());
                             let required_out = min_repay
                                 .saturating_add(flashloan_cost)
                                 .saturating_add(margin_wei);
@@ -1990,7 +1954,7 @@ impl StrategyExecutor {
                                     flashloan_cost,
                                     flashloan_premium,
                                     flashloan_prefilter_gas_cost,
-                                    Self::flashloan_prefilter_gas_cost_bps(),
+                                    self.flashloan_prefilter_gas_cost_bps(),
                                     margin_wei,
                                     margin_bps
                                 )));

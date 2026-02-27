@@ -18,18 +18,30 @@ pub async fn spawn_metrics_server(
     shutdown: CancellationToken,
     stats: Arc<StrategyStats>,
     portfolio: Arc<PortfolioManager>,
+    metrics_bind: Option<String>,
+    metrics_token: Option<String>,
+    enable_shutdown: bool,
 ) -> Option<SocketAddr> {
-    let token = match std::env::var("METRICS_TOKEN") {
-        Ok(t) if !t.trim().is_empty() => t,
+    let token = match metrics_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        Some(t) => t.to_string(),
         _ => {
             tracing::warn!(
                 target: "metrics",
-                "METRICS_TOKEN missing/empty; metrics server disabled (strategy continues)"
+                "metrics token missing/empty; metrics server disabled (strategy continues)"
             );
             return None;
         }
     };
-    let bind_addr = std::env::var("METRICS_BIND").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let bind_addr = metrics_bind
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or("127.0.0.1")
+        .to_string();
     let addr: SocketAddr = match format!("{}:{}", bind_addr, port).parse() {
         Ok(a) => a,
         Err(e) => {
@@ -150,15 +162,25 @@ pub async fn spawn_metrics_server(
                         );
                         let _ = socket.write_all(response.as_bytes()).await;
                     } else if route == "/shutdown" {
-                        shutdown.cancel();
-                        let body =
-                            json!({"status":"ok","message":"shutdown_requested"}).to_string();
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let _ = socket.write_all(response.as_bytes()).await;
+                        if enable_shutdown {
+                            shutdown.cancel();
+                            let body =
+                                json!({"status":"ok","message":"shutdown_requested"}).to_string();
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                                body.len(),
+                                body
+                            );
+                            let _ = socket.write_all(response.as_bytes()).await;
+                        } else {
+                            let body = r#"{"status":"error","error":"shutdown route disabled"}"#;
+                            let response = format!(
+                                "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                                body.len(),
+                                body
+                            );
+                            let _ = socket.write_all(response.as_bytes()).await;
+                        }
                     } else if route == "/" {
                         let body = render_metrics(&stats, &portfolio);
                         let response = format!(
@@ -451,6 +473,24 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
         bundle_net_eth_sum
     );
 
+    let rejection_snapshot: Vec<(String, u64)> = {
+        let guard = stats
+            .opportunity_rejections
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard
+            .iter()
+            .map(|(reason, count)| (reason.clone(), *count))
+            .collect()
+    };
+    for (reason, count) in rejection_snapshot {
+        let reason = reason.replace('"', "_");
+        body.push_str(&format!(
+            "# TYPE opportunity_rejected_total counter\nopportunity_rejected_total{{reason=\"{}\"}} {}\n",
+            reason, count
+        ));
+    }
+
     for (chain, profit) in portfolio.net_profit_all() {
         body.push_str(&format!(
             "# TYPE net_profit_eth gauge\nnet_profit_eth{{chain=\"{}\"}} {}\n",
@@ -578,16 +618,23 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_endpoint_serves() {
-        unsafe { std::env::set_var("METRICS_TOKEN", "testtoken") };
-        unsafe { std::env::set_var("METRICS_BIND", "127.0.0.1") };
         let provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
         let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
         let stats = Arc::new(StrategyStats::default());
         let shutdown = CancellationToken::new();
 
-        let addr = spawn_metrics_server(0, 1, shutdown, stats.clone(), portfolio.clone())
-            .await
-            .expect("bind metrics");
+        let addr = spawn_metrics_server(
+            0,
+            1,
+            shutdown,
+            stats.clone(),
+            portfolio.clone(),
+            Some("127.0.0.1".to_string()),
+            Some("testtoken".to_string()),
+            false,
+        )
+        .await
+        .expect("bind metrics");
 
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 
@@ -606,16 +653,23 @@ mod tests {
 
     #[tokio::test]
     async fn health_endpoint_includes_chain_id() {
-        unsafe { std::env::set_var("METRICS_TOKEN", "testtoken") };
-        unsafe { std::env::set_var("METRICS_BIND", "127.0.0.1") };
         let provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
         let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
         let stats = Arc::new(StrategyStats::default());
         let shutdown = CancellationToken::new();
 
-        let addr = spawn_metrics_server(0, 137, shutdown, stats.clone(), portfolio.clone())
-            .await
-            .expect("bind metrics");
+        let addr = spawn_metrics_server(
+            0,
+            137,
+            shutdown,
+            stats.clone(),
+            portfolio.clone(),
+            Some("127.0.0.1".to_string()),
+            Some("testtoken".to_string()),
+            false,
+        )
+        .await
+        .expect("bind metrics");
 
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 
@@ -634,16 +688,23 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_endpoint_stops_server() {
-        unsafe { std::env::set_var("METRICS_TOKEN", "testtoken") };
-        unsafe { std::env::set_var("METRICS_BIND", "127.0.0.1") };
         let provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
         let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
         let stats = Arc::new(StrategyStats::default());
         let shutdown = CancellationToken::new();
 
-        let addr = spawn_metrics_server(0, 1, shutdown, stats.clone(), portfolio.clone())
-            .await
-            .expect("bind metrics");
+        let addr = spawn_metrics_server(
+            0,
+            1,
+            shutdown,
+            stats.clone(),
+            portfolio.clone(),
+            Some("127.0.0.1".to_string()),
+            Some("testtoken".to_string()),
+            true,
+        )
+        .await
+        .expect("bind metrics");
 
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 
@@ -673,22 +734,23 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "mutates process-wide METRICS_TOKEN env; run explicitly"]
     async fn missing_metrics_token_disables_server_without_exiting() {
-        let old = std::env::var("METRICS_TOKEN").ok();
-        unsafe {
-            std::env::remove_var("METRICS_TOKEN");
-        }
         let provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
         let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
         let stats = Arc::new(StrategyStats::default());
         let shutdown = CancellationToken::new();
 
-        let addr = spawn_metrics_server(0, 1, shutdown, stats, portfolio).await;
+        let addr = spawn_metrics_server(
+            0,
+            1,
+            shutdown,
+            stats,
+            portfolio,
+            Some("127.0.0.1".to_string()),
+            None,
+            false,
+        )
+        .await;
         assert!(addr.is_none());
-
-        if let Some(v) = old {
-            unsafe { std::env::set_var("METRICS_TOKEN", v) };
-        }
     }
 }

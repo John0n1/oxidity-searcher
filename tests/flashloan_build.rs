@@ -45,6 +45,7 @@ async fn flashloan_builder_encodes_callbacks() {
     let stats = Arc::new(StrategyStats::default());
     let bundle_sender = Arc::new(BundleSender::new(
         http.clone(),
+        reqwest::Client::new(),
         true,
         "https://relay.flashbots.net".to_string(),
         "https://mev-share.flashbots.net".to_string(),
@@ -58,6 +59,7 @@ async fn flashloan_builder_encodes_callbacks() {
         stats.clone(),
         true,
         false,
+        1,
     ));
     let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), bundle_signer.address()));
@@ -207,6 +209,7 @@ async fn flashloan_builder_uses_aave_selector() {
     let stats = Arc::new(StrategyStats::default());
     let bundle_sender = Arc::new(BundleSender::new(
         http.clone(),
+        reqwest::Client::new(),
         true,
         "https://relay.flashbots.net".to_string(),
         "https://mev-share.flashbots.net".to_string(),
@@ -220,6 +223,7 @@ async fn flashloan_builder_uses_aave_selector() {
         stats.clone(),
         true,
         false,
+        1,
     ));
     let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), bundle_signer.address()));
@@ -464,6 +468,7 @@ async fn flashloan_builder_rejects_when_no_provider_available() {
     let stats = Arc::new(StrategyStats::default());
     let bundle_sender = Arc::new(BundleSender::new(
         http.clone(),
+        reqwest::Client::new(),
         true,
         "https://relay.flashbots.net".to_string(),
         "https://mev-share.flashbots.net".to_string(),
@@ -477,6 +482,7 @@ async fn flashloan_builder_rejects_when_no_provider_available() {
         stats.clone(),
         true,
         false,
+        1,
     ));
     let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), bundle_signer.address()));

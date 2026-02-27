@@ -40,6 +40,7 @@ async fn mev_share_hint_round_trip() {
     let stats = Arc::new(Stats::default());
     let bundle_sender = Arc::new(BundleSender::new(
         http.clone(),
+        reqwest::Client::new(),
         true,
         "https://relay.flashbots.net".to_string(),
         "https://mev-share.flashbots.net".to_string(),
@@ -53,6 +54,7 @@ async fn mev_share_hint_round_trip() {
         stats.clone(),
         true,
         false,
+        1,
     ));
     let db = Database::new("sqlite::memory:").await.expect("db");
     let portfolio = Arc::new(PortfolioManager::new(http.clone(), signer.address()));

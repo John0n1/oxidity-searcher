@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
+use crate::app::logging::ansi_tables_enabled;
 use crate::common::constants::default_routers_for_chain;
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
@@ -15,7 +16,9 @@ use crate::services::strategy::decode::{
     extract_swap_deadline, target_token,
 };
 use crate::services::strategy::planning::bundles::NonceLease;
-use crate::services::strategy::planning::{ApproveTx, BackrunTx, FrontRunTx};
+use crate::services::strategy::planning::{
+    ApproveTx, BackrunTx, ExecutionPlanner, FrontRunTx, PlanType, PlannerInput,
+};
 use crate::services::strategy::strategy::{
     AllowlistCategory, ReceiptStatus, SkipReason, StrategyExecutor, StrategyWork,
 };
@@ -24,56 +27,23 @@ use alloy::consensus::Transaction as ConsensusTx;
 use alloy::eips::eip2718::Encodable2718;
 use alloy::network::TransactionResponse;
 use alloy::primitives::TxKind;
-use alloy::primitives::{Address, B256, U256, keccak256};
+use alloy::primitives::{Address, B256, I256, U256, keccak256};
 use alloy::rpc::types::eth::state::StateOverridesBuilder;
 use alloy::rpc::types::eth::{Transaction, TransactionInput, TransactionRequest};
 use alloy_sol_types::SolCall;
 
-const DEFAULT_ATOMIC_ARB_SCAN_COOLDOWN_SECS: u64 = 10;
-const DEFAULT_LIQUIDATION_SCAN_COOLDOWN_SECS: u64 = 4;
-const DEFAULT_ATOMIC_ARB_MAX_CANDIDATES: usize = 10;
-const DEFAULT_ATOMIC_ARB_MAX_ATTEMPTS: usize = 2;
-const DEFAULT_ATOMIC_ARB_GAS_HINT: u64 = 260_000;
-const DEFAULT_ATOMIC_ARB_SEED_WEI: u128 = 3_000_000_000_000_000u128; // 0.003 ETH
-
 impl StrategyExecutor {
-    fn env_usize_bounded(key: &str, default: usize, min: usize, max: usize) -> usize {
-        std::env::var(key)
-            .ok()
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            .unwrap_or(default)
-            .clamp(min, max)
+    fn deadline_min_seconds_ahead(&self) -> u64 {
+        self.runtime.deadline_min_seconds_ahead
     }
 
-    fn env_u64_bounded_local(key: &str, default: u64, min: u64, max: u64) -> u64 {
-        std::env::var(key)
-            .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .unwrap_or(default)
-            .clamp(min, max)
+    fn deadline_allow_past_secs(&self) -> u64 {
+        self.runtime.deadline_allow_past_secs
     }
 
-    fn strategy_flag_enabled(key: &str, default: bool) -> bool {
-        std::env::var(key)
-            .ok()
-            .map(|v| {
-                let v = v.trim().to_ascii_lowercase();
-                matches!(v.as_str(), "1" | "true" | "yes" | "on")
-            })
-            .unwrap_or(default)
-    }
-
-    fn deadline_min_seconds_ahead() -> u64 {
-        Self::env_u64_bounded_local("DEADLINE_MIN_SECONDS_AHEAD", 2, 0, 300)
-    }
-
-    fn deadline_allow_past_secs() -> u64 {
-        Self::env_u64_bounded_local("DEADLINE_ALLOW_PAST_SECS", 0, 0, 900)
-    }
-
-    fn deadline_guard_threshold(now: u64) -> u64 {
-        now.saturating_add(Self::deadline_min_seconds_ahead())
-            .saturating_sub(Self::deadline_allow_past_secs())
+    fn deadline_guard_threshold(&self, now: u64) -> u64 {
+        now.saturating_add(self.deadline_min_seconds_ahead())
+            .saturating_sub(self.deadline_allow_past_secs())
     }
 
     fn simulation_failure_is_flashloan_insolvency_like(detail: &str) -> bool {
@@ -125,17 +95,11 @@ impl StrategyExecutor {
     }
 
     fn should_run_signal_scan(&self, liquidation: bool, now_unix: u64) -> bool {
-        let cooldown_key = if liquidation {
-            "LIQUIDATION_SCAN_COOLDOWN_SECS"
+        let cooldown = if liquidation {
+            self.runtime.liquidation_scan_cooldown_secs
         } else {
-            "ATOMIC_ARB_SCAN_COOLDOWN_SECS"
+            self.runtime.atomic_arb_scan_cooldown_secs
         };
-        let default_cooldown = if liquidation {
-            DEFAULT_LIQUIDATION_SCAN_COOLDOWN_SECS
-        } else {
-            DEFAULT_ATOMIC_ARB_SCAN_COOLDOWN_SECS
-        };
-        let cooldown = Self::env_u64_bounded_local(cooldown_key, default_cooldown, 1, 120);
         let counter = if liquidation {
             &self.last_liquidation_scan_unix
         } else {
@@ -162,11 +126,11 @@ impl StrategyExecutor {
         received_at: std::time::Instant,
         reason: &str,
     ) -> Result<Option<String>, AppError> {
-        if !Self::strategy_flag_enabled("STRATEGY_ATOMIC_ARB_ENABLED", true) {
+        if !self.runtime.strategy_atomic_arb_enabled {
             return Ok(None);
         }
-        let liquidation_signal = Self::strategy_flag_enabled("STRATEGY_LIQUIDATION_ENABLED", true)
-            && self.is_liquidation_signal_tx(tx, to_addr);
+        let liquidation_signal =
+            self.runtime.strategy_liquidation_enabled && self.is_liquidation_signal_tx(tx, to_addr);
         let now_unix = crate::services::strategy::time_utils::current_unix();
         if !self.should_run_signal_scan(liquidation_signal, now_unix) {
             return Ok(None);
@@ -175,30 +139,10 @@ impl StrategyExecutor {
             return Ok(None);
         };
 
-        let gas_hint = Self::env_u64_bounded_local(
-            "ATOMIC_ARB_GAS_HINT",
-            DEFAULT_ATOMIC_ARB_GAS_HINT,
-            120_000,
-            700_000,
-        );
-        let max_candidates = Self::env_usize_bounded(
-            "ATOMIC_ARB_MAX_CANDIDATES",
-            DEFAULT_ATOMIC_ARB_MAX_CANDIDATES,
-            2,
-            64,
-        );
-        let max_attempts = Self::env_usize_bounded(
-            "ATOMIC_ARB_MAX_ATTEMPTS",
-            DEFAULT_ATOMIC_ARB_MAX_ATTEMPTS,
-            1,
-            8,
-        );
-        let seed_floor = U256::from(
-            std::env::var("ATOMIC_ARB_SEED_WEI")
-                .ok()
-                .and_then(|v| v.trim().parse::<u128>().ok())
-                .unwrap_or(DEFAULT_ATOMIC_ARB_SEED_WEI),
-        );
+        let gas_hint = self.runtime.atomic_arb_gas_hint;
+        let max_candidates = self.runtime.atomic_arb_max_candidates;
+        let max_attempts = self.runtime.atomic_arb_max_attempts;
+        let seed_floor = self.runtime.atomic_arb_seed_wei;
 
         let mut candidates = self
             .reserve_cache
@@ -934,12 +878,7 @@ impl StrategyExecutor {
             let framed_plain = build_framed(&lines_plain, false);
             let framed_color = build_framed(&lines_color, true);
 
-            use std::io::IsTerminal;
-            let ansi_enabled = std::env::var("NO_COLOR").is_err()
-                && std::env::var("TERM")
-                    .map(|v| !v.eq_ignore_ascii_case("dumb"))
-                    .unwrap_or(true)
-                && std::io::stderr().is_terminal();
+            let ansi_enabled = ansi_tables_enabled();
 
             if ansi_enabled {
                 tracing::info!(
@@ -988,7 +927,7 @@ impl StrategyExecutor {
             );
             return None;
         }
-        if Self::strategy_flag_enabled("STRATEGY_REQUIRE_TOKENLIST", true)
+        if self.runtime.strategy_require_tokenlist
             && self
                 .token_manager
                 .info(self.chain_id, target_token)
@@ -1068,14 +1007,14 @@ impl StrategyExecutor {
     ) -> Result<Option<String>, AppError> {
         if let Some(deadline) = extract_swap_deadline(tx.input()) {
             let now = crate::services::strategy::time_utils::current_unix();
-            let threshold = Self::deadline_guard_threshold(now);
+            let threshold = self.deadline_guard_threshold(now);
             if deadline <= threshold {
                 self.log_skip(
                     SkipReason::SimulationFailed,
                     &format!(
                         "victim_deadline_passed deadline={deadline} now={now} threshold={threshold} min_ahead={} allow_past={}",
-                        Self::deadline_min_seconds_ahead(),
-                        Self::deadline_allow_past_secs()
+                        self.deadline_min_seconds_ahead(),
+                        self.deadline_allow_past_secs()
                     ),
                 );
                 return Ok(None);
@@ -1088,7 +1027,7 @@ impl StrategyExecutor {
                 return Ok(None);
             }
         };
-        if Self::strategy_flag_enabled("STRATEGY_LIQUIDATION_ENABLED", true)
+        if self.runtime.strategy_liquidation_enabled
             && self.is_liquidation_signal_tx(tx, to_addr)
             && let Some(submitted) = self
                 .try_signal_driven_arb(tx, to_addr, received_at, "liquidation_signal")
@@ -1453,14 +1392,14 @@ impl StrategyExecutor {
     ) -> Result<Option<String>, AppError> {
         if let Some(deadline) = extract_swap_deadline(&hint.call_data) {
             let now = crate::services::strategy::time_utils::current_unix();
-            let threshold = Self::deadline_guard_threshold(now);
+            let threshold = self.deadline_guard_threshold(now);
             if deadline <= threshold {
                 self.log_skip(
                     SkipReason::SimulationFailed,
                     &format!(
                         "hint_deadline_passed deadline={deadline} now={now} threshold={threshold} min_ahead={} allow_past={}",
-                        Self::deadline_min_seconds_ahead(),
-                        Self::deadline_allow_past_secs()
+                        self.deadline_min_seconds_ahead(),
+                        self.deadline_allow_past_secs()
                     ),
                 );
                 return Ok(None);
@@ -1939,7 +1878,6 @@ impl StrategyExecutor {
             );
             return Ok(None);
         }
-        let trade_balance = wallet_chain_balance;
         let allow_front_run = self.sandwich_attacks_enabled
             && (direction == SwapDirection::BuyWithEth || !has_wrapped);
         let min_bundle_gas = self.adaptive_min_bundle_gas_estimate(
@@ -1964,17 +1902,79 @@ impl StrategyExecutor {
             return Ok(None);
         }
 
-        // On low-balance wallets, prefer flashloan backrun-only path early so
-        // principal sizing does not block viable gas-funded opportunities.
-        let prefer_flashloan_backrun_only = has_wrapped
-            && self.should_use_flashloan(min_bundle_gas_cost, wallet_chain_balance, &gas_fees);
-        let allow_front_run = allow_front_run && !prefer_flashloan_backrun_only;
+        let planner = ExecutionPlanner::default();
+        let planner_input = PlannerInput {
+            wallet_balance: wallet_chain_balance,
+            victim_value,
+            gas_cost_estimate: min_bundle_gas_cost,
+            has_wrapped_path: has_wrapped,
+            flashloan_available: self.has_usable_flashloan_provider(),
+            allow_hybrid: true,
+            base_trade_hint: observed_swap.amount_in.max(victim_value),
+            min_size: U256::from(1_000_000_000_000u64),
+            max_size: wallet_chain_balance
+                .saturating_add(victim_value)
+                .saturating_add(observed_swap.amount_in)
+                .max(U256::from(1_000_000_000_000u64)),
+            slippage_bps: self.effective_slippage_bps(),
+            safety_margin_bps: self
+                .adaptive_base_floor_bps(&gas_fees)
+                .saturating_sub(10_000),
+            uncertainty_bps: self
+                .adaptive_cost_floor_bps(&gas_fees)
+                .saturating_sub(10_000),
+        };
+        let planner_decision = planner.plan(&planner_input);
+        let planner_trace = if let Some(best) = planner_decision.best_plan.as_ref() {
+            format!(
+                "plan={} size={} expected_net={} inclusion_bps={} floor={} candidates={}",
+                best.plan_type.as_str(),
+                best.size_wei,
+                best.score.expected_net_wei,
+                best.score.inclusion_probability_bps,
+                best.score.dynamic_profit_floor_wei,
+                planner_decision.candidates.len()
+            )
+        } else {
+            format!(
+                "plan=rejected reason={} candidates={}",
+                planner_decision
+                    .rejection_reason
+                    .as_deref()
+                    .unwrap_or("no_candidate"),
+                planner_decision.candidates.len()
+            )
+        };
+        self.stats.record_decision_trace(planner_trace.clone());
+        tracing::debug!(target: "planner", trace = %planner_trace, "Execution planner decision");
+
+        let Some(best_plan) = planner_decision.best_plan.as_ref() else {
+            let reason = planner_decision
+                .rejection_reason
+                .as_deref()
+                .unwrap_or("net_negative_after_buffers");
+            self.stats.record_opportunity_rejection(reason);
+            self.log_skip(
+                SkipReason::ProfitOrGasGuard,
+                &format!("planner_rejected reason={reason}"),
+            );
+            return Ok(None);
+        };
+        let planned_plan_type = best_plan.plan_type;
+        let planned_trade_size = best_plan.size_wei.max(U256::from(1u64));
+        let allow_front_run = allow_front_run && planned_plan_type == PlanType::OwnCapital;
 
         let mut attack_value_eth = U256::ZERO;
         let mut front_run: Option<FrontRunTx> = None;
         if allow_front_run {
             match self
-                .build_front_run_tx(observed_swap, &gas_fees, trade_balance, gas_limit_hint, 0)
+                .build_front_run_tx(
+                    observed_swap,
+                    &gas_fees,
+                    planned_trade_size.min(wallet_chain_balance),
+                    gas_limit_hint,
+                    0,
+                )
                 .await
             {
                 Ok(Some(f)) => {
@@ -2026,41 +2026,21 @@ impl StrategyExecutor {
             }
         }
 
-        let mut required_value = attack_value_eth;
-        let mut required_total_for_plan = required_value.saturating_add(min_bundle_gas_cost);
-        let mut flashloan_needed_for_plan = has_wrapped
-            && self.should_use_flashloan(required_total_for_plan, wallet_chain_balance, &gas_fees);
-        if flashloan_needed_for_plan && front_run.is_some() {
-            tracing::info!(
-                target: "strategy",
-                required_value = %required_value,
-                required_total_with_gas = %required_total_for_plan,
-                min_bundle_gas_cost = %min_bundle_gas_cost,
-                max_fee_per_gas = gas_fees.max_fee_per_gas,
-                wallet_balance = %wallet_chain_balance,
-                "Underfunded front-run plan; falling back to flashloan backrun-only path"
-            );
+        if front_run.is_some() && planned_plan_type != PlanType::OwnCapital {
             front_run = None;
             approvals.clear();
             attack_value_eth = U256::ZERO;
-            required_value = U256::ZERO;
-            required_total_for_plan = required_value.saturating_add(min_bundle_gas_cost);
-            flashloan_needed_for_plan = has_wrapped
-                && self.should_use_flashloan(
-                    required_total_for_plan,
-                    wallet_chain_balance,
-                    &gas_fees,
-                );
         }
-        let use_flashloan = has_wrapped && flashloan_needed_for_plan && front_run.is_none();
-        // Keep flashloan sizing near observed victim flow to reduce quote/build failures.
+        let use_flashloan = has_wrapped
+            && matches!(planned_plan_type, PlanType::Flashloan | PlanType::Hybrid)
+            && front_run.is_none();
         let trade_balance = if use_flashloan {
             let flashloan_floor = U256::from(5_000_000_000_000_000u128); // 0.005 ETH
-            wallet_chain_balance
-                .saturating_add(victim_value)
+            planned_trade_size
+                .max(wallet_chain_balance.saturating_add(victim_value))
                 .max(flashloan_floor)
         } else {
-            trade_balance
+            planned_trade_size.min(wallet_chain_balance.max(U256::from(1u64)))
         };
 
         let backrun = match self
@@ -2150,8 +2130,7 @@ impl StrategyExecutor {
                     backrun
                 } else {
                     let mut recovered_non_flash: Option<BackrunTx> = None;
-                    let allow_non_flash_fallback =
-                        Self::strategy_flag_enabled("FLASHLOAN_ALLOW_NONFLASH_FALLBACK", false);
+                    let allow_non_flash_fallback = self.runtime.flashloan_allow_nonflash_fallback;
                     if use_flashloan && allow_non_flash_fallback {
                         match self
                             .build_backrun_tx(
@@ -2193,9 +2172,11 @@ impl StrategyExecutor {
                     if let Some(backrun) = recovered_non_flash {
                         backrun
                     } else {
-                        let is_v3_fallback_eligible = observed_swap.router_kind == RouterKind::V3Like
+                        let is_v3_fallback_eligible = observed_swap.router_kind
+                            == RouterKind::V3Like
                             && (err_msg.contains("V3 liquidity too low")
-                                || err_msg.contains("Flashloan same-router V3 roundtrip non-positive")
+                                || err_msg
+                                    .contains("Flashloan same-router V3 roundtrip non-positive")
                                 || err_msg.contains("Flashloan quoted V3 roundtrip insolvent"));
                         if !is_v3_fallback_eligible {
                             self.log_skip(SkipReason::BackrunBuildFailed, &err_msg);
@@ -2717,14 +2698,36 @@ impl StrategyExecutor {
             gas_fees,
             min_usd_floor_wei,
         );
+        let profit_if_included_wei = net_profit_wei.saturating_sub(profit_floor);
+        let inclusion_probability_bps = self.inclusion_probability_bps(gas_fees);
+        let cost_if_failed_wei =
+            self.failure_cost_wei(gas_cost_wei, extra_costs, backrun.uses_flashloan);
+        let to_i256 = |value: U256| {
+            if value > U256::from(i128::MAX as u128) {
+                I256::from_raw(U256::from(i128::MAX as u128))
+            } else {
+                I256::from_raw(U256::from(value.to::<u128>()))
+            }
+        };
+        let expected_net_wei = (to_i256(profit_if_included_wei)
+            * I256::from_raw(U256::from(inclusion_probability_bps))
+            - to_i256(cost_if_failed_wei)
+                * I256::from_raw(U256::from(
+                    10_000u64.saturating_sub(inclusion_probability_bps),
+                )))
+            / I256::from_raw(U256::from(10_000u64));
 
-        if net_profit_wei < profit_floor {
+        if expected_net_wei <= I256::ZERO {
             self.log_skip(
                 SkipReason::ProfitOrGasGuard,
                 &format!(
-                    "Net {} < Floor {} (base_floor={} gas_cost={} extra_costs={} base_bps={} cost_bps={} min_usd_floor={})",
+                    "expected_net={} <= 0 (net={} floor={} profit_if_included={} cost_if_failed={} p_inclusion_bps={} base_floor={} gas_cost={} extra_costs={} base_bps={} cost_bps={} min_usd_floor={})",
+                    expected_net_wei,
                     net_profit_wei,
                     profit_floor,
+                    profit_if_included_wei,
+                    cost_if_failed_wei,
+                    inclusion_probability_bps,
                     base_profit_floor,
                     gas_cost_wei,
                     extra_costs,
@@ -2986,14 +2989,8 @@ mod tests {
             route_plan: None,
         };
 
-        let planned = exec.adaptive_min_bundle_gas_from_plan(
-            120_000,
-            220_000,
-            &[],
-            &None,
-            &backrun,
-            &None,
-        );
+        let planned =
+            exec.adaptive_min_bundle_gas_from_plan(120_000, 220_000, &[], &None, &backrun, &None);
 
         // 500k main gas with 5% headroom; no extra flashloan overhead should be added.
         assert_eq!(planned, 525_000);

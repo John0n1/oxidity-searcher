@@ -14,11 +14,13 @@ use alloy::primitives::Address;
 use alloy_sol_types::SolCall;
 use dashmap::{DashMap, DashSet};
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex as TokioMutex;
 
 #[derive(Clone)]
 pub struct RouterDiscovery {
@@ -34,7 +36,61 @@ pub struct RouterDiscovery {
     flush_every: u64,
     check_interval: Duration,
     max_entries: usize,
+    budget: RouterDiscoveryBudget,
+    cache_path: Option<String>,
+    force_full_rescan: bool,
+    cooldown_until: Arc<TokioMutex<Option<Instant>>>,
+    metrics: Arc<RouterDiscoveryMetrics>,
     state: Arc<DashMap<Address, DiscoveryState>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RouterDiscoveryBudget {
+    pub max_blocks_per_cycle: u64,
+    pub max_rpc_calls_per_cycle: u64,
+    pub cycle_timeout: Duration,
+    pub failure_budget: u64,
+    pub cooldown: Duration,
+}
+
+impl Default for RouterDiscoveryBudget {
+    fn default() -> Self {
+        Self {
+            max_blocks_per_cycle: 256,
+            max_rpc_calls_per_cycle: 512,
+            cycle_timeout: Duration::from_secs(8),
+            failure_budget: 16,
+            cooldown: Duration::from_secs(45),
+        }
+    }
+}
+
+#[derive(Default)]
+struct RouterDiscoveryMetrics {
+    rpc_calls: AtomicU64,
+    budget_exhaustions: AtomicU64,
+    cycle_failures: AtomicU64,
+    cooldown_skips: AtomicU64,
+    cache_hits: AtomicU64,
+    cache_writes: AtomicU64,
+}
+
+#[derive(Clone)]
+pub struct RouterDiscoveryConfig {
+    pub chain_id: u64,
+    pub allowlist: Arc<DashSet<Address>>,
+    pub db: Database,
+    pub http_provider: Option<String>,
+    pub etherscan_api_key: Option<String>,
+    pub enabled: bool,
+    pub auto_allow: bool,
+    pub min_hits: u64,
+    pub flush_every: u64,
+    pub check_interval: Duration,
+    pub max_entries: usize,
+    pub budget: RouterDiscoveryBudget,
+    pub cache_path: Option<String>,
+    pub force_full_rescan: bool,
 }
 
 #[derive(Clone)]
@@ -51,24 +107,27 @@ struct RouterClassification {
     note: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct RouterDiscoveryCache {
+    version: u32,
+    chain_id: u64,
+    last_success_unix: i64,
+    routers: Vec<RouterDiscoveryCacheEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RouterDiscoveryCacheEntry {
+    address: String,
+    kind: String,
+    note: String,
+    last_success_unix: i64,
+}
+
 const SELECTOR_KIND_SHARE_BPS_MIN: u64 = 7_000;
 const SELECTOR_DISTINCT_MIN: usize = 2;
 
 impl RouterDiscovery {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        chain_id: u64,
-        allowlist: Arc<DashSet<Address>>,
-        db: Database,
-        http_provider: Option<String>,
-        etherscan_api_key: Option<String>,
-        enabled: bool,
-        auto_allow: bool,
-        min_hits: u64,
-        flush_every: u64,
-        check_interval: Duration,
-        max_entries: usize,
-    ) -> Result<Self, AppError> {
+    pub fn new(config: RouterDiscoveryConfig) -> Result<Self, AppError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(8))
             .build()
@@ -76,21 +135,34 @@ impl RouterDiscovery {
                 AppError::Initialization(format!("router discovery HTTP client init failed: {e}"))
             })?;
 
-        Ok(Self {
-            chain_id,
-            allowlist,
-            db,
+        let mut discovery = Self {
+            chain_id: config.chain_id,
+            allowlist: config.allowlist,
+            db: config.db,
             client,
-            http_provider,
-            etherscan_api_key,
-            enabled,
-            auto_allow,
-            min_hits: min_hits.max(1),
-            flush_every: flush_every.max(1),
-            check_interval,
-            max_entries: max_entries.max(1),
+            http_provider: config.http_provider,
+            etherscan_api_key: config.etherscan_api_key,
+            enabled: config.enabled,
+            auto_allow: config.auto_allow,
+            min_hits: config.min_hits.max(1),
+            flush_every: config.flush_every.max(1),
+            check_interval: config.check_interval,
+            max_entries: config.max_entries.max(1),
+            budget: RouterDiscoveryBudget {
+                max_blocks_per_cycle: config.budget.max_blocks_per_cycle.max(1),
+                max_rpc_calls_per_cycle: config.budget.max_rpc_calls_per_cycle.max(4),
+                cycle_timeout: config.budget.cycle_timeout.max(Duration::from_millis(500)),
+                failure_budget: config.budget.failure_budget.max(1),
+                cooldown: config.budget.cooldown.max(Duration::from_secs(5)),
+            },
+            cache_path: config.cache_path,
+            force_full_rescan: config.force_full_rescan,
+            cooldown_until: Arc::new(TokioMutex::new(None)),
+            metrics: Arc::new(RouterDiscoveryMetrics::default()),
             state: Arc::new(DashMap::new()),
-        })
+        };
+        discovery.load_persisted_cache();
+        Ok(discovery)
     }
 
     pub fn record_unknown_router(&self, router: Address, source: &str) {
@@ -193,6 +265,93 @@ impl RouterDiscovery {
                 .await;
         });
     }
+
+    fn load_persisted_cache(&mut self) {
+        if self.force_full_rescan {
+            return;
+        }
+        let Some(path) = self.cache_path.as_deref() else {
+            return;
+        };
+        let body = match std::fs::read_to_string(path) {
+            Ok(body) => body,
+            Err(_) => return,
+        };
+        let parsed: RouterDiscoveryCache = match serde_json::from_str(&body) {
+            Ok(parsed) => parsed,
+            Err(_) => return,
+        };
+        if parsed.chain_id != self.chain_id || parsed.version != 1 {
+            return;
+        }
+        let mut restored = 0u64;
+        for entry in parsed.routers {
+            if let Ok(addr) = entry.address.parse::<Address>() {
+                self.allowlist.insert(addr);
+                restored = restored.saturating_add(1);
+            }
+        }
+        if restored > 0 {
+            self.metrics
+                .cache_hits
+                .fetch_add(restored, Ordering::Relaxed);
+            tracing::info!(
+                target: "router_discovery",
+                restored,
+                path = %path,
+                "Loaded router discovery cache"
+            );
+        }
+    }
+
+    async fn persist_cache_entry(&self, router: Address, kind: &str, note: &str) {
+        let Some(path) = self.cache_path.clone() else {
+            return;
+        };
+        let parent = std::path::Path::new(&path)
+            .parent()
+            .map(|p| p.to_path_buf());
+        let router_hex = format!("{router:#x}");
+        let kind = kind.to_string();
+        let note = note.to_string();
+        let chain_id = self.chain_id;
+        tokio::spawn(async move {
+            if let Some(parent) = parent {
+                let _ = tokio::fs::create_dir_all(parent).await;
+            }
+            let mut cache = match tokio::fs::read_to_string(&path).await {
+                Ok(body) => serde_json::from_str::<RouterDiscoveryCache>(&body).unwrap_or_default(),
+                Err(_) => RouterDiscoveryCache::default(),
+            };
+            if cache.version == 0 {
+                cache.version = 1;
+            }
+            cache.chain_id = chain_id;
+            cache.last_success_unix = chrono::Utc::now().timestamp();
+            if let Some(existing) = cache.routers.iter_mut().find(|e| e.address == router_hex) {
+                existing.kind = kind.clone();
+                existing.note = note.clone();
+                existing.last_success_unix = cache.last_success_unix;
+            } else {
+                cache.routers.push(RouterDiscoveryCacheEntry {
+                    address: router_hex.clone(),
+                    kind: kind.clone(),
+                    note: note.clone(),
+                    last_success_unix: cache.last_success_unix,
+                });
+            }
+            if cache.routers.len() > 20_000 {
+                cache
+                    .routers
+                    .sort_by_key(|e| std::cmp::Reverse(e.last_success_unix));
+                cache.routers.truncate(20_000);
+            }
+            if let Ok(encoded) = serde_json::to_vec_pretty(&cache) {
+                let _ = tokio::fs::write(&path, encoded).await;
+            }
+        });
+        self.metrics.cache_writes.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl RouterDiscovery {
@@ -222,6 +381,8 @@ impl RouterDiscovery {
                     note = %classification.note,
                     "Auto-approved router"
                 );
+                self.persist_cache_entry(router, kind_str, &classification.note)
+                    .await;
             }
             Ok(None) => {
                 let _ = self
@@ -479,6 +640,8 @@ impl RouterDiscovery {
                 note = %classification.note,
                 "Bootstrap-approved top unknown router"
             );
+            self.persist_cache_entry(router, kind_str, &classification.note)
+                .await;
         }
 
         if approved > 0 {
@@ -616,8 +779,27 @@ impl RouterDiscovery {
         let Some(_) = &self.http_provider else {
             return Ok(HashMap::new());
         };
+        if let Some(until) = *self.cooldown_until.lock().await
+            && Instant::now() < until
+        {
+            self.metrics.cooldown_skips.fetch_add(1, Ordering::Relaxed);
+            return Ok(HashMap::new());
+        }
 
-        let head_val = self.rpc_request("eth_blockNumber", json!([])).await?;
+        let cycle_started = Instant::now();
+        let mut exhausted_budget = false;
+        let mut failures = 0u64;
+        let mut cooldown_reason = "ok";
+        let mut cycle_rpc_calls = 0u64;
+
+        let head_val = match self.rpc_request("eth_blockNumber", json!([])).await {
+            Ok(v) => v,
+            Err(e) => {
+                self.metrics.cycle_failures.fetch_add(1, Ordering::Relaxed);
+                return Err(e);
+            }
+        };
+        cycle_rpc_calls = cycle_rpc_calls.saturating_add(1);
         let Some(head_hex) = head_val.as_str() else {
             return Err(AppError::Initialization(
                 "eth_blockNumber returned non-string".into(),
@@ -625,15 +807,51 @@ impl RouterDiscovery {
         };
         let head = u64::from_str_radix(head_hex.trim_start_matches("0x"), 16)
             .map_err(|e| AppError::Initialization(format!("Invalid block number hex: {e}")))?;
-        let window = lookback_blocks.max(1);
+        let window = lookback_blocks.min(self.budget.max_blocks_per_cycle).max(1);
+        if lookback_blocks > window {
+            exhausted_budget = true;
+            cooldown_reason = "max_blocks_per_cycle";
+        }
         let start = head.saturating_sub(window.saturating_sub(1));
 
         let mut out: HashMap<String, HashMap<String, u64>> = HashMap::new();
         for block_number in start..=head {
+            if cycle_started.elapsed() >= self.budget.cycle_timeout {
+                exhausted_budget = true;
+                cooldown_reason = "cycle_timeout";
+                break;
+            }
+            if cycle_rpc_calls >= self.budget.max_rpc_calls_per_cycle {
+                exhausted_budget = true;
+                cooldown_reason = "max_rpc_calls_per_cycle";
+                break;
+            }
             let block_hex = format!("0x{block_number:x}");
-            let block_val = self
+            let block_val = match self
                 .rpc_request("eth_getBlockByNumber", json!([block_hex, true]))
-                .await?;
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    cycle_rpc_calls = cycle_rpc_calls.saturating_add(1);
+                    failures = failures.saturating_add(1);
+                    self.metrics.cycle_failures.fetch_add(1, Ordering::Relaxed);
+                    tracing::debug!(
+                        target: "router_discovery",
+                        error = %e,
+                        block_number,
+                        failures,
+                        "Failed block selector collection request"
+                    );
+                    if failures >= self.budget.failure_budget {
+                        exhausted_budget = true;
+                        cooldown_reason = "failure_budget";
+                        break;
+                    }
+                    continue;
+                }
+            };
+            cycle_rpc_calls = cycle_rpc_calls.saturating_add(1);
             let Some(txs) = block_val.get("transactions").and_then(|v| v.as_array()) else {
                 continue;
             };
@@ -662,6 +880,19 @@ impl RouterDiscovery {
                     .or_insert(1);
             }
         }
+        if exhausted_budget {
+            self.metrics
+                .budget_exhaustions
+                .fetch_add(1, Ordering::Relaxed);
+            let mut guard = self.cooldown_until.lock().await;
+            *guard = Some(Instant::now() + self.budget.cooldown);
+            tracing::warn!(
+                target: "router_discovery",
+                reason = cooldown_reason,
+                cooldown_secs = self.budget.cooldown.as_secs(),
+                "Router discovery budget exhausted; applying cooldown"
+            );
+        }
         Ok(out)
     }
 
@@ -670,6 +901,7 @@ impl RouterDiscovery {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, AppError> {
+        self.metrics.rpc_calls.fetch_add(1, Ordering::Relaxed);
         let Some(http_provider) = &self.http_provider else {
             return Err(AppError::Config(
                 "Router discovery RPC URL is not configured".into(),

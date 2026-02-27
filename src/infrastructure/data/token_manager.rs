@@ -361,7 +361,8 @@ mod tests {
         fs::write(&metamask, metamask_body).expect("metamask write");
         fs::write(&contract_map, contract_map_body).expect("contract map write");
 
-        let mgr = TokenManager::load_from_file(tokenlist.to_str().expect("utf8 path")).expect("load");
+        let mgr =
+            TokenManager::load_from_file(tokenlist.to_str().expect("utf8 path")).expect("load");
 
         let info_primary = mgr
             .info(

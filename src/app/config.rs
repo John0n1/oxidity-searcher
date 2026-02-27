@@ -5,17 +5,43 @@ use crate::common::data_path::{resolve_data_path, resolve_required_data_path};
 use crate::common::parsing::parse_boolish;
 use crate::domain::constants;
 use crate::domain::error::AppError;
-use alloy::primitives::Address;
-use config::{Config, Environment, File};
-use serde::{Deserialize, Deserializer};
-use serde_json;
+use crate::services::strategy::strategy::StrategyRuntimeSettings;
+use alloy::primitives::{Address, U256, keccak256};
+use config::{Config, Environment, File, Map};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::str::FromStr;
 use url::Url;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfigFieldSource {
+    pub field: String,
+    pub canonical_key: String,
+    pub selected_key: Option<String>,
+    pub selected_source: String,
+    pub redacted_value: Option<String>,
+    pub deprecated_since: Option<String>,
+    pub remove_after: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfigLoadReport {
+    pub field_sources: Vec<ConfigFieldSource>,
+    pub warnings: Vec<String>,
+    pub effective_config_hash: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LoadedSettings {
+    pub settings: GlobalSettings,
+    pub report: ConfigLoadReport,
+    pub config_debug: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct GlobalSettings {
     // General
     #[serde(default = "default_debug")]
@@ -61,11 +87,15 @@ pub struct GlobalSettings {
     pub data_dir: Option<String>,
     #[serde(default = "default_metrics_port")]
     pub metrics_port: u16,
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
     #[serde(default = "default_true")]
     pub strategy_enabled: bool,
     pub strategy_workers: Option<usize>,
     pub metrics_bind: Option<String>,
     pub metrics_token: Option<String>,
+    #[serde(default = "default_false")]
+    pub metrics_enable_shutdown: bool,
     #[serde(default = "default_slippage_bps")]
     pub slippage_bps: u64,
     /// Multiplier applied to the base dynamic profit floor.
@@ -117,6 +147,108 @@ pub struct GlobalSettings {
     pub bundle_use_replacement_uuid: bool,
     #[serde(default = "default_bundle_cancel_previous")]
     pub bundle_cancel_previous: bool,
+    #[serde(default = "default_bundle_target_blocks")]
+    pub bundle_target_blocks: u64,
+    #[serde(default = "default_feed_audit_max_lag_blocks")]
+    pub feed_audit_max_lag_blocks: u64,
+    #[serde(default = "default_feed_audit_recheck_secs")]
+    pub feed_audit_recheck_secs: u64,
+    pub feed_audit_public_rpc_url: Option<String>,
+    #[serde(default = "default_feed_audit_public_tip_lag_blocks")]
+    pub feed_audit_public_tip_lag_blocks: u64,
+    #[serde(default = "default_flashloan_adaptive_scale_enabled")]
+    pub flashloan_adaptive_scale_enabled: bool,
+    #[serde(default = "default_flashloan_adaptive_min_scale_bps")]
+    pub flashloan_adaptive_min_scale_bps: u64,
+    #[serde(default = "default_flashloan_adaptive_downshift_step_bps")]
+    pub flashloan_adaptive_downshift_step_bps: u64,
+    #[serde(default = "default_router_risk_min_samples")]
+    pub router_risk_min_samples: u64,
+    #[serde(default = "default_router_risk_fail_rate_bps")]
+    pub router_risk_fail_rate_bps: u64,
+    #[serde(default = "default_false")]
+    pub router_risk_hard_block: bool,
+    #[serde(default = "default_sandwich_risk_max_victim_slippage_bps")]
+    pub sandwich_risk_max_victim_slippage_bps: u64,
+    #[serde(default = "default_sandwich_risk_small_wallet_wei")]
+    pub sandwich_risk_small_wallet_wei: u128,
+    #[serde(default = "default_toxic_probe_failure_threshold")]
+    pub toxic_probe_failure_threshold: u32,
+    #[serde(default = "default_toxic_probe_failure_window_secs")]
+    pub toxic_probe_failure_window_secs: u64,
+    #[serde(default = "default_balance_cap_curve_k")]
+    pub balance_cap_curve_k: f64,
+    #[serde(default = "default_balance_cap_min_bps")]
+    pub balance_cap_min_bps: u64,
+    #[serde(default = "default_balance_cap_max_bps")]
+    pub balance_cap_max_bps: u64,
+    #[serde(default = "default_auto_slippage_base_bps")]
+    pub auto_slippage_base_bps: f64,
+    #[serde(default = "default_auto_slippage_balance_log_slope")]
+    pub auto_slippage_balance_log_slope: f64,
+    #[serde(default = "default_auto_slippage_balance_scale")]
+    pub auto_slippage_balance_scale: f64,
+    #[serde(default = "default_auto_slippage_vol_mult_bps")]
+    pub auto_slippage_vol_mult_bps: u64,
+    #[serde(default = "default_auto_slippage_min_bps")]
+    pub auto_slippage_min_bps: u64,
+    #[serde(default = "default_auto_slippage_max_bps")]
+    pub auto_slippage_max_bps: u64,
+    #[serde(default = "default_false")]
+    pub force_canonical_exec_router: bool,
+    #[serde(default = "default_allow_unknown_router_decode")]
+    pub allow_unknown_router_decode: bool,
+    pub profit_floor_abs_eth: Option<f64>,
+    #[serde(default = "default_profit_floor_mult_gas")]
+    pub profit_floor_mult_gas: u64,
+    pub profit_floor_min_usd: Option<f64>,
+    pub gas_ratio_limit_floor_bps: Option<u64>,
+    #[serde(default = "default_flashloan_prefer_wallet_max_wei")]
+    pub flashloan_prefer_wallet_max_wei: u128,
+    #[serde(default = "default_flashloan_value_scale_bps")]
+    pub flashloan_value_scale_bps: u64,
+    #[serde(default = "default_flashloan_min_notional_wei")]
+    pub flashloan_min_notional_wei: u128,
+    #[serde(default = "default_flashloan_min_repay_bps")]
+    pub flashloan_min_repay_bps: u64,
+    #[serde(default = "default_flashloan_reverse_input_bps")]
+    pub flashloan_reverse_input_bps: u64,
+    #[serde(default = "default_flashloan_prefilter_margin_bps")]
+    pub flashloan_prefilter_margin_bps: u64,
+    #[serde(default)]
+    pub flashloan_prefilter_margin_wei: u128,
+    #[serde(default)]
+    pub flashloan_prefilter_gas_cost_bps: u64,
+    #[serde(default = "default_flashloan_reject_same_router_negative")]
+    pub flashloan_reject_same_router_negative: bool,
+    #[serde(default)]
+    pub flashloan_force: bool,
+    #[serde(default)]
+    pub flashloan_aggressive: bool,
+    #[serde(default = "default_deadline_min_seconds_ahead")]
+    pub deadline_min_seconds_ahead: u64,
+    #[serde(default = "default_deadline_allow_past_secs")]
+    pub deadline_allow_past_secs: u64,
+    #[serde(default = "default_liquidation_scan_cooldown_secs")]
+    pub liquidation_scan_cooldown_secs: u64,
+    #[serde(default = "default_atomic_arb_scan_cooldown_secs")]
+    pub atomic_arb_scan_cooldown_secs: u64,
+    #[serde(default = "default_true")]
+    pub strategy_atomic_arb_enabled: bool,
+    #[serde(default = "default_true")]
+    pub strategy_liquidation_enabled: bool,
+    #[serde(default = "default_true")]
+    pub strategy_require_tokenlist: bool,
+    #[serde(default = "default_atomic_arb_gas_hint")]
+    pub atomic_arb_gas_hint: u64,
+    #[serde(default = "default_atomic_arb_max_candidates")]
+    pub atomic_arb_max_candidates: usize,
+    #[serde(default = "default_atomic_arb_max_attempts")]
+    pub atomic_arb_max_attempts: usize,
+    #[serde(default = "default_atomic_arb_seed_wei")]
+    pub atomic_arb_seed_wei: u128,
+    #[serde(default)]
+    pub flashloan_allow_nonflash_fallback: bool,
 
     // Router discovery
     #[serde(default = "default_router_discovery_enabled")]
@@ -131,6 +263,21 @@ pub struct GlobalSettings {
     pub router_discovery_auto_allow: bool,
     #[serde(default = "default_router_discovery_max_entries")]
     pub router_discovery_max_entries: usize,
+    #[serde(default = "default_router_discovery_bootstrap_limit")]
+    pub router_discovery_bootstrap_limit: usize,
+    #[serde(default = "default_router_discovery_bootstrap_lookback_blocks")]
+    pub router_discovery_bootstrap_lookback_blocks: u64,
+    #[serde(default = "default_router_discovery_max_rpc_calls_per_cycle")]
+    pub router_discovery_max_rpc_calls_per_cycle: u64,
+    #[serde(default = "default_router_discovery_cycle_timeout_ms")]
+    pub router_discovery_cycle_timeout_ms: u64,
+    #[serde(default = "default_router_discovery_failure_budget")]
+    pub router_discovery_failure_budget: u64,
+    #[serde(default = "default_router_discovery_cooldown_secs")]
+    pub router_discovery_cooldown_secs: u64,
+    pub router_discovery_cache_path: Option<String>,
+    #[serde(default = "default_false")]
+    pub router_discovery_force_full_rescan: bool,
 
     // Per-chain maps
     pub router_allowlist_by_chain: Option<HashMap<String, HashMap<String, String>>>,
@@ -162,6 +309,9 @@ fn default_false() -> bool {
 }
 fn default_metrics_port() -> u16 {
     9000
+}
+fn default_log_level() -> String {
+    "info".to_string()
 }
 fn default_slippage_bps() -> u64 {
     12
@@ -234,6 +384,123 @@ fn default_bundle_use_replacement_uuid() -> bool {
 fn default_bundle_cancel_previous() -> bool {
     false
 }
+fn default_bundle_target_blocks() -> u64 {
+    1
+}
+fn default_feed_audit_max_lag_blocks() -> u64 {
+    20
+}
+fn default_feed_audit_recheck_secs() -> u64 {
+    20
+}
+fn default_feed_audit_public_tip_lag_blocks() -> u64 {
+    2
+}
+fn default_flashloan_adaptive_scale_enabled() -> bool {
+    true
+}
+fn default_flashloan_adaptive_min_scale_bps() -> u64 {
+    1_500
+}
+fn default_flashloan_adaptive_downshift_step_bps() -> u64 {
+    700
+}
+fn default_router_risk_min_samples() -> u64 {
+    20
+}
+fn default_router_risk_fail_rate_bps() -> u64 {
+    4_000
+}
+fn default_sandwich_risk_max_victim_slippage_bps() -> u64 {
+    1_500
+}
+fn default_sandwich_risk_small_wallet_wei() -> u128 {
+    100_000_000_000_000_000u128
+}
+fn default_toxic_probe_failure_threshold() -> u32 {
+    3
+}
+fn default_toxic_probe_failure_window_secs() -> u64 {
+    1_800
+}
+fn default_balance_cap_curve_k() -> f64 {
+    0.8
+}
+fn default_balance_cap_min_bps() -> u64 {
+    8_000
+}
+fn default_balance_cap_max_bps() -> u64 {
+    14_000
+}
+fn default_auto_slippage_base_bps() -> f64 {
+    120.0
+}
+fn default_auto_slippage_balance_log_slope() -> f64 {
+    30.0
+}
+fn default_auto_slippage_balance_scale() -> f64 {
+    100.0
+}
+fn default_auto_slippage_vol_mult_bps() -> u64 {
+    3_500
+}
+fn default_auto_slippage_min_bps() -> u64 {
+    15
+}
+fn default_auto_slippage_max_bps() -> u64 {
+    500
+}
+fn default_allow_unknown_router_decode() -> bool {
+    true
+}
+fn default_profit_floor_mult_gas() -> u64 {
+    1
+}
+fn default_flashloan_prefer_wallet_max_wei() -> u128 {
+    50_000_000_000_000_000u128
+}
+fn default_flashloan_value_scale_bps() -> u64 {
+    7_000
+}
+fn default_flashloan_min_notional_wei() -> u128 {
+    30_000_000_000_000u128
+}
+fn default_flashloan_min_repay_bps() -> u64 {
+    9_000
+}
+fn default_flashloan_reverse_input_bps() -> u64 {
+    10_000
+}
+fn default_flashloan_prefilter_margin_bps() -> u64 {
+    10
+}
+fn default_flashloan_reject_same_router_negative() -> bool {
+    true
+}
+fn default_deadline_min_seconds_ahead() -> u64 {
+    2
+}
+fn default_deadline_allow_past_secs() -> u64 {
+    0
+}
+fn default_liquidation_scan_cooldown_secs() -> u64 {
+    4
+}
+fn default_atomic_arb_scan_cooldown_secs() -> u64 {
+    10
+}
+fn default_atomic_arb_gas_hint() -> u64 {
+    260_000
+}
+fn default_atomic_arb_max_candidates() -> usize {
+    10
+}
+fn default_atomic_arb_max_attempts() -> usize {
+    2
+}
+fn default_atomic_arb_seed_wei() -> u128 {
+    3_000_000_000_000_000u128
+}
 fn default_bribe_bps() -> u64 {
     0
 }
@@ -254,6 +521,24 @@ fn default_router_discovery_auto_allow() -> bool {
 }
 fn default_router_discovery_max_entries() -> usize {
     10_000
+}
+fn default_router_discovery_bootstrap_limit() -> usize {
+    256
+}
+fn default_router_discovery_bootstrap_lookback_blocks() -> u64 {
+    256
+}
+fn default_router_discovery_max_rpc_calls_per_cycle() -> u64 {
+    512
+}
+fn default_router_discovery_cycle_timeout_ms() -> u64 {
+    7_500
+}
+fn default_router_discovery_failure_budget() -> u64 {
+    16
+}
+fn default_router_discovery_cooldown_secs() -> u64 {
+    45
 }
 
 fn deserialize_chain_list<'de, D>(deserializer: D) -> Result<Vec<u64>, D::Error>
@@ -294,12 +579,385 @@ where
     deserializer.deserialize_any(ChainVisitor)
 }
 
+#[derive(Clone, Copy)]
+struct EnvFieldSpec {
+    field: &'static str,
+    target_env_key: &'static str,
+    canonical_key: &'static str,
+    aliases: &'static [&'static str],
+    required: bool,
+    redact: bool,
+    deprecated_since: Option<&'static str>,
+    remove_after: Option<&'static str>,
+}
+
+impl EnvFieldSpec {
+    fn all() -> &'static [EnvFieldSpec] {
+        &[
+            EnvFieldSpec {
+                field: "wallet_key",
+                target_env_key: "WALLET_KEY",
+                canonical_key: "OXIDITY_WALLET_PRIVATE_KEY",
+                aliases: &["WALLET_KEY", "WALLET_PRIVATE_KEY"],
+                required: true,
+                redact: true,
+                deprecated_since: Some("0.1.1"),
+                remove_after: Some("0.3.0"),
+            },
+            EnvFieldSpec {
+                field: "wallet_address",
+                target_env_key: "WALLET_ADDRESS",
+                canonical_key: "OXIDITY_WALLET_ADDRESS",
+                aliases: &["WALLET_ADDRESS"],
+                required: true,
+                redact: false,
+                deprecated_since: Some("0.1.1"),
+                remove_after: Some("0.3.0"),
+            },
+            EnvFieldSpec {
+                field: "executor_address",
+                target_env_key: "EXECUTOR_ADDRESS",
+                canonical_key: "OXIDITY_FLASHLOAN_CONTRACT_ADDRESS",
+                aliases: &["FLASHLOAN_CONTRACT_ADDRESS", "EXECUTOR_ADDRESS"],
+                required: true,
+                redact: false,
+                deprecated_since: Some("0.1.1"),
+                remove_after: Some("0.3.0"),
+            },
+            EnvFieldSpec {
+                field: "bundle_signer_key",
+                target_env_key: "BUNDLE_SIGNER_KEY",
+                canonical_key: "OXIDITY_BUNDLE_PRIVATE_KEY",
+                aliases: &["BUNDLE_SIGNER_KEY", "BUNDLE_PRIVATE_KEY"],
+                required: true,
+                redact: true,
+                deprecated_since: Some("0.1.1"),
+                remove_after: Some("0.3.0"),
+            },
+            EnvFieldSpec {
+                field: "log_level",
+                target_env_key: "LOG_LEVEL",
+                canonical_key: "OXIDITY_LOG_LEVEL",
+                aliases: &["LOG_LEVEL", "RUST_LOG"],
+                required: false,
+                redact: false,
+                deprecated_since: Some("0.1.1"),
+                remove_after: Some("0.3.0"),
+            },
+        ]
+    }
+}
+
+#[derive(Default)]
+struct EnvResolution {
+    overrides: Map<String, String>,
+    field_sources: Vec<ConfigFieldSource>,
+    warnings: Vec<String>,
+    config_debug: bool,
+}
+
+fn redact_value(raw: &str, redact: bool) -> String {
+    if redact {
+        if raw.trim().is_empty() {
+            return "<empty>".to_string();
+        }
+        return "<redacted>".to_string();
+    }
+    raw.to_string()
+}
+
+fn is_passthrough_env_key(key: &str) -> bool {
+    const EXACT: &[&str] = &[
+        "CHAINS",
+        "DATABASE_URL",
+        "FLASHBOTS_RELAY_URL",
+        "MEV_SHARE_RELAY_URL",
+        "MEV_SHARE_STREAM_URL",
+        "MEV_SHARE_ENABLED",
+        "MEV_SHARE_HISTORY_LIMIT",
+        "METRICS_BIND",
+        "METRICS_TOKEN",
+        "METRICS_PORT",
+        "METRICS_ENABLE_SHUTDOWN",
+        "DATA_DIR",
+        "TOKENLIST_PATH",
+        "ADDRESS_REGISTRY_PATH",
+        "PAIRS_PATH",
+        "CHAINLINK_FEEDS_PATH",
+        "STRATEGY_WORKERS",
+        "ETHERSCAN_API_KEY",
+        "BINANCE_API_KEY",
+        "COINMARKETCAP_API_KEY",
+        "COINGECKO_API_KEY",
+        "CRYPTOCOMPARE_API_KEY",
+        "COINDESK_API_KEY",
+        "PROFIT_FLOOR_ABS_ETH",
+        "PROFIT_FLOOR_MULT_GAS",
+        "PROFIT_FLOOR_MIN_USD",
+        "GAS_RATIO_LIMIT_FLOOR_BPS",
+        "BUNDLE_TARGET_BLOCKS",
+        "CHAINLINK_FEED_CONFLICT_STRICT",
+        "CHAINLINK_FEED_AUDIT_STRICT",
+        "RPC_CAPABILITY_STRICT",
+        "BUNDLE_USE_REPLACEMENT_UUID",
+        "BUNDLE_CANCEL_PREVIOUS",
+        "ALLOW_UNKNOWN_ROUTER_DECODE",
+        "FORCE_CANONICAL_EXEC_ROUTER",
+        "ROUTER_RISK_MIN_SAMPLES",
+        "ROUTER_RISK_FAIL_RATE_BPS",
+        "ROUTER_RISK_HARD_BLOCK",
+        "SANDWICH_RISK_MAX_VICTIM_SLIPPAGE_BPS",
+        "SANDWICH_RISK_SMALL_WALLET_WEI",
+        "TOXIC_PROBE_FAILURE_THRESHOLD",
+        "TOXIC_PROBE_FAILURE_WINDOW_SECS",
+        "BALANCE_CAP_CURVE_K",
+        "BALANCE_CAP_MIN_BPS",
+        "BALANCE_CAP_MAX_BPS",
+        "AUTO_SLIPPAGE_BASE_BPS",
+        "AUTO_SLIPPAGE_BALANCE_LOG_SLOPE",
+        "AUTO_SLIPPAGE_BALANCE_SCALE",
+        "AUTO_SLIPPAGE_VOL_MULT_BPS",
+        "AUTO_SLIPPAGE_MIN_BPS",
+        "AUTO_SLIPPAGE_MAX_BPS",
+        "FLASHLOAN_ADAPTIVE_SCALE_ENABLED",
+        "FLASHLOAN_ADAPTIVE_MIN_SCALE_BPS",
+        "FLASHLOAN_ADAPTIVE_DOWNSHIFT_STEP_BPS",
+        "FLASHLOAN_PREFER_WALLET_MAX_WEI",
+        "FLASHLOAN_VALUE_SCALE_BPS",
+        "FLASHLOAN_MIN_NOTIONAL_WEI",
+        "FLASHLOAN_MIN_REPAY_BPS",
+        "FLASHLOAN_REVERSE_INPUT_BPS",
+        "FLASHLOAN_PREFILTER_MARGIN_BPS",
+        "FLASHLOAN_PREFILTER_MARGIN_WEI",
+        "FLASHLOAN_PREFILTER_GAS_COST_BPS",
+        "FLASHLOAN_REJECT_SAME_ROUTER_NEGATIVE",
+        "FLASHLOAN_FORCE",
+        "FLASHLOAN_AGGRESSIVE",
+        "FLASHLOAN_ALLOW_NONFLASH_FALLBACK",
+        "DEADLINE_MIN_SECONDS_AHEAD",
+        "DEADLINE_ALLOW_PAST_SECS",
+        "LIQUIDATION_SCAN_COOLDOWN_SECS",
+        "ATOMIC_ARB_SCAN_COOLDOWN_SECS",
+        "STRATEGY_ATOMIC_ARB_ENABLED",
+        "STRATEGY_LIQUIDATION_ENABLED",
+        "STRATEGY_REQUIRE_TOKENLIST",
+        "ATOMIC_ARB_GAS_HINT",
+        "ATOMIC_ARB_MAX_CANDIDATES",
+        "ATOMIC_ARB_MAX_ATTEMPTS",
+        "ATOMIC_ARB_SEED_WEI",
+        "FEED_AUDIT_MAX_LAG_BLOCKS",
+        "FEED_AUDIT_RECHECK_SECS",
+        "FEED_AUDIT_PUBLIC_RPC_URL",
+        "FEED_AUDIT_PUBLIC_TIP_LAG_BLOCKS",
+    ];
+    const PREFIXES: &[&str] = &[
+        "HTTP_PROVIDER",
+        "WEBSOCKET_PROVIDER",
+        "WEBSOCKET_URL",
+        "IPC_PROVIDER",
+        "IPC_PATH",
+        "GAS_CAPS_GWEI",
+        "ROUTER_RISK_",
+        "SANDWICH_RISK_",
+        "FLASHLOAN_",
+        "AUTO_SLIPPAGE_",
+        "BALANCE_CAP_",
+        "GAS_RATIO_",
+        "CHAINLINK_",
+        "ROUTER_DISCOVERY_",
+    ];
+    if EXACT.contains(&key) {
+        return true;
+    }
+    PREFIXES.iter().any(|prefix| key.starts_with(prefix))
+}
+
+fn is_allowlisted_prefixed_env_key(key: &str) -> bool {
+    if is_passthrough_env_key(key) {
+        return true;
+    }
+    EnvFieldSpec::all().iter().any(|spec| {
+        spec.target_env_key == key
+            || spec
+                .canonical_key
+                .strip_prefix("OXIDITY_")
+                .is_some_and(|k| k == key)
+    })
+}
+
+fn resolve_env_contract() -> EnvResolution {
+    let mut resolution = EnvResolution::default();
+    let mut used_keys: HashSet<String> = HashSet::new();
+
+    for spec in EnvFieldSpec::all() {
+        let canonical = std::env::var(spec.canonical_key)
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+
+        let mut alias_hit: Option<(&'static str, String)> = None;
+        for alias in spec.aliases {
+            if let Ok(raw) = std::env::var(alias) {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                alias_hit = Some((alias, trimmed.to_string()));
+                break;
+            }
+        }
+
+        let (selected_key, selected_value, selected_source) = match (canonical, alias_hit) {
+            (Some(canonical_value), Some((alias, alias_value))) => {
+                if canonical_value != alias_value {
+                    resolution.warnings.push(format!(
+                        "Config conflict for {}: canonical {} and legacy {} differ; canonical value selected",
+                        spec.field, spec.canonical_key, alias
+                    ));
+                }
+                (
+                    Some(spec.canonical_key.to_string()),
+                    Some(canonical_value),
+                    "canonical".to_string(),
+                )
+            }
+            (Some(canonical_value), None) => (
+                Some(spec.canonical_key.to_string()),
+                Some(canonical_value),
+                "canonical".to_string(),
+            ),
+            (None, Some((alias, alias_value))) => {
+                resolution.warnings.push(format!(
+                    "Legacy env {} is deprecated for {}; use {} (deprecated since {}, remove after {})",
+                    alias,
+                    spec.field,
+                    spec.canonical_key,
+                    spec.deprecated_since.unwrap_or("n/a"),
+                    spec.remove_after.unwrap_or("n/a")
+                ));
+                (
+                    Some(alias.to_string()),
+                    Some(alias_value),
+                    "legacy_alias".to_string(),
+                )
+            }
+            (None, None) => (None, None, "unset".to_string()),
+        };
+
+        if let Some(value) = selected_value.clone() {
+            resolution
+                .overrides
+                .insert(spec.target_env_key.to_string(), value);
+        }
+        if let Some(key) = selected_key.clone() {
+            used_keys.insert(key);
+        }
+
+        resolution.field_sources.push(ConfigFieldSource {
+            field: spec.field.to_string(),
+            canonical_key: spec.canonical_key.to_string(),
+            selected_key: selected_key.clone(),
+            selected_source,
+            redacted_value: selected_value
+                .as_deref()
+                .map(|value| redact_value(value, spec.redact)),
+            deprecated_since: spec.deprecated_since.map(ToString::to_string),
+            remove_after: spec.remove_after.map(ToString::to_string),
+        });
+    }
+
+    for (raw_key, raw_value) in std::env::vars() {
+        let key = raw_key.trim().to_string();
+        let value = raw_value.trim().to_string();
+        if key.is_empty() || value.is_empty() {
+            continue;
+        }
+        if used_keys.contains(&key) {
+            continue;
+        }
+        if key == "OXIDITY_CONFIG_DEBUG" {
+            if matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            ) {
+                resolution.config_debug = true;
+            }
+            continue;
+        }
+        if let Some(stripped) = key.strip_prefix("OXIDITY_") {
+            if stripped.is_empty() {
+                continue;
+            }
+            if is_allowlisted_prefixed_env_key(stripped) {
+                resolution
+                    .overrides
+                    .insert(stripped.to_string(), value.clone());
+                used_keys.insert(key);
+            } else {
+                resolution.warnings.push(format!(
+                    "Ignoring unsupported prefixed env key {} (not in allowlist)",
+                    key
+                ));
+            }
+            continue;
+        }
+        if is_passthrough_env_key(&key) {
+            resolution.overrides.insert(key.clone(), value);
+        }
+    }
+
+    resolution
+}
+
+fn redact_effective_config(value: &mut Value) {
+    const SECRET_FIELDS: &[&str] = &[
+        "wallet_key",
+        "bundle_signer_key",
+        "metrics_token",
+        "binance_api_key",
+        "coinmarketcap_api_key",
+        "coingecko_api_key",
+        "cryptocompare_api_key",
+        "coindesk_api_key",
+        "etherscan_api_key",
+    ];
+    match value {
+        Value::Object(map) => {
+            for (k, v) in map.iter_mut() {
+                if SECRET_FIELDS.contains(&k.as_str()) {
+                    *v = json!("<redacted>");
+                } else {
+                    redact_effective_config(v);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                redact_effective_config(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn effective_config_hash(settings: &GlobalSettings) -> String {
+    let mut value = serde_json::to_value(settings).unwrap_or_else(|_| json!({}));
+    redact_effective_config(&mut value);
+    let bytes = serde_json::to_vec(&value).unwrap_or_default();
+    format!("0x{}", hex::encode(keccak256(bytes)))
+}
+
 impl GlobalSettings {
     pub fn load_with_path(path: Option<&str>) -> Result<Self, AppError> {
+        Ok(Self::load_with_report(path)?.settings)
+    }
+
+    pub fn load_with_report(path: Option<&str>) -> Result<LoadedSettings, AppError> {
         // Load .env file if it exists
         dotenvy::dotenv().ok();
 
         let selected_config = resolve_config_path(path);
+        let env_resolution = resolve_env_contract();
         let mut builder = Config::builder();
 
         if let Some(ref selected_path) = selected_config {
@@ -307,22 +965,58 @@ impl GlobalSettings {
         } else {
             builder = builder.add_source(File::with_name("config").required(false));
         }
-        // Deterministic precedence: CLI (in main) > env/.env > selected profile file.
-        builder = builder.add_source(Environment::default());
+        // Deterministic precedence: CLI (in main) > allowlisted env/.env > selected profile file.
+        builder = builder.add_source(
+            Environment::default()
+                .source(Some(env_resolution.overrides.clone()))
+                .try_parsing(true)
+                .ignore_empty(true),
+        );
 
         let mut settings: GlobalSettings = builder.build()?.try_deserialize()?;
 
         // Allow CHAINS env to be comma/space separated string (e.g. "1,137")
-        if let Ok(chains_str) = std::env::var("CHAINS") {
-            settings.chains = parse_chain_list(&chains_str)?;
+        if let Some(chains_str) = env_resolution.overrides.get("CHAINS") {
+            settings.chains = parse_chain_list(chains_str)?;
         }
 
-        // Basic Validation
-        if settings.wallet_key.is_empty() {
-            return Err(AppError::Config("WALLET_KEY is missing".to_string()));
+        let mut missing_required: Vec<&str> = Vec::new();
+        for spec in EnvFieldSpec::all().iter().filter(|s| s.required) {
+            let has_value = match spec.field {
+                "wallet_key" => !settings.wallet_key.trim().is_empty(),
+                "wallet_address" => settings.wallet_address != Address::ZERO,
+                "executor_address" => settings.executor_address.is_some(),
+                "bundle_signer_key" => settings
+                    .bundle_signer_key
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|v| !v.is_empty()),
+                _ => false,
+            };
+            if !has_value {
+                missing_required.push(spec.canonical_key);
+            }
+        }
+        if !missing_required.is_empty() {
+            missing_required.sort();
+            missing_required.dedup();
+            return Err(AppError::Config(format!(
+                "Missing required configuration values: {}",
+                missing_required.join(", ")
+            )));
         }
 
-        Ok(settings)
+        let report = ConfigLoadReport {
+            field_sources: env_resolution.field_sources,
+            warnings: env_resolution.warnings,
+            effective_config_hash: effective_config_hash(&settings),
+        };
+
+        Ok(LoadedSettings {
+            settings,
+            report,
+            config_debug: env_resolution.config_debug,
+        })
     }
 
     fn data_dir_value(&self) -> Option<String> {
@@ -540,7 +1234,6 @@ impl GlobalSettings {
     pub fn bundle_signer_key(&self) -> String {
         self.bundle_signer_key
             .clone()
-            .or_else(|| std::env::var("BUNDLE_SIGNER_KEY").ok())
             .unwrap_or_else(|| self.wallet_key.clone())
     }
 
@@ -554,30 +1247,54 @@ impl GlobalSettings {
     }
 
     pub fn metrics_bind_value(&self) -> Option<String> {
-        if let Ok(v) = std::env::var("METRICS_BIND")
-            && !v.trim().is_empty()
-        {
-            return Some(v);
-        }
         self.metrics_bind.clone()
     }
 
     pub fn metrics_token_value(&self) -> Option<String> {
-        if let Ok(v) = std::env::var("METRICS_TOKEN")
-            && !v.trim().is_empty()
-        {
-            return Some(v);
-        }
         self.metrics_token.clone()
     }
 
+    pub fn metrics_enable_shutdown_value(&self) -> bool {
+        self.metrics_enable_shutdown
+    }
+
     pub fn etherscan_api_key_value(&self) -> Option<String> {
-        if let Ok(v) = std::env::var("ETHERSCAN_API_KEY")
-            && !v.trim().is_empty()
-        {
-            return Some(v);
-        }
         self.etherscan_api_key.clone()
+    }
+
+    pub fn router_discovery_bootstrap_limit_value(&self) -> usize {
+        self.router_discovery_bootstrap_limit.clamp(1, 10_000)
+    }
+
+    pub fn router_discovery_bootstrap_lookback_blocks_value(&self) -> u64 {
+        self.router_discovery_bootstrap_lookback_blocks
+            .clamp(1, 20_000)
+    }
+
+    pub fn router_discovery_max_rpc_calls_per_cycle_value(&self) -> u64 {
+        self.router_discovery_max_rpc_calls_per_cycle
+            .clamp(16, 20_000)
+    }
+
+    pub fn router_discovery_cycle_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.router_discovery_cycle_timeout_ms.clamp(500, 60_000))
+    }
+
+    pub fn router_discovery_failure_budget_value(&self) -> u64 {
+        self.router_discovery_failure_budget.clamp(1, 500)
+    }
+
+    pub fn router_discovery_cooldown(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.router_discovery_cooldown_secs.clamp(5, 3_600))
+    }
+
+    pub fn router_discovery_cache_path(&self) -> Result<String, AppError> {
+        self.resolve_path_setting(
+            "ROUTER_DISCOVERY_CACHE_PATH",
+            self.router_discovery_cache_path.as_deref(),
+            "data/router_discovery_cache.json",
+            false,
+        )
     }
 
     pub fn gas_cap_for_chain(&self, chain_id: u64) -> Option<u64> {
@@ -638,8 +1355,7 @@ impl GlobalSettings {
     }
 
     pub fn profit_guard_base_floor_multiplier_bps_value(&self) -> u64 {
-        self.profit_guard_base_floor_multiplier_bps
-            .clamp(0, 20_000)
+        self.profit_guard_base_floor_multiplier_bps.clamp(0, 20_000)
     }
 
     pub fn profit_guard_cost_multiplier_bps_value(&self) -> u64 {
@@ -824,25 +1540,133 @@ impl GlobalSettings {
         }
     }
 
-    pub fn price_api_keys(&self) -> crate::network::price_feed::PriceApiKeys {
-        use std::env::var;
-        crate::network::price_feed::PriceApiKeys {
-            binance: var("BINANCE_API_KEY")
-                .ok()
-                .or_else(|| self.binance_api_key.clone()),
-            coinmarketcap: var("COINMARKETCAP_API_KEY")
-                .ok()
-                .or_else(|| self.coinmarketcap_api_key.clone()),
-            coingecko: var("COINGECKO_API_KEY")
-                .ok()
-                .or_else(|| self.coingecko_api_key.clone()),
-            cryptocompare: var("CRYPTOCOMPARE_API_KEY")
-                .ok()
-                .or_else(|| self.cryptocompare_api_key.clone()),
-            coindesk: var("COINDESK_API_KEY")
-                .ok()
-                .or_else(|| self.coindesk_api_key.clone()),
+    pub fn bundle_target_blocks_value(&self) -> u64 {
+        self.bundle_target_blocks.clamp(1, 5)
+    }
+
+    pub fn feed_audit_max_lag_blocks_value(&self) -> u64 {
+        self.feed_audit_max_lag_blocks.max(1)
+    }
+
+    pub fn feed_audit_recheck_secs_value(&self) -> u64 {
+        self.feed_audit_recheck_secs.max(5)
+    }
+
+    pub fn feed_audit_public_rpc_url_value(&self) -> Option<String> {
+        self.feed_audit_public_rpc_url
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    pub fn feed_audit_public_tip_lag_blocks_value(&self) -> u64 {
+        self.feed_audit_public_tip_lag_blocks.clamp(1, 64)
+    }
+
+    pub fn strategy_runtime_settings(&self) -> StrategyRuntimeSettings {
+        let profit_floor_abs_wei = self
+            .profit_floor_abs_eth
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .map(|eth| {
+                let wei = (eth * 1_000_000_000_000_000_000f64).round();
+                if !wei.is_finite() || wei <= 0.0 {
+                    U256::ZERO
+                } else if wei > u128::MAX as f64 {
+                    U256::from(u128::MAX)
+                } else {
+                    U256::from(wei as u128)
+                }
+            })
+            .unwrap_or(U256::ZERO);
+
+        StrategyRuntimeSettings {
+            flashloan_adaptive_scale_enabled: self.flashloan_adaptive_scale_enabled,
+            flashloan_adaptive_min_scale_bps: self
+                .flashloan_adaptive_min_scale_bps
+                .clamp(500, 10_000),
+            flashloan_adaptive_downshift_step_bps: self
+                .flashloan_adaptive_downshift_step_bps
+                .clamp(50, 5_000),
+            router_risk_min_samples: self.router_risk_min_samples.clamp(1, 500),
+            router_risk_fail_rate_bps: self.router_risk_fail_rate_bps.clamp(500, 10_000),
+            router_risk_hard_block: self.router_risk_hard_block,
+            sandwich_risk_max_victim_slippage_bps: self
+                .sandwich_risk_max_victim_slippage_bps
+                .clamp(100, 9_500),
+            sandwich_risk_small_wallet_wei: U256::from(
+                self.sandwich_risk_small_wallet_wei
+                    .clamp(1_000_000_000_000_000u128, 5_000_000_000_000_000_000u128),
+            ),
+            toxic_probe_failure_threshold: self.toxic_probe_failure_threshold.clamp(1, 20),
+            toxic_probe_failure_window_secs: self.toxic_probe_failure_window_secs.clamp(30, 86_400),
+            balance_cap_curve_k: self.balance_cap_curve_k.clamp(0.01, 10.0),
+            balance_cap_min_bps: self.balance_cap_min_bps.clamp(1, 20_000),
+            balance_cap_max_bps: self
+                .balance_cap_max_bps
+                .max(self.balance_cap_min_bps.clamp(1, 20_000))
+                .clamp(1, 20_000),
+            auto_slippage_base_bps: self.auto_slippage_base_bps.clamp(1.0, 5_000.0),
+            auto_slippage_balance_log_slope: self.auto_slippage_balance_log_slope.clamp(0.0, 500.0),
+            auto_slippage_balance_scale: self.auto_slippage_balance_scale.clamp(1.0, 10_000.0),
+            auto_slippage_vol_mult_bps: self.auto_slippage_vol_mult_bps.clamp(0, 50_000),
+            auto_slippage_min_bps: self.auto_slippage_min_bps.clamp(1, 9_999),
+            auto_slippage_max_bps: self
+                .auto_slippage_max_bps
+                .max(self.auto_slippage_min_bps.clamp(1, 9_999))
+                .clamp(1, 9_999),
+            force_canonical_exec_router: self.force_canonical_exec_router,
+            allow_unknown_router_decode: self.allow_unknown_router_decode,
+            profit_floor_abs_wei,
+            profit_floor_mult_gas: self.profit_floor_mult_gas.clamp(1, 100),
+            profit_floor_min_usd: self
+                .profit_floor_min_usd
+                .filter(|v| v.is_finite() && *v > 0.0),
+            gas_ratio_limit_floor_bps: self.gas_ratio_limit_floor_bps.map(|v| v.clamp(0, 9_999)),
+            flashloan_prefer_wallet_max_wei: U256::from(self.flashloan_prefer_wallet_max_wei),
+            flashloan_value_scale_bps: self.flashloan_value_scale_bps.clamp(50, 10_000),
+            flashloan_min_notional_wei: U256::from(self.flashloan_min_notional_wei),
+            flashloan_min_repay_bps: self.flashloan_min_repay_bps.clamp(7_000, 12_000),
+            flashloan_reverse_input_bps: self.flashloan_reverse_input_bps.clamp(9_500, 10_000),
+            flashloan_prefilter_margin_bps: self.flashloan_prefilter_margin_bps.clamp(0, 2_000),
+            flashloan_prefilter_margin_wei: U256::from(self.flashloan_prefilter_margin_wei),
+            flashloan_prefilter_gas_cost_bps: self
+                .flashloan_prefilter_gas_cost_bps
+                .clamp(0, 10_000),
+            flashloan_reject_same_router_negative: self.flashloan_reject_same_router_negative,
+            flashloan_force: self.flashloan_force,
+            flashloan_aggressive: self.flashloan_aggressive,
+            deadline_min_seconds_ahead: self.deadline_min_seconds_ahead.clamp(0, 300),
+            deadline_allow_past_secs: self.deadline_allow_past_secs.clamp(0, 900),
+            liquidation_scan_cooldown_secs: self.liquidation_scan_cooldown_secs.clamp(1, 120),
+            atomic_arb_scan_cooldown_secs: self.atomic_arb_scan_cooldown_secs.clamp(1, 120),
+            strategy_atomic_arb_enabled: self.strategy_atomic_arb_enabled,
+            strategy_liquidation_enabled: self.strategy_liquidation_enabled,
+            strategy_require_tokenlist: self.strategy_require_tokenlist,
+            atomic_arb_gas_hint: self.atomic_arb_gas_hint.clamp(120_000, 700_000),
+            atomic_arb_max_candidates: self.atomic_arb_max_candidates.clamp(2, 64),
+            atomic_arb_max_attempts: self.atomic_arb_max_attempts.clamp(1, 8),
+            atomic_arb_seed_wei: U256::from(self.atomic_arb_seed_wei),
+            flashloan_allow_nonflash_fallback: self.flashloan_allow_nonflash_fallback,
         }
+    }
+
+    pub fn price_api_keys(&self) -> crate::network::price_feed::PriceApiKeys {
+        crate::network::price_feed::PriceApiKeys {
+            binance: self.binance_api_key.clone(),
+            coinmarketcap: self.coinmarketcap_api_key.clone(),
+            coingecko: self.coingecko_api_key.clone(),
+            cryptocompare: self.cryptocompare_api_key.clone(),
+            coindesk: self.coindesk_api_key.clone(),
+            etherscan: self.etherscan_api_key.clone(),
+        }
+    }
+}
+
+impl LoadedSettings {
+    pub fn effective_config_json(&self) -> Value {
+        let mut value = serde_json::to_value(&self.settings).unwrap_or_else(|_| json!({}));
+        redact_effective_config(&mut value);
+        value
     }
 }
 
@@ -1216,10 +2040,12 @@ mod tests {
             address_registry_path: None,
             data_dir: None,
             metrics_port: default_metrics_port(),
+            log_level: default_log_level(),
             strategy_enabled: default_true(),
             strategy_workers: None,
             metrics_bind: None,
             metrics_token: None,
+            metrics_enable_shutdown: default_false(),
             slippage_bps: default_slippage_bps(),
             profit_guard_base_floor_multiplier_bps: default_profit_guard_base_floor_multiplier_bps(
             ),
@@ -1245,12 +2071,75 @@ mod tests {
             chainlink_feed_audit_strict: default_chainlink_feed_audit_strict(),
             bundle_use_replacement_uuid: default_bundle_use_replacement_uuid(),
             bundle_cancel_previous: default_bundle_cancel_previous(),
+            bundle_target_blocks: default_bundle_target_blocks(),
+            feed_audit_max_lag_blocks: default_feed_audit_max_lag_blocks(),
+            feed_audit_recheck_secs: default_feed_audit_recheck_secs(),
+            feed_audit_public_rpc_url: None,
+            feed_audit_public_tip_lag_blocks: default_feed_audit_public_tip_lag_blocks(),
+            flashloan_adaptive_scale_enabled: default_flashloan_adaptive_scale_enabled(),
+            flashloan_adaptive_min_scale_bps: default_flashloan_adaptive_min_scale_bps(),
+            flashloan_adaptive_downshift_step_bps: default_flashloan_adaptive_downshift_step_bps(),
+            router_risk_min_samples: default_router_risk_min_samples(),
+            router_risk_fail_rate_bps: default_router_risk_fail_rate_bps(),
+            router_risk_hard_block: default_false(),
+            sandwich_risk_max_victim_slippage_bps: default_sandwich_risk_max_victim_slippage_bps(),
+            sandwich_risk_small_wallet_wei: default_sandwich_risk_small_wallet_wei(),
+            toxic_probe_failure_threshold: default_toxic_probe_failure_threshold(),
+            toxic_probe_failure_window_secs: default_toxic_probe_failure_window_secs(),
+            balance_cap_curve_k: default_balance_cap_curve_k(),
+            balance_cap_min_bps: default_balance_cap_min_bps(),
+            balance_cap_max_bps: default_balance_cap_max_bps(),
+            auto_slippage_base_bps: default_auto_slippage_base_bps(),
+            auto_slippage_balance_log_slope: default_auto_slippage_balance_log_slope(),
+            auto_slippage_balance_scale: default_auto_slippage_balance_scale(),
+            auto_slippage_vol_mult_bps: default_auto_slippage_vol_mult_bps(),
+            auto_slippage_min_bps: default_auto_slippage_min_bps(),
+            auto_slippage_max_bps: default_auto_slippage_max_bps(),
+            force_canonical_exec_router: default_false(),
+            allow_unknown_router_decode: default_allow_unknown_router_decode(),
+            profit_floor_abs_eth: None,
+            profit_floor_mult_gas: default_profit_floor_mult_gas(),
+            profit_floor_min_usd: None,
+            gas_ratio_limit_floor_bps: None,
+            flashloan_prefer_wallet_max_wei: default_flashloan_prefer_wallet_max_wei(),
+            flashloan_value_scale_bps: default_flashloan_value_scale_bps(),
+            flashloan_min_notional_wei: default_flashloan_min_notional_wei(),
+            flashloan_min_repay_bps: default_flashloan_min_repay_bps(),
+            flashloan_reverse_input_bps: default_flashloan_reverse_input_bps(),
+            flashloan_prefilter_margin_bps: default_flashloan_prefilter_margin_bps(),
+            flashloan_prefilter_margin_wei: 0,
+            flashloan_prefilter_gas_cost_bps: 0,
+            flashloan_reject_same_router_negative: default_flashloan_reject_same_router_negative(),
+            flashloan_force: false,
+            flashloan_aggressive: false,
+            deadline_min_seconds_ahead: default_deadline_min_seconds_ahead(),
+            deadline_allow_past_secs: default_deadline_allow_past_secs(),
+            liquidation_scan_cooldown_secs: default_liquidation_scan_cooldown_secs(),
+            atomic_arb_scan_cooldown_secs: default_atomic_arb_scan_cooldown_secs(),
+            strategy_atomic_arb_enabled: default_true(),
+            strategy_liquidation_enabled: default_true(),
+            strategy_require_tokenlist: default_true(),
+            atomic_arb_gas_hint: default_atomic_arb_gas_hint(),
+            atomic_arb_max_candidates: default_atomic_arb_max_candidates(),
+            atomic_arb_max_attempts: default_atomic_arb_max_attempts(),
+            atomic_arb_seed_wei: default_atomic_arb_seed_wei(),
+            flashloan_allow_nonflash_fallback: false,
             router_discovery_enabled: default_router_discovery_enabled(),
             router_discovery_min_hits: default_router_discovery_min_hits(),
             router_discovery_flush_every: default_router_discovery_flush_every(),
             router_discovery_check_interval_secs: default_router_discovery_check_interval_secs(),
             router_discovery_auto_allow: default_router_discovery_auto_allow(),
             router_discovery_max_entries: default_router_discovery_max_entries(),
+            router_discovery_bootstrap_limit: default_router_discovery_bootstrap_limit(),
+            router_discovery_bootstrap_lookback_blocks:
+                default_router_discovery_bootstrap_lookback_blocks(),
+            router_discovery_max_rpc_calls_per_cycle:
+                default_router_discovery_max_rpc_calls_per_cycle(),
+            router_discovery_cycle_timeout_ms: default_router_discovery_cycle_timeout_ms(),
+            router_discovery_failure_budget: default_router_discovery_failure_budget(),
+            router_discovery_cooldown_secs: default_router_discovery_cooldown_secs(),
+            router_discovery_cache_path: None,
+            router_discovery_force_full_rescan: default_false(),
             router_allowlist_by_chain: None,
             chainlink_feeds_by_chain: None,
             chainlink_feeds_by_chain_eth: None,
@@ -1261,6 +2150,22 @@ mod tests {
             cryptocompare_api_key: None,
             coindesk_api_key: None,
             etherscan_api_key: None,
+        }
+    }
+
+    fn stash_env(keys: &[&str]) -> Vec<(String, Option<String>)> {
+        keys.iter()
+            .map(|k| (k.to_string(), std::env::var(k).ok()))
+            .collect()
+    }
+
+    fn restore_env(snapshot: Vec<(String, Option<String>)>) {
+        for (key, value) in snapshot {
+            if let Some(v) = value {
+                unsafe { std::env::set_var(key, v) };
+            } else {
+                unsafe { std::env::remove_var(key) };
+            }
         }
     }
 
@@ -1608,6 +2513,206 @@ mod tests {
     }
 
     #[test]
+    fn canonical_env_contract_loads_required_fields() {
+        let _env_lock = env_lock_guard();
+        let keys = [
+            "OXIDITY_WALLET_PRIVATE_KEY",
+            "OXIDITY_WALLET_ADDRESS",
+            "OXIDITY_FLASHLOAN_CONTRACT_ADDRESS",
+            "OXIDITY_BUNDLE_PRIVATE_KEY",
+            "OXIDITY_LOG_LEVEL",
+        ];
+        let snapshot = stash_env(&keys);
+        unsafe {
+            std::env::set_var("OXIDITY_WALLET_PRIVATE_KEY", "canonical_wallet");
+            std::env::set_var(
+                "OXIDITY_WALLET_ADDRESS",
+                "0x0000000000000000000000000000000000000001",
+            );
+            std::env::set_var(
+                "OXIDITY_FLASHLOAN_CONTRACT_ADDRESS",
+                "0x0000000000000000000000000000000000000002",
+            );
+            std::env::set_var("OXIDITY_BUNDLE_PRIVATE_KEY", "canonical_bundle");
+            std::env::set_var("OXIDITY_LOG_LEVEL", "warn");
+        }
+
+        let tmp = std::env::temp_dir().join(format!(
+            "config-canonical-contract-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::write(&tmp, "").expect("write temp config");
+
+        let loaded = GlobalSettings::load_with_path(Some(tmp.to_str().expect("utf8 path")))
+            .expect("load settings");
+        assert_eq!(loaded.wallet_key, "canonical_wallet");
+        assert_eq!(loaded.log_level, "warn");
+        assert_eq!(
+            loaded.executor_address,
+            Some(
+                Address::from_str("0x0000000000000000000000000000000000000002")
+                    .expect("valid address"),
+            )
+        );
+
+        std::fs::remove_file(&tmp).ok();
+        restore_env(snapshot);
+    }
+
+    #[test]
+    fn canonical_wins_over_legacy_alias_conflict() {
+        let _env_lock = env_lock_guard();
+        let keys = [
+            "OXIDITY_WALLET_PRIVATE_KEY",
+            "WALLET_KEY",
+            "OXIDITY_WALLET_ADDRESS",
+            "WALLET_ADDRESS",
+            "OXIDITY_FLASHLOAN_CONTRACT_ADDRESS",
+            "EXECUTOR_ADDRESS",
+            "OXIDITY_BUNDLE_PRIVATE_KEY",
+            "BUNDLE_SIGNER_KEY",
+        ];
+        let snapshot = stash_env(&keys);
+        unsafe {
+            std::env::set_var("OXIDITY_WALLET_PRIVATE_KEY", "canonical_wallet");
+            std::env::set_var("WALLET_KEY", "legacy_wallet");
+            std::env::set_var(
+                "OXIDITY_WALLET_ADDRESS",
+                "0x0000000000000000000000000000000000000001",
+            );
+            std::env::set_var(
+                "WALLET_ADDRESS",
+                "0x0000000000000000000000000000000000000003",
+            );
+            std::env::set_var(
+                "OXIDITY_FLASHLOAN_CONTRACT_ADDRESS",
+                "0x0000000000000000000000000000000000000002",
+            );
+            std::env::set_var(
+                "EXECUTOR_ADDRESS",
+                "0x0000000000000000000000000000000000000004",
+            );
+            std::env::set_var("OXIDITY_BUNDLE_PRIVATE_KEY", "canonical_bundle");
+            std::env::set_var("BUNDLE_SIGNER_KEY", "legacy_bundle");
+        }
+
+        let tmp = std::env::temp_dir().join(format!(
+            "config-canonical-conflict-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::write(&tmp, "").expect("write temp config");
+
+        let loaded = GlobalSettings::load_with_path(Some(tmp.to_str().expect("utf8 path")))
+            .expect("load settings");
+        assert_eq!(loaded.wallet_key, "canonical_wallet");
+        assert_eq!(loaded.bundle_signer_key(), "canonical_bundle");
+
+        std::fs::remove_file(&tmp).ok();
+        restore_env(snapshot);
+    }
+
+    #[test]
+    fn unrelated_env_noise_is_ignored() {
+        let _env_lock = env_lock_guard();
+        let keys = [
+            "DEBUG",
+            "OXIDITY_WALLET_PRIVATE_KEY",
+            "OXIDITY_WALLET_ADDRESS",
+            "OXIDITY_FLASHLOAN_CONTRACT_ADDRESS",
+            "OXIDITY_BUNDLE_PRIVATE_KEY",
+        ];
+        let snapshot = stash_env(&keys);
+        unsafe {
+            std::env::set_var("DEBUG", "release");
+            std::env::set_var("OXIDITY_WALLET_PRIVATE_KEY", "canonical_wallet");
+            std::env::set_var(
+                "OXIDITY_WALLET_ADDRESS",
+                "0x0000000000000000000000000000000000000001",
+            );
+            std::env::set_var(
+                "OXIDITY_FLASHLOAN_CONTRACT_ADDRESS",
+                "0x0000000000000000000000000000000000000002",
+            );
+            std::env::set_var("OXIDITY_BUNDLE_PRIVATE_KEY", "canonical_bundle");
+        }
+
+        let tmp = std::env::temp_dir().join(format!(
+            "config-noise-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::write(&tmp, "").expect("write temp config");
+
+        let loaded = GlobalSettings::load_with_path(Some(tmp.to_str().expect("utf8 path")))
+            .expect("load settings");
+        assert!(!loaded.debug);
+
+        std::fs::remove_file(&tmp).ok();
+        restore_env(snapshot);
+    }
+
+    #[test]
+    fn unknown_prefixed_env_key_is_ignored_with_warning() {
+        let _env_lock = env_lock_guard();
+        let keys = [
+            "OXIDITY_NOT_A_REAL_KEY",
+            "OXIDITY_WALLET_PRIVATE_KEY",
+            "OXIDITY_WALLET_ADDRESS",
+            "OXIDITY_FLASHLOAN_CONTRACT_ADDRESS",
+            "OXIDITY_BUNDLE_PRIVATE_KEY",
+        ];
+        let snapshot = stash_env(&keys);
+        unsafe {
+            std::env::set_var("OXIDITY_NOT_A_REAL_KEY", "xyz");
+            std::env::set_var("OXIDITY_WALLET_PRIVATE_KEY", "canonical_wallet");
+            std::env::set_var(
+                "OXIDITY_WALLET_ADDRESS",
+                "0x0000000000000000000000000000000000000001",
+            );
+            std::env::set_var(
+                "OXIDITY_FLASHLOAN_CONTRACT_ADDRESS",
+                "0x0000000000000000000000000000000000000002",
+            );
+            std::env::set_var("OXIDITY_BUNDLE_PRIVATE_KEY", "canonical_bundle");
+        }
+
+        let tmp = std::env::temp_dir().join(format!(
+            "config-prefixed-unknown-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::write(&tmp, "").expect("write temp config");
+
+        let loaded = GlobalSettings::load_with_report(Some(tmp.to_str().expect("utf8 path")))
+            .expect("load settings");
+        assert!(
+            loaded
+                .report
+                .warnings
+                .iter()
+                .any(|w| w.contains("OXIDITY_NOT_A_REAL_KEY"))
+        );
+        assert!(!loaded.settings.debug);
+
+        std::fs::remove_file(&tmp).ok();
+        restore_env(snapshot);
+    }
+
+    #[test]
     fn env_overrides_selected_profile_file_values() {
         let _env_lock = env_lock_guard();
         let tmp = std::env::temp_dir().join(format!(
@@ -1621,10 +2726,22 @@ mod tests {
         let body = r#"
 wallet_key = "file_wallet_key"
 wallet_address = "0x0000000000000000000000000000000000000001"
+executor_address = "0x0000000000000000000000000000000000000002"
+bundle_signer_key = "file_bundle_signer_key"
 "#;
         std::fs::write(&tmp, body).expect("write temp config");
-        let old_wallet_key = std::env::var("WALLET_KEY").ok();
+        let snapshot = stash_env(&[
+            "WALLET_KEY",
+            "OXIDITY_WALLET_PRIVATE_KEY",
+            "OXIDITY_WALLET_ADDRESS",
+            "OXIDITY_FLASHLOAN_CONTRACT_ADDRESS",
+            "OXIDITY_BUNDLE_PRIVATE_KEY",
+        ]);
         unsafe {
+            std::env::remove_var("OXIDITY_WALLET_PRIVATE_KEY");
+            std::env::remove_var("OXIDITY_WALLET_ADDRESS");
+            std::env::remove_var("OXIDITY_FLASHLOAN_CONTRACT_ADDRESS");
+            std::env::remove_var("OXIDITY_BUNDLE_PRIVATE_KEY");
             std::env::set_var("WALLET_KEY", "env_wallet_key");
         }
 
@@ -1633,11 +2750,7 @@ wallet_address = "0x0000000000000000000000000000000000000001"
         assert_eq!(loaded.wallet_key, "env_wallet_key");
 
         std::fs::remove_file(&tmp).ok();
-        if let Some(v) = old_wallet_key {
-            unsafe { std::env::set_var("WALLET_KEY", v) };
-        } else {
-            unsafe { std::env::remove_var("WALLET_KEY") };
-        }
+        restore_env(snapshot);
     }
 
     #[test]
@@ -1654,11 +2767,23 @@ wallet_address = "0x0000000000000000000000000000000000000001"
         let body = r#"
 wallet_key = "file_wallet_key"
 wallet_address = "0x0000000000000000000000000000000000000001"
+executor_address = "0x0000000000000000000000000000000000000002"
+bundle_signer_key = "file_bundle_signer_key"
 chains = [1]
 "#;
         std::fs::write(&tmp, body).expect("write temp config");
-        let old_chains = std::env::var("CHAINS").ok();
+        let snapshot = stash_env(&[
+            "CHAINS",
+            "OXIDITY_WALLET_PRIVATE_KEY",
+            "OXIDITY_WALLET_ADDRESS",
+            "OXIDITY_FLASHLOAN_CONTRACT_ADDRESS",
+            "OXIDITY_BUNDLE_PRIVATE_KEY",
+        ]);
         unsafe {
+            std::env::remove_var("OXIDITY_WALLET_PRIVATE_KEY");
+            std::env::remove_var("OXIDITY_WALLET_ADDRESS");
+            std::env::remove_var("OXIDITY_FLASHLOAN_CONTRACT_ADDRESS");
+            std::env::remove_var("OXIDITY_BUNDLE_PRIVATE_KEY");
             std::env::set_var("CHAINS", "1,137");
         }
 
@@ -1667,10 +2792,6 @@ chains = [1]
         assert_eq!(loaded.chains, vec![1, 137]);
 
         std::fs::remove_file(&tmp).ok();
-        if let Some(v) = old_chains {
-            unsafe { std::env::set_var("CHAINS", v) };
-        } else {
-            unsafe { std::env::remove_var("CHAINS") };
-        }
+        restore_env(snapshot);
     }
 }

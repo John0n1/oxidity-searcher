@@ -409,7 +409,7 @@ impl JsonRpcClient {
 async fn main() -> Result<(), AppError> {
     let cli = Cli::parse();
     let settings = GlobalSettings::load_with_path(cli.config.as_deref())?;
-    setup_logging(if settings.debug { "debug" } else { "info" }, false);
+    setup_logging(&settings.log_level, false);
 
     let chain_id = resolve_chain_id(&settings, cli.chain_id)?;
     let http_provider = settings.get_http_provider(chain_id)?;

@@ -59,15 +59,8 @@ impl StrategyExecutor {
         Self::price_ratio_ppm(out, inn)
     }
 
-    fn dynamic_profit_floor_with_abs(wallet_balance: U256, abs_floor: U256) -> U256 {
-        let scaled = wallet_balance
-            .checked_div(U256::from(10_000_000u64))
-            .unwrap_or(U256::ZERO);
-        if scaled > abs_floor {
-            scaled
-        } else {
-            abs_floor
-        }
+    fn dynamic_profit_floor_with_abs(_wallet_balance: U256, abs_floor: U256) -> U256 {
+        abs_floor
     }
 
     fn configured_abs_floor(&self) -> U256 {
@@ -152,6 +145,56 @@ impl StrategyExecutor {
             .max(gas_mult_floor)
             .max(volatility_guard)
             .max(usd_guard)
+    }
+
+    pub(crate) fn inclusion_probability_bps(&self, gas_fees: &GasFees) -> u64 {
+        let stress = self.classify_stress_profile(gas_fees);
+        let mut base = match stress {
+            StressProfile::UltraLow => 9_200u64,
+            StressProfile::Low => 8_900,
+            StressProfile::Normal => 8_400,
+            StressProfile::Elevated => 7_700,
+            StressProfile::High => 6_900,
+        };
+        let util = gas_fees.gas_used_ratio.unwrap_or(0.75);
+        if util > 1.05 {
+            base = base.saturating_sub(900);
+        } else if util > 0.95 {
+            base = base.saturating_sub(500);
+        } else if util < 0.55 {
+            base = base.saturating_add(350);
+        }
+        let tip_p50 = gas_fees
+            .p50_priority_fee_per_gas
+            .unwrap_or(gas_fees.max_priority_fee_per_gas)
+            .max(1);
+        let tip_p90 = gas_fees
+            .p90_priority_fee_per_gas
+            .unwrap_or(gas_fees.max_priority_fee_per_gas)
+            .max(tip_p50);
+        let spread_x100 = tip_p90.saturating_mul(100) / tip_p50.max(1);
+        if spread_x100 > 5_000 {
+            base = base.saturating_sub(500);
+        } else if spread_x100 < 900 {
+            base = base.saturating_add(200);
+        }
+        base.clamp(1_000, 9_900)
+    }
+
+    pub(crate) fn failure_cost_wei(
+        &self,
+        gas_cost_wei: U256,
+        extra_costs: U256,
+        uses_flashloan: bool,
+    ) -> U256 {
+        let retry_penalty_bps = if uses_flashloan { 2_000u64 } else { 1_200u64 };
+        let direct = gas_cost_wei.saturating_add(extra_costs);
+        direct.saturating_add(
+            direct
+                .saturating_mul(U256::from(retry_penalty_bps))
+                .checked_div(U256::from(10_000u64))
+                .unwrap_or(U256::ZERO),
+        )
     }
 
     pub(crate) fn classify_stress_profile(&self, gas_fees: &GasFees) -> StressProfile {
@@ -276,9 +319,7 @@ impl StrategyExecutor {
                         / 100
                 }
             };
-            let min_base = self
-                .profit_guard_base_floor_multiplier_bps
-                .clamp(0, 14_000);
+            let min_base = self.profit_guard_base_floor_multiplier_bps.clamp(0, 14_000);
             dynamic.max(floor).clamp(min_base, 14_000)
         };
         let cost_floor_bps = {
