@@ -6,7 +6,8 @@
     "tokenlist": "Canonical merged token list (base tokenlist + MetaMask/Uniswap + ERC20 entries from contract-map), deduped by chain+address with first-entry wins.",
     "chainlink_feeds": "Raw Chainlink feed candidates; runtime resolves canonical feed per symbol/chain.",
     "pairs": "Optional preloaded AMM pairs used to warm reserve cache.",
-    "executor_abi": "UnifiedHardenedExecutor contract ABI used by executor tooling."
+    "executor_abi": "UnifiedHardenedExecutor contract ABI used by executor tooling.",
+    "token_tiers": "Tier policy: tier1=curated core set; tier2=promoted from tier3 when feed/tag/liquidity signal exists (Chainlink symbol match, stablecoin/wrapped tag, or >=2 pair appearances); tier3=default long-tail supplemental."
   },
   "address_registry": {
     "chains": {
@@ -97,7 +98,7 @@
     {
       "symbol": "A7A5",
       "name": "A7A5",
-      "decimals": 18,
+      "decimals": 6,
       "tags": [
         "tier1"
       ],
@@ -134,7 +135,7 @@
     {
       "symbol": "ATOM",
       "name": "Cosmos",
-      "decimals": 18,
+      "decimals": 6,
       "tags": [
         "tier1"
       ],
@@ -146,7 +147,7 @@
     {
       "symbol": "BDX",
       "name": "BELDEX",
-      "decimals": 18,
+      "decimals": 9,
       "tags": [
         "tier1"
       ],
@@ -272,7 +273,7 @@
     {
       "symbol": "DOT",
       "name": "Polkadot",
-      "decimals": 18,
+      "decimals": 10,
       "tags": [
         "tier1"
       ],
@@ -384,7 +385,7 @@
     {
       "symbol": "EUTBL",
       "name": "Spiko EU T-Bills Money Market Fund",
-      "decimals": 18,
+      "decimals": 5,
       "tags": [
         "tier1"
       ],
@@ -457,7 +458,7 @@
     {
       "symbol": "KCS",
       "name": "KuCoin Token",
-      "decimals": 18,
+      "decimals": 6,
       "tags": [
         "tier1"
       ],
@@ -542,7 +543,7 @@
     {
       "symbol": "NEAR",
       "name": "NEAR",
-      "decimals": 18,
+      "decimals": 24,
       "tags": [
         "tier1"
       ],
@@ -1239,7 +1240,7 @@
     {
       "symbol": "syrupUSDC",
       "name": "Syrup USDC",
-      "decimals": 18,
+      "decimals": 6,
       "tags": [
         "tier1",
         "stablecoin"
@@ -1321,7 +1322,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x00000000441378008EA67F4284A57932B1c000a5"
@@ -1333,7 +1335,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x00000100F2A2bd000715001920eB70D229700085"
@@ -1345,7 +1348,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x0000206329b97DB379d5E1Bf586BbDB969C63274"
@@ -1357,7 +1361,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x00006100F7090010005F1bd7aE6122c3C2CF0090"
@@ -1369,7 +1374,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x0000852600CEB001E08e00bC008be620d60031F2"
@@ -1381,7 +1387,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x000C100050E98C91f9114fa5Dd75CE6869Bf4F53"
@@ -1393,7 +1400,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x0022228a2cc5E7eF0274A7Baa600d44da5aB5776"
@@ -1405,7 +1413,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x004626A008B1aCdC4c74ab51644093b155e59A23"
@@ -1417,7 +1426,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x008377EB0C62cE8e0BA3D7Bb4A5638591f21588E"
@@ -1429,7 +1439,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x00c83aeCC790e8a4453e5dD3B0B4b3680501a7A7"
@@ -1441,7 +1452,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x011E128Ec62840186F4A07E85E3ACe28858c5606"
@@ -1453,7 +1465,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x01FA555c97D7958Fa6f771f3BbD5CCD508f81e22"
@@ -1465,7 +1478,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x01e0E2e61f554eCAaeC0cC933E739Ad90f24a86d"
@@ -1477,7 +1491,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x0275E1001e293C46CFe158B3702AADe0B99f88a5"
@@ -1489,7 +1504,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x028171bCA77440897B824Ca71D1c56caC55b68A3"
@@ -1501,7 +1517,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x02F61Fd266DA6E8B102D4121f5CE7b992640CF98"
@@ -1513,7 +1530,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x030bA81f1c18d280636F32af80b9AAd02Cf0854e"
@@ -1525,7 +1543,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x031002d15B0D0Cd7c9129d6F644446368deaE391"
@@ -1537,7 +1556,8 @@
       "decimals": 6,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x039B5649A59967e3e936D7471f9c3700100Ee1ab"
@@ -1549,7 +1569,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x03ab458634910AaD20eF5f1C8ee96F1D6ac54919"
@@ -1561,7 +1582,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x03e3f0c25965f13DbbC58246738C183E27b26a56"
@@ -1573,7 +1595,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x048Fe49BE32adfC9ED68C37D32B5ec9Df17b3603"
@@ -1585,7 +1608,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x04Fa0d235C4abf4BcF4787aF4CF447DE572eF828"
@@ -1597,7 +1621,8 @@
       "decimals": 2,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x056Fd409E1d7A124BD7017459dFEa2F387b6d5Cd"
@@ -1609,7 +1634,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x05Ec93c0365baAeAbF7AefFb0972ea7ECdD39CF1"
@@ -1621,7 +1647,8 @@
       "decimals": 12,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x05f4a42e251f2d52b8ed15E9FEdAacFcEF1FAD27"
@@ -1633,7 +1660,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x06325440D014e39736583c165C2963BA99fAf14E"
@@ -1645,7 +1673,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x06AF07097C9Eeb7fD685c692751D5C66dB49c215"
@@ -1657,7 +1686,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x06B179e292f080871825beD5D722162fD96B4c95"
@@ -1669,7 +1699,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x07c52c2537D84e532a9F15d32E152C8B94D2b232"
@@ -1681,7 +1712,8 @@
       "decimals": 4,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x083D41d6DD21EE938f0c055CA4fb12268DF0EfaC"
@@ -1690,10 +1722,11 @@
     {
       "symbol": "EDG",
       "name": "Edgeless",
-      "decimals": 18,
+      "decimals": 0,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x08711D3B02C8758F2FB3ab4e80228418a7F8e39c"
@@ -1705,7 +1738,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x08c32b0726C5684024ea6e141C50aDe9690bBdcc"
@@ -1714,10 +1748,11 @@
     {
       "symbol": "DCN",
       "name": "Dentacoin Token",
-      "decimals": 18,
+      "decimals": 0,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x08d32b0da63e2C3bcF8019c9c5d849d7a9d791e6"
@@ -1729,7 +1764,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x08d967bb0134F2d07f7cfb6E246680c53927DD30"
@@ -1741,7 +1777,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x09E6d500D14D13e0528d2c0fff24E5ffF68237B4"
@@ -1753,7 +1790,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x09a3EcAFa817268f77BE1283176B946C4ff2E608"
@@ -1765,7 +1803,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x09db87A538BD693E9d08544577d5cCfAA6373A48"
@@ -1777,7 +1816,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x0AbdAce70D3790235af448C88547603b945604ea"
@@ -1789,7 +1829,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x0Ae055097C6d159879521C384F1D2123D1f195e6"
@@ -1801,7 +1842,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x0C10bF8FcB7Bf5412187A595ab97a3609160b5c6"
@@ -1813,7 +1855,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x0C4576Ca1c365868E162554AF8e385dc3e7C66D9"
@@ -1825,7 +1868,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x0Cf0Ee63788A0849fE5297F3407f701E122cC023"
@@ -1837,7 +1881,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x0D262e5dC4A06a0F1c90cE79C7a60C09DfC884E4"
@@ -1849,7 +1894,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0x0D8775F648430679A709E98d2b0Cb6250d2887EF"
@@ -1861,7 +1907,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x0DB8D8b76BC361bAcbB72E2C491E06085A97Ab31"
@@ -1873,7 +1920,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x0De05F6447ab4D22c8827449EE4bA2D5C288379B"
@@ -1885,7 +1933,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0x0F5D2fB29fb7d3CFeE444a200298f468908cC942"
@@ -1897,7 +1946,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x0a625FceC657053Fe2D9FFFdeb1DBb4e412Cf8A8"
@@ -1909,7 +1959,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x0ab87046fBb341D058F17CBC4c1133F25a20a52f"
@@ -1921,7 +1972,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x0adA190c81b814548ddC2F6AdC4a689ce7C1FE73"
@@ -1933,7 +1985,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0x0bc529c00C6401aEF6D220BE8C6Ea1667F6Ad93e"
@@ -1945,7 +1998,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x0beAD9a1bcc1b84D06E3f2df67E3549Fd55aB054"
@@ -1957,7 +2011,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x0cB8D0B37C7487b11d57F1f33dEfA2B1d3cFccfE"
@@ -1969,7 +2024,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x0cae8d91E0b1b7Bd00D906E990C3625b2c220db1"
@@ -1981,7 +2037,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x0d02755a5700414B26FF040e1dE35D337DF56218"
@@ -1993,7 +2050,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x0d88eD6E74bbFD96B831231638b66C05571e824F"
@@ -2005,7 +2063,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x101cc05f4A51C0319f570d5E146a8C625198e636"
@@ -2017,7 +2076,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x10633216E7E8281e33c86F02Bf8e565a635D9770"
@@ -2029,7 +2089,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0x111111111117dC0aa78b770fA6A738034120C302"
@@ -2041,7 +2102,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x1234567461d3f8Db7496581774Bd869C83D51c93"
@@ -2053,7 +2115,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x12652C6d93FDB6F4f37d48A8687783C782BB0d10"
@@ -2065,7 +2128,8 @@
       "decimals": 12,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x12B19D3e2ccc14Da04FAe33e63652ce469b3F2FD"
@@ -2077,7 +2141,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x13cb85823f78Cff38f0B0E90D3e975b8CB3AAd64"
@@ -2089,7 +2154,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x1416946162B1C2c871A73B07E932D2fB6C932069"
@@ -2101,7 +2167,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x14778860E937f509e651192a90589dE711Fb88a9"
@@ -2113,7 +2180,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x148255a3b10666D9788Ec48BC61Ea3e48974bf2C"
@@ -2125,7 +2193,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x14C926F2290044B647e1Bf2072e67B495eff1905"
@@ -2137,7 +2206,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x150b0b96933B75Ce27af8b92441F8fB683bF9739"
@@ -2149,7 +2219,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x15700B564Ca08D9439C58cA5053166E8317aa138"
@@ -2161,7 +2232,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x15D4c048F83bd7e37d49eA4C83a07267Ec4203dA"
@@ -2173,7 +2245,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x16484d73Ac08d2355F466d448D2b79D2039F6EBB"
@@ -2185,7 +2258,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x16ECCfDbb4eE1A85A33f3A9B21175Cd7Ae753dB4"
@@ -2197,7 +2271,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x16aFFA80C65Fd7003d40B24eDb96f77b38dDC96A"
@@ -2209,7 +2284,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x16c52CeeCE2ed57dAd87319D91B5e3637d50aFa4"
@@ -2221,7 +2297,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x1776e1F26f98b1A5dF9cD347953a26dd3Cb46671"
@@ -2233,7 +2310,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x178c820f862B14f316509ec36b13123DA19A6054"
@@ -2245,7 +2323,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x1796ae0b0fa4862485106a0de9b654eFE301D0b2"
@@ -2257,7 +2336,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x18240BD9C07fA6156Ce3F3f61921cC82b2619157"
@@ -2269,7 +2349,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x182F4c4C97cd1c24E1Df8FC4c053E5C47bf53Bef"
@@ -2281,7 +2362,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x18aAA7115705e8be94bfFEBDE57Af9BFc265B998"
@@ -2293,7 +2375,8 @@
       "decimals": 16,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x19062190B1925b5b6689D7073fDfC8c2976EF8Cb"
@@ -2305,7 +2388,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x196f4727526eA7FB1e17b2071B3d8eAA38486988"
@@ -2317,7 +2401,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x1985365e9f78359a9B6AD760e32412f4a445E862"
@@ -2329,7 +2414,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x1A4b46696b2bB4794Eb3D4c26f1c55F9170fa4C5"
@@ -2341,7 +2427,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x1Da87b114f35E1DC91F72bF57fc07A768Ad40Bb0"
@@ -2353,7 +2440,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x1F573D6Fb3F13d689FF844B4cE37794d79a7FF1C"
@@ -2365,7 +2453,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x1a7a8BD9106F2B8D977E08582DC7d24c723ab0DB"
@@ -2377,7 +2466,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x1a7e4e63778B4f12a199C062f3eFdD288afCBce8"
@@ -2389,7 +2479,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x1b40183EFB4Dd766f11bDa7A7c3AD8982e998421"
@@ -2401,7 +2492,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x1c4481750daa5Ff521A2a7490d9981eD46465Dbd"
@@ -2413,7 +2505,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x1cF4592ebfFd730c7dc92c1bdFFDfc3B9EfCf29a"
@@ -2425,7 +2518,8 @@
       "decimals": 6,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x1d462414fe14cf489c7A21CaC78509f4bF8CD7c0"
@@ -2434,10 +2528,11 @@
     {
       "symbol": "BCAP",
       "name": "Blockchain Capital",
-      "decimals": 18,
+      "decimals": 0,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x1f41E42D0a9e3c0Dd3BA15B527342783B43200A9"
@@ -2449,7 +2544,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x2013C72c04D3071bE73f0af6eDC909F659656bda"
@@ -2461,7 +2557,8 @@
       "decimals": 6,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x20F7A3DdF244dc9299975b4Da1C39F8D5D75f05A"
@@ -2473,7 +2570,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x21381e026Ad6d8266244f2A583b35F9E4413FA2a"
@@ -2485,7 +2583,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x21BfBDa47A0B4B5b1248c767Ee49F7caA9B23697"
@@ -2497,7 +2596,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x221657776846890989a759BA2973e427DfF5C9bB"
@@ -2509,7 +2609,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x243cACb4D5fF6814AD668C3e225246efA886AD5a"
@@ -2521,7 +2622,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x249cA82617eC3DfB2589c4c17ab7EC9765350a18"
@@ -2533,7 +2635,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x24C19F7101c1731b85F1127EaA0407732E36EcDD"
@@ -2545,7 +2648,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x252739487C1fa66eaeaE7CED41d6358aB2a6bCa9"
@@ -2557,7 +2661,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x255Aa6DF07540Cb5d3d297f0D0D4D84cb52bc8e6"
@@ -2569,7 +2674,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x2604FA406Be957E542BEb89E6754fCdE6815e83f"
@@ -2581,7 +2687,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x261b45D85cCFeAbb11F022eBa346ee8D1cd488c0"
@@ -2593,7 +2700,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x26805021988F1a45dC708B5FB75Fc75F21747D8c"
@@ -2605,7 +2713,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x26E75307Fc0C021472fEb8F727839531F112f317"
@@ -2617,7 +2726,8 @@
       "decimals": 4,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x27054b13b1B798B345b591a4d22e6562d47eA75a"
@@ -2629,7 +2739,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x27702a26126e0B3702af63Ee09aC4d1A084EF628"
@@ -2641,7 +2752,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x2781246fe707bB15CeE3e5ea354e2154a2877B16"
@@ -2653,7 +2765,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x287a7C95aD00bBDd48599Ad2919567fD09281f07"
@@ -2665,7 +2778,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x28cb7e841ee97947a86B06fA4090C8451f64c0be"
@@ -2677,7 +2791,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x28dee01D53FED0Edf5f6E310BF8Ef9311513Ae40"
@@ -2689,7 +2804,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x2A8e1E676Ec238d8A992307B495b45B3fEAa5e86"
@@ -2701,7 +2817,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x2C4e8f2D746113d0696cE89B35F0d8bF88E0AEcA"
@@ -2713,7 +2830,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x2b591e99afE9f32eAA6214f7B7629768c40Eeb39"
@@ -2725,7 +2843,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x2ba592F78dB6436527729929AAf6c908497cB200"
@@ -2737,7 +2856,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x2be5e8c109e2197D077D13A82dAead6a9b3433C5"
@@ -2749,7 +2869,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x2c95D751DA37A5C1d9c5a7Fd465c1d50F3d96160"
@@ -2761,7 +2882,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x2dbA05B51eF5A7DE3E7c3327201CA2F8a25C2414"
@@ -2773,7 +2895,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x2e1E15C44Ffe4Df6a0cb7371CD00d5028e571d14"
@@ -2785,7 +2908,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x2ecB13A8c458c379c4d9a7259e202De03c8F3D19"
@@ -2797,7 +2921,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x2ffa85f655752fB2aCB210287c60b9ef335f5b6E"
@@ -2809,7 +2934,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x3085154623F51b00Dedfc6Ceeb5197277A66B17B"
@@ -2821,7 +2947,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x31429d1856aD1377A8A0079410B297e1a9e214c2"
@@ -2833,7 +2960,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x317eb4ad9cfaC6232f0046831322E895507bcBeb"
@@ -2845,7 +2973,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0x320623b8E4fF03373931769A31Fc52A4E78B5d70"
@@ -2857,7 +2986,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x321C2fE4446C7c963dc41Dd58879AF648838f98D"
@@ -2869,7 +2999,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x3231Cb76718CDeF2155FC47b5286d82e6eDA273f"
@@ -2881,7 +3012,8 @@
       "decimals": 6,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x32E4c68B3A4a813b710595AebA7f6B7604Ab9c15"
@@ -2893,7 +3025,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x32E6C34Cd57087aBBD59B5A4AECC4cB495924356"
@@ -2905,7 +3038,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x32a7C02e79c4ea1008dD6564b35F131428673c41"
@@ -2917,7 +3051,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x33349B282065b0284d756F0577FB39c158F935e6"
@@ -2929,7 +3064,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x3432B6A60D23Ca0dFCa7761B7ab56459D9C964D0"
@@ -2941,7 +3077,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x3472A5A71965499acd81997a54BBA8D852C6E53d"
@@ -2953,7 +3090,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x3505F494c3f0fed0B594E01Fa41Dd3967645ca39"
@@ -2965,7 +3103,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x358AA737e033F34df7c54306960a38d09AaBd523"
@@ -2977,7 +3116,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x35bD01FC9d6D5D81CA9E055Db88Dc49aa2c699A8"
@@ -2989,7 +3129,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x35f6B052C598d933D69A4EEC4D04c73A191fE6c2"
@@ -3001,7 +3142,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x35fA164735182de50811E8e2E824cFb9B6118ac2"
@@ -3013,7 +3155,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x362bc847A3a9637d3af6624EeC853618a43ed7D2"
@@ -3025,7 +3168,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0x3845badAde8e6dFF049820680d1F14bD3903a5d0"
@@ -3037,7 +3181,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x3893b9422Cd5D70a81eDeFfe3d5A1c6A978310BB"
@@ -3049,7 +3194,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x38e382F74dfb84608F3C1F10187f6bEf5951DE93"
@@ -3061,7 +3207,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x38e4adB44ef08F22F5B5b76A8f0c2d0dCbE7DcA1"
@@ -3073,7 +3220,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x39AA39c021dfbaE8faC545936693aC917d5E7563"
@@ -3085,7 +3233,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x39Bb259F66E1C59d5ABEF88375979b4D20D98022"
@@ -3097,7 +3246,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x39C6b3e42d6A679d7D776778Fe880BC9487C2EDA"
@@ -3109,7 +3259,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x39fBBABf11738317a448031930706cd3e612e1B9"
@@ -3121,7 +3272,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x3A880652F47bFaa771908C07Dd8673A787dAEd3A"
@@ -3133,7 +3285,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x3BE7bF1A5F23BD8336787D0289B70602f1940875"
@@ -3145,7 +3298,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x3C44aEc33993b6830e5C2a705ea879b9C9ba0f7c"
@@ -3157,7 +3311,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x3DB6Ba6ab6F95efed1a6E794caD492fAAabF294D"
@@ -3169,7 +3324,8 @@
       "decimals": 6,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x3Ed3B47Dd13EC9a98b44e6204A523E766B225811"
@@ -3181,7 +3337,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x3a4f40631a4f906c2BaD353Ed06De7A5D3fCb430"
@@ -3193,7 +3350,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x3af33bEF05C2dCb3C7288b77fe1C8d2AeBA4d789"
@@ -3205,7 +3363,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x3dA0e01472Dee3746b4D324a65D7EdFaECa9Aa4f"
@@ -3217,7 +3376,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x3fa400483487A489EC9b1dB29C4129063EEC4654"
@@ -3229,7 +3389,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x408e41876cCCDC0F92210600ef50372656052a38"
@@ -3241,7 +3402,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x40FD72257597aA14C7231A7B1aaa29Fce868F677"
@@ -3253,7 +3415,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4116f14b6d462B32a1C10F98049E4B1765e34FA9"
@@ -3265,7 +3428,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x419D0d8BdD9aF5e606Ae2232ed285Aff190E711b"
@@ -3277,7 +3441,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x42476F744292107e34519F9c357927074Ea3F75D"
@@ -3289,7 +3454,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x42d6622deCe394b54999Fbd73D108123806f6a18"
@@ -3301,7 +3467,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x431ad2ff6a9C365805eBaD47Ee021148d6f7DBe0"
@@ -3313,7 +3480,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x43Dfc4159D86F3A37A5A4B3D4580b888ad7d4DDd"
@@ -3325,7 +3493,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x44197A4c44D6A059297cAf6be4F7e172BD56Caaf"
@@ -3337,7 +3506,8 @@
       "decimals": 4,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4470BB87d77b963A013DB939BE332f927f2b992e"
@@ -3349,7 +3519,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x44e2deC86B9F0e0266E9AA66e10323A2bd69CF9A"
@@ -3361,7 +3532,8 @@
       "decimals": 9,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4507cEf57C46789eF8d1a19EA45f4216bae2B528"
@@ -3373,7 +3545,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4575f41308EC1483f3d399aa9a2826d74Da13Deb"
@@ -3385,7 +3558,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x463538705E7d22aA7f03Ebf8ab09B067e1001B54"
@@ -3397,7 +3571,8 @@
       "decimals": 6,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x467719aD09025FcC6cF6F8311755809d45a5E5f3"
@@ -3409,7 +3584,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4691937a7508860F876c9c0a2a617E7d9E945D4B"
@@ -3421,7 +3597,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4730fB1463A6F1F44AEB45F6c5c422427f37F4D0"
@@ -3433,7 +3610,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x47BE779De87de6580d0548cde80710a93c502405"
@@ -3445,7 +3623,8 @@
       "decimals": 5,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x487d62468282Bd04ddf976631C23128A425555EE"
@@ -3457,7 +3636,8 @@
       "decimals": 7,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x48FF53777F747cFB694101222a944dE070c15D36"
@@ -3469,7 +3649,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4946Fcea7C692606e8908002e55A582af44AC121"
@@ -3481,7 +3662,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x49642110B712C1FD7261Bc074105E9E44676c68F"
@@ -3493,7 +3675,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4CC19356f2D37338b9802aa8E8fc58B0373296E7"
@@ -3505,7 +3688,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4Cf89ca06ad997bC732Dc876ed2A7F26a9E7f361"
@@ -3517,7 +3701,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4D0528598F916Fd1D8dc80e5f54a8fEEDcFd4b18"
@@ -3529,7 +3714,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4D8fc1453a0F359e99c9675954e656D80d996FbF"
@@ -3541,7 +3727,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4DF812F6064def1e5e029f1ca858777CC98D2D81"
@@ -3553,7 +3740,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4Ddc2D193948926D02f9B1fE9e1daa0718270ED5"
@@ -3565,7 +3753,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4E15361FD6b4BB609Fa63C81A2be19d873717870"
@@ -3577,7 +3766,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4E241A9EC66832a16bceaeB9156E524487f061D7"
@@ -3589,7 +3779,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4F4f0Db4de903B88f2B1a2847971E231D54F8fd3"
@@ -3601,7 +3792,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4F9254C83EB525f9FCf346490bbb3ed28a81C667"
@@ -3613,7 +3805,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4FC15c91a9c4A9efB404174464687E8e128730C2"
@@ -3625,7 +3818,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4Fabb145d64652a948d72533023f6E7A623C7C53"
@@ -3637,7 +3831,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4FbB350052Bca5417566f188eB2EBCE5b19BC964"
@@ -3649,7 +3844,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4a6058666cf1057eaC3CD3A5a614620547559fc9"
@@ -3661,7 +3857,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4a615bB7166210CCe20E6642a6f8Fb5d4D044496"
@@ -3673,7 +3870,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4ad7a056191F4c9519fAcd6D75FA94CA26003aCE"
@@ -3685,7 +3883,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4b9278b94a1112cAD404048903b8d343a810B07e"
@@ -3697,7 +3896,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x4dA34f8264CB33A5c9F17081B9EF5Ff6091116f4"
@@ -3709,7 +3909,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x509A38b7a1cC0dcd83Aa9d06214663D9eC7c7F4a"
@@ -3721,7 +3922,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x5150956E082C748Ca837a5dFa0a7C10CA4697f9c"
@@ -3733,7 +3935,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x5165d24277cD063F5ac44Efd447B27025e888f37"
@@ -3745,7 +3948,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x519C1001D550C0a1DaE7d1fC220f7d14c2A521BB"
@@ -3757,7 +3961,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x5218E472cFCFE0b64A064F055B43b4cdC9EfD3A6"
@@ -3769,7 +3974,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x536381a8628dBcC8C70aC9A30A7258442eAb4c92"
@@ -3781,7 +3987,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x53C8395465A84955c95159814461466053DedEDE"
@@ -3793,7 +4000,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x5401F949cDfa3E5aF32538167c0314230769209C"
@@ -3805,7 +4013,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x543Ff227F64Aa17eA132Bf9886cAb5DB55DCAddf"
@@ -3817,7 +4026,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x544c42fBB96B39B21DF61cf322b5EDC285EE7429"
@@ -3829,7 +4039,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x54b79A15b2e2c55c736A66bb0A978fb840407aC8"
@@ -3841,7 +4052,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x557B933a7C2c45672B610F8954A3deB39a51A8Ca"
@@ -3853,7 +4065,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x56d811088235F11C8920698a204A5010a788f4b3"
@@ -3865,7 +4078,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x5732046A883704404F284Ce41FfADd5b007FD668"
@@ -3877,7 +4091,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x57Ab1ec28D129707052df4dF418D58a2D46d5f51"
@@ -3889,7 +4104,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x57B946008913B82E4dF85f501cbAeD910e58D26C"
@@ -3901,7 +4117,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x58b6A8A3302369DAEc383334672404Ee733aB239"
@@ -3913,7 +4130,8 @@
       "decimals": 6,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x595832F8FC6BF59c85C527fEC3740A1b7a361269"
@@ -3925,7 +4143,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x5CA9a71B1d01849C0a95490Cc00559717fCF0D1d"
@@ -3937,7 +4156,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x5D446FC8DBd10EBAcfE9A427aB5402586af98cD4"
@@ -3949,7 +4169,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x5D858bcd53E085920620549214a8b27CE2f04670"
@@ -3961,7 +4182,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x5aFE3855358E112B5647B952709E6165e1c1eEEe"
@@ -3973,7 +4195,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x5adc961D6AC3f7062D2eA45FEFB8D8167d44b190"
@@ -3985,7 +4208,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x5d3a536E4D6DbD6114cc1Ead35777bAB948E3643"
@@ -3997,7 +4221,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x5d60d8d7eF6d37E16EBABc324de3bE57f135e0BC"
@@ -4009,7 +4234,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x5dc60C4D5e75D22588FA17fFEB90A63E535efCE0"
@@ -4021,7 +4247,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x5e74C9036fb86BD7eCdcb084a0673EFc32eA31cb"
@@ -4033,7 +4260,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x5eed99d066a8CaF10f3E4327c1b3D8b673485eED"
@@ -4045,7 +4273,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x5f778ec4B31a506c1Dfd8b06F131E9B451a61D39"
@@ -4057,7 +4286,8 @@
       "decimals": 9,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x607F4C5BB672230e8672085532f7e901544a7375"
@@ -4069,7 +4299,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x60bE1e1fE41c1370ADaF5d8e66f07Cf1C2Df2268"
@@ -4081,7 +4312,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x6243d8CEA23066d098a15582d81a598b4e8391F4"
@@ -4093,7 +4325,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x62Dc4817588d53a056cBbD18231d91ffCcd34b2A"
@@ -4105,7 +4338,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x63f88A2298a5c4AEE3c216Aa6D926B184a4b2437"
@@ -4117,7 +4351,8 @@
       "decimals": 9,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x64aa3364F17a4D01c6f1751Fd97C2BD3D7e7f1D5"
@@ -4129,7 +4364,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x65514b352d1d4a17DE97f95C7faB177C625Bd6ff"
@@ -4141,7 +4377,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x657e8C867D8B37dCC18fA4Caead9C45EB088C642"
@@ -4153,7 +4390,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x65Def5029A0e7591e46B38742bFEdd1Fb7b24436"
@@ -4165,7 +4403,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x665F77fbA5975ab40Ce61c90F28007fb5b09D7B1"
@@ -4177,7 +4416,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x667088b212ce3d06a1b553a7221E1fD19000d9aF"
@@ -4189,7 +4429,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x66a0f676479Cee1d7373f3DC2e2952778BfF5bd6"
@@ -4201,7 +4442,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x66fD97a78d8854fEc445cd1C80a07896B0b4851f"
@@ -4213,7 +4455,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x6710c63432A2De02954fc0f851db07146a6c0312"
@@ -4225,7 +4468,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x674C6Ad92Fd080e4004b2312b45f796a192D27a0"
@@ -4237,7 +4481,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x677c9fE4396D3D13A0F9013a8118eAE386C843A5"
@@ -4249,7 +4494,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x6781a0F84c7E9e846DCb84A9a5bd49333067b104"
@@ -4261,7 +4507,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x6810e776880C02933D47DB1b9fc05908e5386b96"
@@ -4273,7 +4520,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x687642347a9282Be8FD809d8309910A3f984Ac5a"
@@ -4285,7 +4533,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x6888a16eA9792c15A4DCF2f6C623D055c8eDe792"
@@ -4297,7 +4546,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x697eF32B4a3F5a4C39dE1cB7563f24CA7BfC5947"
@@ -4309,7 +4559,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x69A95185ee2a045CDC4bCd1b1Df10710395e4e23"
@@ -4321,7 +4572,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x69af81e73A73B40adF4f3d4223Cd9b1ECE623074"
@@ -4333,7 +4585,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0x6B3595068778DD592e39A122f4f5a5cF09C90fE2"
@@ -4345,7 +4598,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x6B4c7A5e3f0B99FCD83e9c089BDDD6c7FCe5c611"
@@ -4357,7 +4611,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x6BeA7CFEF803D1e3d5f7C0103f7ded065644e197"
@@ -4369,7 +4624,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x6C5024Cd4F8A59110119C56f8933403A539555EB"
@@ -4381,7 +4637,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x6C8c6b02E7b2BE14d4fA6022Dfd6d75921D90E4E"
@@ -4393,7 +4650,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x6D0F5149c502faf215C89ab306ec3E50b15e2892"
@@ -4405,7 +4663,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x6E765D26388A17A6e86c49A8E41DF3F58aBcd337"
@@ -4417,7 +4676,8 @@
       "decimals": 9,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x6E79B51959CF968d87826592f46f819F92466615"
@@ -4429,22 +4689,11 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x6aA030a9710CAD6E719A4EC0a85260Eb3F4F86c1"
-      }
-    },
-    {
-      "symbol": "DGS",
-      "name": "Dragonglass",
-      "decimals": 8,
-      "tags": [
-        "supplemental",
-        "metamask_uniswap"
-      ],
-      "addresses": {
-        "1": "0x6aEDbF8dFF31437220dF351950Ba2a3362168d1b"
       }
     },
     {
@@ -4453,7 +4702,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x6b093998D36f2C7F0cc359441FBB24CC629D5FF0"
@@ -4465,7 +4715,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x6b576972de33BebDe3A703BfF52a091e79f8c87A"
@@ -4477,7 +4728,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x6c6EE5e31d828De241282B9606C8e98Ea48526E2"
@@ -4489,7 +4741,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x6d29903BC2c4318b59B35d97Ab98ab9eC08Ed70D"
@@ -4501,7 +4754,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x6e0daDE58D2d89eBBe7aFc384e3E4f15b70b14D8"
@@ -4513,7 +4767,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x6e2aA5bB90ac37D9006685AFc651ef067E1c7b44"
@@ -4525,7 +4780,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x6fB3e0A217407EFFf7Ca062D46c26E5d60a14d69"
@@ -4537,7 +4793,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x6fe56C0bcdD471359019FcBC48863d6c3e9d4F41"
@@ -4549,7 +4806,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x7064aAb39A0Fcf7221c3396719D0917a65E35515"
@@ -4561,7 +4819,8 @@
       "decimals": 9,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x7076De6fF1d91e00Be7E92458089C833De99E22E"
@@ -4573,7 +4832,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x70e36f6BF80a52b3B46b3aF8e106CC0ed743E8e4"
@@ -4585,7 +4845,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x711D2C47aFf84B96AD0F36983b1c41Be2C509e18"
@@ -4597,7 +4858,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x7163436b8EfFfB469F6BB81cc908b1661d4795e6"
@@ -4609,7 +4871,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x71D01dB8d6a2fBEa7f8d434599C237980C234e4C"
@@ -4621,7 +4884,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x71F85B2E46976bD21302B64329868fd15eb0D127"
@@ -4633,7 +4897,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x7240aC91f01233BaAf8b064248E80feaA5912BA3"
@@ -4645,7 +4910,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x72F020f8f3E8fd9382705723Cd26380f8D0c66Bb"
@@ -4657,7 +4923,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x7420B4b9a0110cdC71fB720908340C03F9Bc03EC"
@@ -4669,7 +4936,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x744d70FDBE2Ba4CF95131626614a1763DF805B9E"
@@ -4681,7 +4949,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x745407c86DF8DB893011912d3aB28e68B62E49B0"
@@ -4693,7 +4962,8 @@
       "decimals": 7,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x746DdA2ea243400D5a63e0700F190aB79f06489e"
@@ -4705,7 +4975,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x75387e1287Dd85482aB66102DA9f6577E027f609"
@@ -4717,7 +4988,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x75D1aA733920b14fC74c9F6e6faB7ac1EcE8482E"
@@ -4729,7 +5001,8 @@
       "decimals": 6,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x764A726d9ceD0433A8D7643335919dEb03a9a935"
@@ -4741,7 +5014,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x7659CE147D0e714454073a5dd7003544234b6Aa0"
@@ -4753,7 +5027,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x767FE9EDC9E0dF98E07454847909b5E959D7ca0E"
@@ -4765,7 +5040,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x77776b40C3d75cb07ce54dEA4b2Fd1D07F865222"
@@ -4777,7 +5053,8 @@
       "decimals": 9,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x777fD20c983d6658c1D50b3958B3A1733d1cd1E1"
@@ -4789,7 +5066,8 @@
       "decimals": 9,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x77be1ba1Cd2D7a63BFfC772D361168cc327dd8bc"
@@ -4801,7 +5079,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x7865af71cf0b288b4E7F654f4F7851EB46a2B7F8"
@@ -4813,7 +5092,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x7A58c0Be72BE218B41C608b7Fe7C5bB630736C71"
@@ -4825,7 +5105,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x7BEF710a5759d197EC0Bf621c3Df802C2D60D848"
@@ -4837,7 +5118,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x7C5A0CE9267ED19B22F8cae653F198e3E8daf098"
@@ -4849,7 +5131,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x7D1AfA7B718fb893dB30A3aBc0Cfc608AaCfeBB0"
@@ -4861,7 +5144,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x7D85e23014F84E6E21d5663aCD8751bEF3562352"
@@ -4873,7 +5157,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x7DD9c5Cba05E151C895FDe1CF355C9A1D5DA6429"
@@ -4885,7 +5170,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x7F3Fe9D492A9a60aEBb06d82cBa23c6F32CAd10b"
@@ -4897,7 +5183,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x7b760D06E401f85545F3B50c44bf5B05308b7b62"
@@ -4909,7 +5196,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x7ba92741Bf2A568abC6f1D3413c58c6e0244F8fD"
@@ -4921,7 +5209,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x7d4b8Cce0591C9044a22ee543533b72E976E36C3"
@@ -4933,7 +5222,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x7d51888C5ABb7CDfa9cdd6A50673c7F8afAccD7F"
@@ -4945,7 +5235,8 @@
       "decimals": 6,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x7e9997a38A439b2be7ed9c9C4628391d3e055D48"
@@ -4957,7 +5248,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x808688c820AB080A6Ff1019F03E5EC227D9b522B"
@@ -4969,7 +5261,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x80fB784B7eD66730e8b1DBd9820aFD29931aab03"
@@ -4981,7 +5274,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x8207c1FfC5B6804F6024322CcF34F29c3541Ae26"
@@ -4993,7 +5287,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x8282df223AC402d04B2097d16f758Af4F70e7Db0"
@@ -5005,7 +5300,8 @@
       "decimals": 6,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x82f4dED9Cec9B5750FBFf5C2185AEe35AfC16587"
@@ -5017,7 +5313,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x83e6f1E41cdd28eAcEB20Cb649155049Fac3D5Aa"
@@ -5029,7 +5326,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x8400D94A5cb0fa0D041a3788e395285d61c9ee5e"
@@ -5041,7 +5339,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x84cA8bc7997272c7CfB4D0Cd3D55cd942B3c9419"
@@ -5053,7 +5352,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x853d955aCEf822Db058eb8505911ED77F175b99e"
@@ -5065,7 +5365,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0x856c4Efb76C1D1AE02e20CEB03A2A6a08b0b8dC3"
@@ -5077,7 +5378,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x85Eee30c52B0b379b046Fb0F85F4f3Dc3009aFEC"
@@ -5089,7 +5391,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x8642A849D0dcb7a15a974794668ADcfbe4794B56"
@@ -5101,7 +5404,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x86f2A193b116d1f9C53Ed26d97F77cDC8BcF4c2b"
@@ -5113,7 +5417,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x875773784Af8135eA0ef43b5a374AaD105c5D39e"
@@ -5125,7 +5430,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x87C22615435998D69ACA34889D03155B694a94fc"
@@ -5137,7 +5443,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x881Ba05de1E78f549cC63a8f6Cabb1d4AD32250D"
@@ -5149,7 +5456,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x88D8DA2A8D0fA5b1f4E38030AC486aDE0AFA2798"
@@ -5161,7 +5469,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x88dF592F8eb5D7Bd38bFeF7dEb0fBc02cf3778a0"
@@ -5173,7 +5482,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x8971f9fd7196e5cEE2C1032B50F656855af7Dd26"
@@ -5185,7 +5495,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x89A8c847f41C0dfA6c8B88638bACca8a0b777Da7"
@@ -5197,7 +5508,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x89d24A6b4CcB1B6fAA2625fE562bDD9a23260359"
@@ -5209,7 +5521,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x8B39B70E39Aa811b69365398e0aACe9bee238AEb"
@@ -5221,7 +5534,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x8Bc2bCb1b1896291942C36F3Cca3C1afA0Aaa7fd"
@@ -5233,22 +5547,11 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x8CC0F052fff7eaD7f2EdCCcaC895502E884a8a71"
-      }
-    },
-    {
-      "symbol": "BRBC",
-      "name": "Rubic",
-      "decimals": 18,
-      "tags": [
-        "supplemental",
-        "metamask_uniswap"
-      ],
-      "addresses": {
-        "1": "0x8E3BCC334657560253B83f08331d85267316e08a"
       }
     },
     {
@@ -5257,7 +5560,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0x8E870D67F660D95d5be530380D0eC0bd388289E1"
@@ -5269,7 +5573,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x8a854288a5976036A725879164Ca3e91d30c6A1B"
@@ -5281,7 +5586,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x8b385Ca3592A5EFc34E0C9fE663de56897F1751F"
@@ -5293,7 +5599,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x8b79656FC38a04044E495e22fAD747126ca305C4"
@@ -5305,7 +5612,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x8d96B4ab6C741a4C8679AE323a100d74f085BA8F"
@@ -5317,7 +5625,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0x8dAEBADE922dF735c38C80C7eBD708Af50815fAa"
@@ -5329,7 +5638,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x8eEF5a82E6Aa222a60F009ac18c24EE12dBf4b41"
@@ -5341,7 +5651,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x8f693ca8D21b157107184d29D398A8D082b38b76"
@@ -5353,7 +5664,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x8f8221aFbB33998d8584A2B05749bA73c37a938a"
@@ -5365,7 +5677,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x909E34d3f6124C324ac83DccA84b74398a6fa173"
@@ -5377,7 +5690,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x915424Ac489433130d92B04096F3b96c82e92a9D"
@@ -5389,7 +5703,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x9189c499727f88F8eCC7dC4EEA22c828E6AaC015"
@@ -5401,7 +5716,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x91Af0fBB28ABA7E31403Cb457106Ce79397FD4E6"
@@ -5413,7 +5729,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x92A5B04D0ED5D94D7a193d1d334D3D16996f4E13"
@@ -5425,7 +5742,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x92D6C1e31e14520e676a687F0a93788B716BEff5"
@@ -5437,7 +5755,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x93ED3FBe21207Ec2E8f2d3c3de6e058Cb73Bc04d"
@@ -5449,7 +5768,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x93a7174dafd31d13400cD9fa01f4e5B5BAa00D39"
@@ -5461,7 +5781,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x946112efaB61C3636CBD52DE2E1392D7A75A6f01"
@@ -5473,7 +5794,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x9469D013805bFfB7D3DEBe5E7839237e535ec483"
@@ -5485,7 +5807,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x947AEb02304391f8fbE5B25D7D98D649b57b1788"
@@ -5494,10 +5817,11 @@
     {
       "symbol": "MOD",
       "name": "Modum Token",
-      "decimals": 18,
+      "decimals": 0,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x957c30aB0426e0C93CD8241E2c60392d08c6aC8e"
@@ -5509,7 +5833,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x960b236A07cf122663c4303350609A66A7B288C0"
@@ -5521,7 +5846,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x9625cE7753ace1fa1865A47aAe2c5C2Ce4418569"
@@ -5533,7 +5859,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x967da4048cD07aB37855c090aAF366e4ce1b9F48"
@@ -5545,7 +5872,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x968F6f898a6Df937fC1859b323aC2F14643e3fED"
@@ -5557,7 +5885,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x970B9bB2C0444F5E81e9d0eFb84C8ccdcdcAf84d"
@@ -5569,7 +5898,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x986EE2B944c42D017F52Af21c4c69B84DBeA35d8"
@@ -5581,7 +5911,8 @@
       "decimals": 2,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x998FFE1E43fAcffb941dc337dD0468d52bA5b48A"
@@ -5593,7 +5924,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x9992eC3cF6A55b00978cdDF2b27BC6882d88D1eC"
@@ -5605,7 +5937,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x99cFB8cBA9c821B4a343c6a1Fc630465C9708DF5"
@@ -5617,7 +5950,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x99ea4dB9EE77ACD40B119BD1dC4E33e1C070b80d"
@@ -5629,7 +5963,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x9AAb071B4129B083B01cB5A0Cb513Ce7ecA26fa5"
@@ -5641,7 +5976,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x9AF4f26941677C706cfEcf6D3379FF01bB85D5Ab"
@@ -5653,7 +5989,8 @@
       "decimals": 9,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x9B4a69dE6CA0deFDD02c0c4ce6Cb84de5202944E"
@@ -5665,7 +6002,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x9B6B9d2468E165a02FEf69E61B6D3D6CBC0Ac409"
@@ -5677,7 +6015,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x9B99CcA871Be05119B2012fd4474731dd653FEBe"
@@ -5689,7 +6028,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x9C2dc0c3CC2BADdE84B0025Cf4df1c5aF288D835"
@@ -5701,7 +6041,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x9Cf0ED013e67DB12cA3AF8e7506fE401aA14dAd6"
@@ -5713,7 +6054,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x9E46A38F5DaaBe8683E10793b06749EEF7D733d1"
@@ -5725,7 +6067,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x9F284E1337A815fe77D2Ff4aE46544645B20c5ff"
@@ -5737,7 +6080,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x9F9c8ec3534c3cE16F928381372BfbFBFb9F4D24"
@@ -5749,7 +6093,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x9a0242b7a33DAcbe40eDb927834F96eB39f8fBCB"
@@ -5761,7 +6106,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x9a642d6b3368ddc662CA244bAdf32cDA716005BC"
@@ -5773,7 +6119,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x9bf1D7D63dD7a4ce167CF4866388226EEefa702E"
@@ -5785,7 +6132,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x9c354503C38481a7A7a51629142963F98eCC12D0"
@@ -5797,7 +6145,8 @@
       "decimals": 9,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x9d38F670D15C14716BE1F109a4F453E966A2B6D4"
@@ -5809,7 +6158,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x9e29Ce9cD25F4141dF6BB85b27Ef6933a16A5824"
@@ -5821,7 +6171,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x9ee91F9f426fA633d227f7a9b000E28b9dfd8599"
@@ -5833,7 +6184,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0x9ff58f4fFB29fA2266Ab25e75e2A8b3503311656"
@@ -5845,7 +6197,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xA130E3a33a4d84b04c3918c4E5762223Ae252F80"
@@ -5857,7 +6210,8 @@
       "decimals": 9,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xA1AFFfE3F4D611d252010E3EAf6f4D77088b0cd7"
@@ -5869,7 +6223,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xA31B1767e09f842ECFd4bc471Fe44F830E3891AA"
@@ -5881,7 +6236,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xA361718326c15715591c299427c62086F69923D9"
@@ -5893,7 +6249,8 @@
       "decimals": 6,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0xA4Bdb11dc0a2bEC88d24A3aa1E6Bb17201112eBe"
@@ -5905,7 +6262,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xA4EED63db85311E22dF4473f87CcfC3DaDCFA3E3"
@@ -5917,7 +6275,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xA4e8C3Ec456107eA67d3075bF9e3DF3A75823DB0"
@@ -5929,7 +6288,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xA823E6722006afe99E91c30FF5295052fe6b8E32"
@@ -5941,7 +6301,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xA849EaaE994fb86Afa73382e9Bd88c2B6b18Dc71"
@@ -5953,7 +6314,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xADE00C28244d5CE17D72E40330B1c318cD12B7c3"
@@ -5965,7 +6327,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xAf30D2a7E90d7DC361c8C4585e9BB7D2F6f15bc7"
@@ -5977,7 +6340,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xB0c7a3Ba49C7a6EaBa6cD4a96C55a1391070Ac9A"
@@ -5989,7 +6353,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xB16e967ff83DE3F1e9FCeAfbc2C28c1c5c56eF91"
@@ -6001,7 +6366,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xB26631c6dda06aD89B93C71400D25692de89c068"
@@ -6013,7 +6379,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xB3319f5D18Bc0D84dD1b4825Dcde5d5f7266d407"
@@ -6025,7 +6392,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xB4272071eCAdd69d933AdcD19cA99fe80664fc08"
@@ -6037,7 +6405,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xB64ef51C888972c908CFacf59B47C1AfBC0Ab8aC"
@@ -6049,7 +6418,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xB6eD7644C69416d67B522e20bC294A9a9B405B31"
@@ -6061,7 +6431,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xB72B31907C1C95F3650b64b2469e08EdACeE5e8F"
@@ -6073,7 +6444,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xB8BAa0e4287890a5F79863aB62b7F175ceCbD433"
@@ -6085,7 +6457,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xB983E01458529665007fF7E0CDdeCDB74B967Eb6"
@@ -6097,7 +6470,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xB9D7CB55f463405CDfBe4E90a6D2Df01C2B92BF1"
@@ -6109,7 +6483,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xB9e7F8568e08d5659f5D29C4997173d84CdF2607"
@@ -6121,7 +6496,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xBB0E17EF65F82Ab018d8EDd776e8DD940327B28b"
@@ -6133,7 +6509,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xBBC7f7A6AADAc103769C66CBC69AB720f7F9Eae3"
@@ -6145,7 +6522,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xBBbbCA6A901c926F240b89EacB641d8Aec7AEafD"
@@ -6157,7 +6535,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xBBc2AE13b23d715c30720F079fcd9B4a74093505"
@@ -6169,7 +6548,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xBC86727E770de68B1060C91f6BB6945c73e10388"
@@ -6181,7 +6561,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xBCf9dBf8B14eD096B2BA08b7269356197fDd1b5D"
@@ -6193,7 +6574,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xBa3335588D9403515223F109EdC4eB7269a9Ab5D"
@@ -6205,7 +6587,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xBb1f24C0c1554b9990222f036b0AaD6Ee4CAec29"
@@ -6217,7 +6600,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0xBc5142e0CC5eB16b47c63B0f033d4c2480853a52"
@@ -6229,7 +6613,8 @@
       "decimals": 6,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xBcca60bB61934080951369a648Fb03DF4F96263C"
@@ -6241,7 +6626,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0xC011a73ee8576Fb46F5E1c5751cA3B9Fe0af2a6F"
@@ -6253,7 +6639,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xC0bA369c8Db6eB3924965e5c4FD0b4C1B91e305F"
@@ -6265,7 +6652,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xC11b1268C1A384e55C48c2391d8d480264A3A7F4"
@@ -6277,7 +6665,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0xC18360217D8F7Ab5e7c516566761Ea12Ce7F9D72"
@@ -6289,7 +6678,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xC18B4C1e0b4d4d0F1e9627F25399F5073079Ac3D"
@@ -6301,7 +6691,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xC211477cb4098aC22a98432781f5f26a1E07a4d4"
@@ -6313,7 +6704,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xC477D038d5420C6A9e0b031712f61c5120090de9"
@@ -6325,7 +6717,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xC642549743A93674cf38D6431f75d6443F88E3E2"
@@ -6337,7 +6730,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xC741f06082AA47F93729070aD0dD95E223Bda091"
@@ -6349,7 +6743,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xC7a2572fA8FDB0f7E81d6D3c4e3CCF78FB0DC374"
@@ -6361,7 +6756,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xC7e43A1c8E118aA2965F5EAbe0e718D83DB7A63C"
@@ -6373,7 +6769,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xCB56b52316041A62B6b5D0583DcE4A8AE7a3C629"
@@ -6385,7 +6782,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xCC12AbE4ff81c9378D670De1b57F8e0Dd228D77a"
@@ -6394,10 +6792,11 @@
     {
       "symbol": "SLP",
       "name": "Smooth Love Potion",
-      "decimals": 18,
+      "decimals": 0,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xCC8Fa225D80b9c7D42F96e9570156c65D6cAAa25"
@@ -6409,7 +6808,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xCEBA2a8F6Ec221AEB5f3a7bcd15Cbc7e6a387bfb"
@@ -6421,7 +6821,8 @@
       "decimals": 6,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xCb94be6f13A1182E4A4B6140cb7bf2025d28e41B"
@@ -6433,7 +6834,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xCd1fAFf6e578Fa5cAC469d2418C95671bA1a62Fe"
@@ -6445,7 +6847,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xCdeee767beD58c5325f68500115d4B722b3724EE"
@@ -6457,7 +6860,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xD057B63f5E69CF1B929b356b579Cba08D7688048"
@@ -6469,7 +6873,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0xD33526068D116cE69F19A9ee46F0bd304F21A51f"
@@ -6481,7 +6886,8 @@
       "decimals": 2,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xD37EE7e4f452C6638c96536e68090De8cBcdb583"
@@ -6493,7 +6899,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xD3c625F54dec647DB8780dBBe0E880eF21BA4329"
@@ -6505,7 +6912,8 @@
       "decimals": 9,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xD46bA6D942050d489DBd938a2C909A5d5039A161"
@@ -6517,7 +6925,8 @@
       "decimals": 4,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xD7EFB00d12C2c13131FD319336Fdf952525dA2af"
@@ -6529,7 +6938,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xD837eCa6C91c67D98461A411BA2f00bdA9960a9D"
@@ -6541,7 +6951,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xD8912C10681D8B21Fd3742244f44658dBA12264E"
@@ -6553,7 +6964,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xD8E163967FED76806Df0097B704bA721B9b37656"
@@ -6565,7 +6977,8 @@
       "decimals": 9,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xD8E3FB3b08eBA982F2754988d70D57eDc0055ae6"
@@ -6577,7 +6990,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xDEf1CA1fb7FBcDC777520aa7f396b4E015F497aB"
@@ -6589,7 +7003,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xDF347911910b6c9A4286bA8E2EE5ea4a39eB2134"
@@ -6601,7 +7016,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xDb05EA0877A2622883941b939f0bb11d1ac7c400"
@@ -6613,7 +7029,8 @@
       "decimals": 6,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xDc5864eDe28BD4405aa04d93E05A0531797D9D59"
@@ -6625,7 +7042,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xDcB01cc464238396E213a6fDd933E36796eAfF9f"
@@ -6637,7 +7055,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xDd1Ad9A21Ce722C151A836373baBe42c868cE9a4"
@@ -6649,7 +7068,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xDe30da39c46104798bB5aA3fe8B9e0e1F348163F"
@@ -6661,7 +7081,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xDecade1c6Bf2cD9fb89aFad73e4a519C867adcF5"
@@ -6673,7 +7094,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xDf49C9f599A0A9049D97CFF34D0C30E468987389"
@@ -6685,7 +7107,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xDf7FF54aAcAcbFf42dfe29DD6144A69b629f8C9e"
@@ -6697,7 +7120,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0xE41d2489571d322189246DaFA5ebDe1F4699F498"
@@ -6709,7 +7133,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xE477292f1B3268687A29376116B0ED27A9c76170"
@@ -6721,7 +7146,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xE48972fCd82a274411c01834e2f031D4377Fa2c0"
@@ -6733,7 +7159,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xE4cC5A22B39fFB0A56d67F94f9300db20D786a5F"
@@ -6745,7 +7172,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xE5B826Ca2Ca02F09c1725e9bd98d9a8874C30532"
@@ -6757,7 +7185,8 @@
       "decimals": 6,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xE5CAeF4Af8780E59Df925470b050Fb23C43CA68C"
@@ -6769,7 +7198,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xE5a3229CCb22b6484594973A03a3851dCd948756"
@@ -6781,7 +7211,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xE814aeE960a85208C3dB542C53E7D4a6C8D5f60F"
@@ -6793,7 +7224,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xE94B97b6b43639E238c851A7e693F50033EfD75C"
@@ -6805,7 +7237,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xEB4C2781e4ebA804CE9a9803C67d0893436bB27D"
@@ -6817,7 +7250,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xEB58343b36C7528F23CAAe63a150240241310049"
@@ -6829,7 +7263,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xEd04915c23f00A313a544955524EB7DBD823143d"
@@ -6841,7 +7276,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xEd3D4e446A96dC3b181B64B75c3c70dA41dC3CBe"
@@ -6853,7 +7289,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xF03f8D65BaFA598611C3495124093c56e8F638f0"
@@ -6865,7 +7302,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xF25c91C87e0B1fd9B4064Af0F427157AaB0193A7"
@@ -6877,7 +7315,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xF29992D7b589A0A6bD2de7Be29a97A6EB73EaF85"
@@ -6889,7 +7328,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xF3c7CECF8cBC3066F9a87b310cEBE198d00479aC"
@@ -6901,7 +7341,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xF433089366899D83a9f26A773D59ec7eCF30355e"
@@ -6913,7 +7354,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xF4d861575ecC9493420A3f5a14F85B13f0b50EB3"
@@ -6925,7 +7367,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0xF57e7e7C23978C3cAEC3C3548E3D615c346e79fF"
@@ -6937,7 +7380,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xF5DCe57282A584D2746FaF1593d3121Fcac444dC"
@@ -6949,7 +7393,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xF5e11df1ebCf78b6b6D26E04FF19cD786a1e81dC"
@@ -6961,7 +7406,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0xF629cBd94d3791C9250152BD8dfBDF380E2a3B9c"
@@ -6973,7 +7419,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xF70a642bD387F94380fFb90451C2c81d4Eb82CBc"
@@ -6985,7 +7432,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xF938424F7210f31dF2Aee3011291b658f872e91e"
@@ -6997,7 +7445,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xF94b5C5651c888d928439aB6514B93944eEE6F48"
@@ -7009,22 +7458,11 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xFA1a856Cfa3409CFa145Fa4e20Eb270dF3EB21ab"
-      }
-    },
-    {
-      "symbol": "KODA",
-      "name": "KnownOrigin",
-      "decimals": 18,
-      "tags": [
-        "supplemental",
-        "metamask_uniswap"
-      ],
-      "addresses": {
-        "1": "0xFBeef911Dc5821886e1dda71586d90eD28174B7d"
       }
     },
     {
@@ -7033,7 +7471,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xFE3E6a25e6b192A42a44ecDDCd13796471735ACf"
@@ -7045,7 +7484,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xFEF3884b603C33EF8eD4183346E093A173C94da6"
@@ -7057,7 +7497,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xFF0E5e014cf97e0615cb50F6f39Da6388E2FaE6E"
@@ -7069,7 +7510,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xFFC97d72E13E01096502Cb8Eb52dEe56f74DAD7B"
@@ -7081,7 +7523,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xFFE02ee4C69eDf1b340fCaD64fbd6b37a7b9e265"
@@ -7093,7 +7536,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xFaCecE87e14B50eafc85C44C01702F5f485CA460"
@@ -7105,7 +7549,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xFbEEa1C75E4c4465CB2FCCc9c6d6afe984558E20"
@@ -7117,7 +7562,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xFca59Cd816aB1eaD66534D82bc21E7515cE441CF"
@@ -7129,7 +7575,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xa06bC25B5805d5F8d82847D191Cb4Af5A3e873E0"
@@ -7141,7 +7588,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xa117000000f279D81A1D3cc75430fAA017FA5A2e"
@@ -7153,7 +7601,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xa3BeD4E1c75D00fa6f4E5E6922DB7261B5E9AcD2"
@@ -7165,7 +7614,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xa3d58c4E56fedCae3a7c43A725aeE9A71F0ece4e"
@@ -7177,7 +7627,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xa47c8bf37f92aBed4A126BDA807A7b7498661acD"
@@ -7189,7 +7640,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xa54d2EBfD977ad836203c85F18db2F0a0cF88854"
@@ -7201,7 +7653,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xa62cc35625B0C8dc1fAEA39d33625Bb4C15bD71C"
@@ -7213,7 +7666,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xa685a61171bb30d4072B338c80Cb7b2c865c873E"
@@ -7225,7 +7679,8 @@
       "decimals": 6,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xa693B19d2931d498c5B318dF961919BB4aee87a5"
@@ -7237,7 +7692,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xa74476443119A942dE498590Fe1f2454d7D4aC0d"
@@ -7249,7 +7705,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xa95592DCFfA3C080B4B40E459c5f5692F67DB7F8"
@@ -7261,7 +7718,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xa9F94F19abf3089d535B1dE2Cc058A365Ea716c7"
@@ -7273,7 +7731,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xaAAf91D9b90dF800Df4F55c205fd6989c977E73a"
@@ -7285,7 +7744,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xaC6Df26a590F08dcC95D5a4705ae8abbc88509Ef"
@@ -7297,7 +7757,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xaE0585a259A3BCAB258D6EE02FB583f7B33C2a12"
@@ -7309,7 +7770,8 @@
       "decimals": 4,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xaaAEBE6Fe48E54f431b0C390CfaF0b017d09D42d"
@@ -7318,10 +7780,11 @@
     {
       "symbol": "SNGLS",
       "name": "SingularDTV",
-      "decimals": 18,
+      "decimals": 0,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xaeC2E87E0A235266D9C5ADc9DEb4b2E29b54D009"
@@ -7333,7 +7796,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xaeDf386B755465871fF874E3E37Af5976E247064"
@@ -7345,7 +7809,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xaf9f549774ecEDbD0966C52f250aCc548D3F36E5"
@@ -7357,7 +7822,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xb1CD6e4153B2a390Cf00A6556b0fC1458C4A5533"
@@ -7369,7 +7835,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xb1dC9124c395c1e97773ab855d66E879f053A289"
@@ -7381,7 +7848,8 @@
       "decimals": 9,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xb551b43AF192965F74e3dfAA476C890B403caD95"
@@ -7393,7 +7861,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xb683D83a532e2Cb7DFa5275eED3698436371cc9f"
@@ -7405,7 +7874,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xb753428af26E81097e7fD17f40c88aaA3E04902c"
@@ -7417,7 +7887,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xb78B3320493a4EFaa1028130C5Ba26f0B6085Ef8"
@@ -7429,7 +7900,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xb7cB1C96dB6B22b0D3d9536E0108d062BD488F74"
@@ -7441,7 +7913,8 @@
       "decimals": 6,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xb8919522331C59f5C16bDfAA6A121a6E03A91F62"
@@ -7453,7 +7926,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xbC396689893D065F41bc2C6EcbeE5e0085233447"
@@ -7465,7 +7939,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0xba100000625a3754423978a60c9317c58a424e3D"
@@ -7477,7 +7952,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xba358B6f5b4c0215650444B8C30D870B55050D2D"
@@ -7489,7 +7965,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xba5BDe662c17e2aDFF1075610382B9B691296350"
@@ -7501,7 +7978,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xba9d4199faB4f26eFE3551D490E3821486f135Ba"
@@ -7513,7 +7991,8 @@
       "decimals": 6,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xbd31EA8212119f94A611FA969881CBa3EA06Fa3d"
@@ -7525,7 +8004,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xbf2179859fc6D5BEE9Bf9158632Dc51678a4100e"
@@ -7537,7 +8017,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xc105fA46510F32c0444CCdB4e51065da95caA1B4"
@@ -7549,7 +8030,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xc11158c5dA9db1D553ED28f0C2BA1CbEDD42CFcb"
@@ -7561,7 +8043,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xc12d099be31567add4e4e4d0D45691C3F58f5663"
@@ -7573,7 +8056,8 @@
       "decimals": 27,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xc4A11aaf6ea915Ed7Ac194161d2fC9384F15bff2"
@@ -7585,7 +8069,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xc713e5E149D5D0715DcD1c156a020976e7E56B88"
@@ -7597,7 +8082,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xc7D9c108D4E1dD1484D3e2568d7f74bfD763d356"
@@ -7609,7 +8095,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xc8Cac7672f4669685817cF332a33Eb249F085475"
@@ -7621,7 +8108,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0xc944E90C64B2c07662A292be6244BDf05Cda44a7"
@@ -7633,7 +8121,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xcC665390b03c5D324D8fAF81C15eCee29A73bCB4"
@@ -7645,7 +8134,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xca1207647Ff814039530D7d35df0e1Dd2e91Fa84"
@@ -7657,7 +8147,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xcc7ab8d78dBA187dC95bF3bB86e65E0C26d0041f"
@@ -7669,7 +8160,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xccC8cb5229B0ac8069C51fd58367Fd1e622aFD97"
@@ -7681,7 +8173,8 @@
       "decimals": 9,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xcf0C122c6b73ff809C693DB761e7BaeBe62b6a2E"
@@ -7693,7 +8186,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xd01409314aCb3b245CEa9500eCE3F6Fd4d70ea30"
@@ -7705,7 +8199,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xd084944d3c05CD115C09d072B9F44bA3E0E45921"
@@ -7717,7 +8212,8 @@
       "decimals": 4,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xd0929d411954c47438dc1d871dd6081F5C5e149c"
@@ -7729,7 +8225,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xd26114cd6EE289AccF82350c8d8487fedB8A0C07"
@@ -7741,7 +8238,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xd2877702675e6cEb975b4A1dFf9fb7BAF4C91ea9"
@@ -7753,7 +8251,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xd2bA23dE8a19316A638dc1e7a9ADdA1d74233368"
@@ -7765,7 +8264,8 @@
       "decimals": 9,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xd3210F246Ae54C5a45A7b4A83315bf718F591bfc"
@@ -7777,7 +8277,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xd42debE4eDc92Bd5a3FBb4243e1ecCf6d63A4A5d"
@@ -7789,7 +8290,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xd4fa1460F537bb9085d22C7bcCB5DD450Ef28e3a"
@@ -7801,7 +8303,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xd8446236FA95b9b5f9fd0f8E7Df1a944823c683d"
@@ -7813,7 +8316,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xd9Fcd98c322942075A5C3860693e9f4f03AAE07b"
@@ -7825,7 +8329,8 @@
       "decimals": 2,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xdB25f211AB05b1c97D595516F45794528a807ad8"
@@ -7837,7 +8342,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xdF574c24545E5FfEcb9a659c229253D4111d87e1"
@@ -7846,10 +8352,11 @@
     {
       "symbol": "ATRI",
       "name": "Atari Token",
-      "decimals": 18,
+      "decimals": 0,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xdacD69347dE42baBfAEcD09dC88958378780FB62"
@@ -7861,7 +8368,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xdcD85914b8aE28c1E62f1C488E1D968D5aaFfE2b"
@@ -7873,7 +8381,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0xdd974D5C2e2928deA5F71b9825b8b646686BD200"
@@ -7885,7 +8394,8 @@
       "decimals": 9,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xde16Ce60804a881e9F8c4eBB3824646EDecd478D"
@@ -7897,7 +8407,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xdf0162A6B3e9fDf0302c1e949739DeeaFafd8F89"
@@ -7909,7 +8420,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xdfbc9050F5B01DF53512DCC39B4f2B2BBaCD517A"
@@ -7921,7 +8433,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xe28b3B32B6c345A34Ff64674606124Dd5Aceca30"
@@ -7933,7 +8446,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0xe2f2a5C287993345a840Db3B0845fbC70f5935a5"
@@ -7945,7 +8459,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xe3818504c1B32bF1557b16C238B2E01Fd3149C17"
@@ -7957,7 +8472,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xe4dae00bc1c46ea2F44ae71B1BEb8b171C15d812"
@@ -7969,7 +8485,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xe516D78d784C77D479977BE58905B3f2b1111126"
@@ -7981,7 +8498,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xe7aE6D0C56CACaf007b7e4d312f9af686a9E9a04"
@@ -7993,7 +8511,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xe831F96A7a1DcE1aa2EB760b1e296c6A74CaA9d5"
@@ -8005,7 +8524,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xe88f8313e61A97cEc1871EE37fBbe2a8bf3ed1E4"
@@ -8017,7 +8537,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xe8fC52b1bb3a40fd8889C0f8f75879676310dDf0"
@@ -8029,7 +8550,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xeDF6568618A00C6F0908Bf7758A16F76B6E04aF9"
@@ -8041,7 +8563,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xeF31Cb88048416E301Fee1eA13e7664b887BA7e8"
@@ -8053,7 +8576,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xeFF66B4A84C8a6b69b99EB1C5e39aF8fc35d13db"
@@ -8065,7 +8589,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xea5f88E54d982Cbb0c441cde4E79bC305e5b43Bc"
@@ -8077,7 +8602,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xea7Cc765eBC94C4805e3BFf28D7E4aE48D06468A"
@@ -8089,7 +8615,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xea8b224eDD3e342DEb514C4176c2E72Bcce6fFF9"
@@ -8101,7 +8628,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xeb269732ab75A6fD61Ea60b06fE994cD32a83549"
@@ -8113,7 +8641,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier2"
       ],
       "addresses": {
         "1": "0xec67005c4E498Ec7f55E092bd1d35cbC47C91892"
@@ -8125,7 +8654,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xeca82185adCE47f39c684352B0439f030f860318"
@@ -8137,7 +8667,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xf0Ee6b27b759C9893Ce4f094b49ad28fd15A23e4"
@@ -8149,7 +8680,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xf21661D0D1d76d3ECb8e1B9F1c923DBfffAe4097"
@@ -8161,7 +8693,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xf293d23BF2CDc05411Ca0edDD588eb1977e8dcd4"
@@ -8173,7 +8706,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xf63c65E855020E4B74f0Ad842D9537dA0E6162eC"
@@ -8185,7 +8719,8 @@
       "decimals": 8,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xf650C3d88D12dB855b8bf7D11Be6C55A4e07dCC9"
@@ -8197,7 +8732,8 @@
       "decimals": 3,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xf7B098298f7C69Fc14610bf71d5e02c60792894C"
@@ -8209,7 +8745,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xfA5047c9c78B8877af97BDcb85Db743fD7313d4a"
@@ -8221,7 +8758,8 @@
       "decimals": 9,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xfAd45E47083e4607302aa43c65fB3106F1cd7607"
@@ -8233,7 +8771,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xfB5c6815cA3AC72Ce9F5006869AE67f18bF77006"
@@ -8245,7 +8784,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xfE18be6b3Bd88A2D2A7f928d00292E7a9963CfC6"
@@ -8257,7 +8797,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xfa05A73FfE78ef8f1a739473e462c54bae6567D9"
@@ -8269,7 +8810,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xfeF4185594457050cC9c23980d301908FE057Bb1"
@@ -8281,7 +8823,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xfec0cF7fE078a500abf15F1284958F22049c2C7e"
@@ -8293,7 +8836,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "1": "0xff56Cc6b1E6dEd347aA0B7676C85AB0B3D08B0FA"
@@ -8305,7 +8849,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "10143": "0x0F0BDEbF0F83cD1EE3974779Bcb7315f9808c714"
@@ -8317,7 +8862,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "10143": "0xE0590015A873bF326bd645c3E1266d4db41C4E6B"
@@ -8329,7 +8875,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "10143": "0xfe140e1dCe99Be9F4F15d657CD9b7BF622270C50"
@@ -8341,7 +8888,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "56": "0x12b4356c65340fb02cdff01293f95febb1512f3b"
@@ -8353,7 +8901,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "56": "0x32B407ee915432Be6D3F168bc1EfF2a6F8b2034C"
@@ -8365,7 +8914,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "metamask_uniswap"
+        "metamask_uniswap",
+        "tier3"
       ],
       "addresses": {
         "56": "0x7D28276933D6aA0Ef1513F8B5e18dC492befeFea"
@@ -8377,7 +8927,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "contract_map"
+        "contract_map",
+        "tier3"
       ],
       "addresses": {
         "1": "0xB58E61C3098d85632Df34EecfB899A1Ed80921cB"
@@ -8389,7 +8940,8 @@
       "decimals": 18,
       "tags": [
         "supplemental",
-        "contract_map"
+        "contract_map",
+        "tier3"
       ],
       "addresses": {
         "1": "0x1bA26788dfDe592fec8bcB0Eaff472a42BE341B2"
