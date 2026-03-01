@@ -1,9 +1,9 @@
 # Oxidity Searcher
 
-Mainnet-first MEV search and execution engine in Rust, designed to run against a locally synced **Ethereum mainnet Nethermind node**.
+Mainnet-first MEV search and execution engine in Rust, designed to run against a locally synced **Ethereum mainnet RPC node** (Nethermind shown as the reference profile; Geth/Reth are also supported when capabilities match).
 
 [![CI](https://github.com/John0n1/oxidity-searcher/actions/workflows/ci.yml/badge.svg)](https://github.com/John0n1/oxidity-searcher/actions/workflows/ci.yml)
-[![Python](https://img.shields.io/badge/language-rust-orange?logo=rust\&style=flat-square)](#)
+[![Rust](https://img.shields.io/badge/language-rust-orange?logo=rust\&style=flat-square)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
 
 `Oxidity Searcher` ingests mempool and MEV-Share flow, decodes router interactions, applies risk/profit gates, simulates execution paths, and submits private bundles through Flashbots-compatible relays.
@@ -11,15 +11,24 @@ Mainnet-first MEV search and execution engine in Rust, designed to run against a
 ## Table of Contents
 
 - [Project Scope](#project-scope)
+- [What This Project Is](#what-this-project-is)
+- [Why This Design Is Distinct](#why-this-design-is-distinct)
+- [How A Decision Is Made](#how-a-decision-is-made)
 - [Core Capabilities](#core-capabilities)
 - [Architecture](#architecture)
+- [Flashloan and Executor Flow](#flashloan-and-executor-flow)
+- [Router Coverage and Discovery](#router-coverage-and-discovery)
+- [Global Data JSON](#global-data-json)
+- [Pricing, Chainlink, and Optional APIs](#pricing-chainlink-and-optional-apis)
+- [Flashbots and Relay Submission](#flashbots-and-relay-submission)
+- [Simulation and RPC Client Compatibility](#simulation-and-rpc-client-compatibility)
 - [Repository Layout](#repository-layout)
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
 - [Environment Variables](#environment-variables)
 - [Runbook](#runbook)
-- [Nethermind Compatibility Checks](#nethermind-compatibility-checks)
+- [RPC Conformance Checks (Nethermind Example)](#rpc-conformance-checks-nethermind-example)
 - [Data Files](#data-files)
 - [Database and Migrations](#database-and-migrations)
 - [Testing and Quality](#testing-and-quality)
@@ -37,6 +46,48 @@ This repository is built for production-style opportunity search on **Ethereum m
 - multi-backend simulation and fail-fast capability probing
 - guarded bundle/tx submission pipeline with configurable risk controls
 - replay tooling for historical stress calibration
+
+## What This Project Is
+
+`Oxidity Searcher` is a deterministic execution system for on-chain opportunities.
+It is not a price-prediction model and not a discretionary trading dashboard.
+
+The implementation emphasizes:
+
+- deterministic startup checks before execution is enabled
+- explicit runtime contracts (`OXIDITY_*` identity keys + typed config)
+- observable decision paths (why an opportunity executed or was skipped)
+- bounded behavior under stress (queue limits, RPC budgets, cooldowns)
+
+## Why This Design Is Distinct
+
+The runtime is organized for operational predictability rather than convenience-first defaults:
+
+- **Node-first architecture**: optimized for a local mainnet RPC node, with Nethermind used as the reference profile and equivalent capability checks for other clients.
+- **Strict capability gating**: simulation/tracing method shapes are verified before strategy loops start.
+- **Single canonical data artifact**: `data/global_data.json` is the source for token/address/feed/pair metadata.
+- **Policy-driven planning**: decode, plan, simulate, score, then execute; each stage has explicit checks.
+- **Constrained discovery**: router discovery is budgeted (RPC cap, timeout, cooldown) to prevent unbounded scans.
+- **Operational visibility**: logs/metrics prioritize attribution (fallback reason, rejection reason, relay status, queue pressure).
+
+## How A Decision Is Made
+
+Per opportunity, the runtime follows a consistent lifecycle:
+
+1. Ingest:
+   mempool txs and optional MEV-Share hints are queued with bounded capacity.
+2. Decode:
+   calldata is classified by router/protocol path; non-actionable payloads are skipped with counters.
+3. Plan:
+   candidate routes and sizes are built from reserve/liquidity state.
+4. Simulate:
+   candidates are simulated using configured backend(s), with failure attribution where possible.
+5. Score and gate:
+   profitability and safety checks are applied (gas, slippage, liquidity, router quality, policy floors).
+6. Execute:
+   accepted plans are signed and submitted through configured private relay paths.
+7. Persist and observe:
+   outcomes, pnl components, and decision metrics are recorded for monitoring and replay.
 
 ## Core Capabilities
 
@@ -71,32 +122,194 @@ Primary modules:
 - `src/services/strategy/execution/engine.rs`: startup checks and execution orchestration
 - `src/services/strategy/simulation.rs`: capability probing and simulation backend strategy
 - `src/services/strategy/router_discovery.rs`: unknown router discovery and auto-allow validation
-- `src/infrastructure/data/db.rs`: SQLite connection and migration path selection
+- `src/infrastructure/data/db.rs`: SQLite connection and migration bootstrap
+
+## Flashloan and Executor Flow
+
+Flashloan-capable execution is built around the on-chain `UnifiedHardenedExecutor` contract and off-chain planner decisions:
+
+- Contract source: `data/UnifiedHardenedExecutor.sol`
+- ABI surface mirrored in Rust: `src/infrastructure/data/executor.rs`
+- Runtime contract address source: `OXIDITY_FLASHLOAN_CONTRACT_ADDRESS`
+
+Execution modes:
+
+- `executeBundle(...)` for direct multicall bundle execution (owner-gated)
+- `executeFlashLoan(...)` for Balancer flashloan callbacks
+- `executeAaveFlashLoanSimple(...)` for Aave v3 simple flashloan callbacks
+
+Planner integration (own-capital vs flashloan vs hybrid):
+
+- `ExecutionPlanner` scores candidate families per opportunity (`own_capital`, `flashloan`, `hybrid`)
+- Candidate score uses expected-value terms (`expected_net`, inclusion probability, dynamic floor, failure cost)
+- Rejections are explicit and reason-coded (`net_negative_after_buffers` and normalized categories)
+- In ingest, chosen plan type controls whether the backrun path uses flashloan callbacks or wallet-funded tx value
+
+Operational guarantees:
+
+- Flashloan path is never enabled without a deployed executor contract code check
+- Provider viability checks ensure Aave/Balancer addresses are present and usable before execution
+- Planner decision traces are recorded per opportunity for post-run attribution
+
+## Router Coverage and Discovery
+
+Router knowledge comes from two sources:
+
+- Static allowlist from `global_data.json -> address_registry.chains.<chain_id>.routers`
+- Dynamic discovery for unknown routers (`src/services/strategy/router_discovery.rs`)
+
+Static classification:
+
+- Router names are categorized into `routers`, `wrappers`, and `infra`
+- Categories are used for decode metrics and allowlist hygiene
+- On startup, allowlist entries are validated on-chain and no-code entries are dropped
+
+Discovery behavior:
+
+- Unknown routers are tracked with bounded state (`max_entries`, eviction of stale low-signal entries)
+- Auto-allow requires hit thresholds plus classification checks (ABI selector behavior + bytecode signals), not hit count alone
+- Budget guards prevent unbounded scans:
+  - max blocks per cycle
+  - max RPC calls per cycle
+  - wall-clock timeout
+  - failure budget with cooldown
+- Approved discoveries are persisted to cache (`data/router_discovery_cache.json` by default) and reloaded on boot
+
+## Global Data JSON
+
+`data/global_data.json` is the canonical runtime artifact. Current top-level sections:
+
+- `_notes`
+- `address_registry`
+- `chainlink_feeds`
+- `executor_abi`
+- `pairs`
+- `tokenlist`
+- `version`
+
+How each section is used:
+
+- `address_registry`: per-chain routers and protocol addresses (Balancer vault, Aave pool/provider, Curve registries, chain-local feed overrides)
+- `tokenlist`: token symbol/decimals/tags plus per-chain addresses; consumed by `TokenManager` for decimal-aware execution logic
+- `pairs`: preloaded V2-style pair address/token mapping used to warm reserve cache paths
+- `chainlink_feeds`: global feed catalog consumed by config loader to resolve per-chain canonical feed selections
+- `executor_abi`: ABI payload used to keep off-chain encoding aligned with deployed executor contract behavior
+
+Current snapshot size (repository state now):
+
+- `tokenlist`: 685 entries
+- `pairs`: 476 entries
+- `executor_abi`: 43 ABI items
+
+Chain 1 address registry includes major routers and infra (examples): Uniswap V2/V3/Universal, 1inch variants, ParaSwap, Kyber, 0x, Relay routers, Balancer vault, Aave pool, and discovered router entries.
+
+## Pricing, Chainlink, and Optional APIs
+
+Pricing is Chainlink-first, with staged external fallback when needed (`src/infrastructure/network/pricing/price_feed.rs`).
+
+Primary behavior:
+
+- Load canonical feed set per chain from config + `global_data.json`
+- Audit feeds at startup (invalid/stale rules, stricter handling for critical mainnet symbols)
+- Query Chainlink on-chain first for live pricing
+
+Fallback order when Chainlink cannot provide a quote:
+
+1. Etherscan v2 (`module=stats`, `action=ethprice`) for ETH/USD only
+2. Binance
+3. OKX
+4. CoinMarketCap
+5. CoinGecko
+6. CryptoCompare
+7. CoinPaprika
+8. CryptoCompare public BTC fallback
+
+Notes:
+
+- Optional API keys (`ETHERSCAN_API_KEY`, `COINGECKO_API_KEY`, etc.) improve coverage but are not required for startup
+- Missing/invalid fallback keys are non-fatal; provider failures fall through to the next source
+- Provider runtime outcomes track attempts/success/failure, `NOTOK` responses, latency, and quote age for diagnostics
+- Stale-cache grace allows temporary degraded operation instead of hard failure when upstreams are unstable
+
+## Flashbots and Relay Submission
+
+Bundle submission path is implemented in `src/services/strategy/execution/executor.rs` (`BundleSender`).
+
+Mainnet path:
+
+- Uses `eth_sendBundle` across multiple builders/relays (Flashbots + additional builders)
+- Supports replacement UUID workflow and optional `eth_cancelBundle` of previous target-block submissions
+- Records relay attempt/retry/timeout/status metrics per relay
+
+MEV-Share path:
+
+- Uses `mev_sendBundle` with exactly one victim hash + one backrun tx leg
+- Builder set is canonicalized against Flashbots builder registration data when available
+
+Non-mainnet path:
+
+- Falls back to direct raw transaction broadcast
+
+Dry-run mode:
+
+- Builds payloads and records decision/attempt telemetry but does not submit to relays
+
+## Simulation and RPC Client Compatibility
+
+Simulation backend order is configurable and probed at runtime (`src/services/strategy/simulation.rs`):
+
+- `eth_simulateV1`
+- `debug_traceCall` / `debug_traceCallMany`
+- `eth_call` fallback
+
+Startup capability probing checks:
+
+- method availability
+- parameter-shape conformance for `eth_simulateV1` and `debug_traceCallMany`
+- `eth_feeHistory` availability for gas oracle quality
+
+Client compatibility model:
+
+- Nethermind is the reference profile used in examples
+- Geth/Reth/other clients can run if required methods are available and shape-compatible
+- The runtime does not hardcode one client implementation; it gates behavior by capability probes
+
+Strict mode:
+
+- `RPC_CAPABILITY_STRICT=true` enforces required simulation capability and shape checks
+- If strict mode is disabled, runtime can degrade to available methods with explicit warnings
+
+Important limitation:
+
+- `eth_call` is treated as unsafe for multi-transaction bundle simulation and does not replace true stateful bundle simulation semantics
 
 ## Repository Layout
 
 - `src/`: application/library code
 - `src/bin/historical_replay.rs`: replay harness binary
-- `tests/`: integration and compatibility tests
+- `tests/`: integration and conformance tests
 - `data/`: protocol/address/feed/token artifacts
 - `migrations/`: squashed baseline migration set
-- `migrations_legacy/`: historical migration chain for legacy DB state
 - `.github/workflows/ci.yml`: CI checks (`check`, `lint`, `test`)
 
 ## Requirements
 
 - Rust stable toolchain
+  - install: `curl https://sh.rustup.rs -sSf | sh` then `rustup default stable`
 - Linux/macOS runtime environment
 - SQLite (embedded through `sqlx`)
-- Local Ethereum mainnet node (**Nethermind recommended**)
+- Local Ethereum mainnet node (**Nethermind/Geth/Reth supported; Nethermind used as reference in examples**)
 
-Recommended Nethermind modules/method families for full feature coverage:
+Recommended RPC modules/method families for full feature coverage (Nethermind naming shown):
 
+- `Admin`
 - `Eth`
 - `Subscribe`
 - `Debug`
 - `Trace`
 - `TxPool`
+- `Web3`
+- `Rpc`
 
 ## Quick Start
 
@@ -108,10 +321,12 @@ cp .env.example .env
 
 2. Set required values (minimum mainnet run):
 
-- `WALLET_KEY`
-- `WALLET_ADDRESS`
+- `OXIDITY_WALLET_PRIVATE_KEY`
+- `OXIDITY_WALLET_ADDRESS`
+- `OXIDITY_FLASHLOAN_CONTRACT_ADDRESS`
+- `OXIDITY_BUNDLE_PRIVATE_KEY`
 - `CHAINS=1`
-- `http_provider_1=http://127.0.0.1:8545`
+- `HTTP_PROVIDER_1=http://127.0.0.1:8545`
 
 3. Recommended provider additions:
 
@@ -140,24 +355,24 @@ Precedence order is:
 
 Provider env key conventions in current code:
 
-- HTTP: `http_provider_<chain_id>`, fallback `http_provider`
+- HTTP: `HTTP_PROVIDER_<chain_id>`, fallback `HTTP_PROVIDER`
 - WS: `WEBSOCKET_PROVIDER_<chain_id>`, fallback `WEBSOCKET_PROVIDER`
-- WS compatibility aliases: `WEBSOCKET_URL_<chain_id>`, `WEBSOCKET_URL`
 - IPC: `IPC_PROVIDER_<chain_id>`, fallback `IPC_PROVIDER`
-- IPC compatibility aliases: `IPC_PATH_<chain_id>`, `IPC_PATH`
 
 ## Environment Variables
 
 ### Required (Mainnet Minimum)
 
-- `WALLET_KEY`: signer private key (hex)
-- `WALLET_ADDRESS`: must match address derived from `WALLET_KEY`
+- `OXIDITY_WALLET_PRIVATE_KEY`: signer private key (hex)
+- `OXIDITY_WALLET_ADDRESS`: must match address derived from `OXIDITY_WALLET_PRIVATE_KEY`
+- `OXIDITY_FLASHLOAN_CONTRACT_ADDRESS`: on-chain executor/flashloan contract
+- `OXIDITY_BUNDLE_PRIVATE_KEY`: dedicated bundle signer key
 - `CHAINS`: set to `1` for Ethereum mainnet
-- `http_provider_1`: HTTP RPC endpoint for chain 1
+- `HTTP_PROVIDER_1`: HTTP RPC endpoint for chain 1
 
 ### Strongly Recommended
 
-- `BUNDLE_SIGNER_KEY`: dedicated bundle signer (defaults to `WALLET_KEY`)
+- `OXIDITY_LOG_LEVEL`: logging level (default `info`)
 - `WEBSOCKET_PROVIDER_1`: WS endpoint for streaming path
 - `IPC_PROVIDER_1`: IPC endpoint for preferred low-latency path
 - `METRICS_TOKEN`: enables authenticated metrics server
@@ -178,7 +393,6 @@ Provider env key conventions in current code:
 - `COINMARKETCAP_API_KEY`
 - `COINGECKO_API_KEY`
 - `CRYPTOCOMPARE_API_KEY`
-- `COINDESK_API_KEY`
 
 ### Optional Ops and Performance
 
@@ -198,7 +412,7 @@ Provider env key conventions in current code:
 - `SLIPPAGE_BPS`
 - `FLASHLOAN_ENABLED`
 - `FLASHLOAN_PROVIDER` (default `auto,aavev3,balancer`)
-- `EXECUTOR_ADDRESS`
+- `OXIDITY_FLASHLOAN_CONTRACT_ADDRESS`
 - `EXECUTOR_BRIBE_BPS`
 - `EXECUTOR_BRIBE_RECIPIENT`
 - `ALLOW_NON_WRAPPED_SWAPS`
@@ -262,12 +476,13 @@ cargo run --bin historical_replay -- \
   --out historical-replay-report.json
 ```
 
-## Nethermind Compatibility Checks
+## RPC Conformance Checks (Nethermind Example)
 
-Targeted integration test for `eth_simulateV1` and `debug_traceCallMany` parameter shapes:
+Targeted integration test for `eth_simulateV1` and `debug_traceCallMany` parameter shapes.
+The test command below uses a Nethermind-named env variable, but the endpoint can be Nethermind, Geth, Reth, or another client:
 
 ```bash
-NETHERMIND_http_provider=http://127.0.0.1:8545 \
+NETHERMIND_HTTP_PROVIDER=http://127.0.0.1:8545 \
   cargo test --test nethermind_rpc_compat -- --nocapture
 ```
 
@@ -275,25 +490,16 @@ The test suite asserts the endpoint is mainnet (`eth_chainId == 0x1`) and fails 
 
 ## Data Files
 
-- `data/global_data.json`: single canonical data source for address registry, token list (including merged MetaMask/contract-map entries), Chainlink feeds, pairs, and executor ABI
-- `data/global_paths.json`: optional manifest for feature toggles and global data path override
+- `data/global_data.json`: single canonical data source for address registry, token list, Chainlink feeds, pairs, and executor ABI
+- `GLOBAL_DATA_PATH`: optional override when running with an external global data artifact
 - `data/UnifiedHardenedExecutor.sol`: on-chain executor contract source
 - `data/global_data.json` includes `_notes` with inline section descriptions for maintainers
-
-Rebuild canonical data file after source updates:
-
-```bash
-./scripts/rebuild_global_data.sh
-```
 
 ## Database and Migrations
 
 Startup migration behavior is automatic:
 
-- if legacy migration history is detected (`_sqlx_migrations` versions before `20260215000000`), run `migrations_legacy/`
-- otherwise run squashed baseline `migrations/`
-
-This supports clean bootstrap for new deployments while preserving upgrade safety for legacy databases.
+- run squashed baseline `migrations/`
 
 ## Testing and Quality
 
@@ -320,9 +526,9 @@ Metrics server starts only when `METRICS_TOKEN` is non-empty.
 
 ## Security and Safety Guards
 
-- Wallet integrity check: runtime aborts if `WALLET_ADDRESS` and `WALLET_KEY` mismatch.
+- Wallet integrity check: runtime aborts if `OXIDITY_WALLET_ADDRESS` and `OXIDITY_WALLET_PRIVATE_KEY` mismatch.
 - Executor address validation: aborts on configured address with empty code.
-- RPC capability probing: simulation methods and parameter-shape compatibility checked at startup.
+- RPC capability probing: simulation methods and parameter-shape conformance checked at startup.
 - Chainlink canonical feed summary logged at startup for operator visibility.
 - Chainlink audit behavior:
   - invalid feeds always fail startup
@@ -342,12 +548,12 @@ Metrics server starts only when `METRICS_TOKEN` is non-empty.
 
 ### `rpc_capability_strict=true but ...`
 
-- Ensure Nethermind exposes required debug/simulation methods.
-- Run the compatibility test in [Nethermind Compatibility Checks](#nethermind-compatibility-checks).
+- Ensure your RPC client exposes required debug/simulation methods.
+- Run the conformance test in [RPC Conformance Checks (Nethermind Example)](#rpc-conformance-checks-nethermind-example).
 
-### `wallet_address ... does not match wallet_key ...`
+### `wallet_address ... does not match wallet private key ...`
 
-- Update `WALLET_KEY` or `WALLET_ADDRESS` so they resolve to the same signer address.
+- Update `OXIDITY_WALLET_PRIVATE_KEY` or `OXIDITY_WALLET_ADDRESS` so they resolve to the same signer address.
 
 ### `cargo run` cannot determine which binary to run
 

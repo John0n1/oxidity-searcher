@@ -8,7 +8,7 @@ pub mod domain;
 pub mod infrastructure;
 pub mod services;
 
-// Backward-compat re-exports
+// Stable module aliases used across internal modules and integration tests.
 pub use infrastructure::data;
 pub use infrastructure::network;
 pub use services::strategy as core;

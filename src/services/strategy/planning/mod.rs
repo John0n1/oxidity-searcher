@@ -21,14 +21,11 @@ use crate::network::gas::GasFees;
 use crate::services::strategy::decode::{
     ObservedSwap, RouterKind, encode_v3_path, reverse_v3_path, target_token,
 };
-use crate::services::strategy::routers::{
-    AavePool, BalancerProtocolFees, BalancerVault, BalancerVaultFees, CurvePoolSwap,
-};
+use crate::services::strategy::routers::{AavePool, BalancerProtocolFees, BalancerVaultFees};
 use crate::services::strategy::routers::{ERC20, UniV2Router, UniV3Router};
 use crate::services::strategy::strategy::{FlashloanProvider, StrategyExecutor};
-use crate::services::strategy::time_utils::current_unix;
 use alloy::eips::eip2930::AccessList;
-use alloy::primitives::{Address, B256, Bytes, I256, TxKind, U256};
+use alloy::primitives::{Address, B256, Bytes, TxKind, U256};
 use alloy::rpc::types::eth::{TransactionInput, TransactionRequest};
 use alloy::sol_types::{SolCall, SolValue};
 use dashmap::DashMap;
@@ -431,77 +428,6 @@ impl StrategyExecutor {
         })
     }
 
-    // Reserved for future Curve integrations.
-    #[allow(dead_code)]
-    pub(crate) fn build_curve_swap_payload(
-        &self,
-        pool: Address,
-        i: i128,
-        j: i128,
-        amount_in: U256,
-        min_out: U256,
-        use_underlying: bool,
-    ) -> Vec<u8> {
-        let contract = CurvePoolSwap::new(pool, self.http_provider.clone());
-        if use_underlying {
-            contract
-                .exchange_underlying(i, j, amount_in, min_out)
-                .calldata()
-                .to_vec()
-        } else {
-            contract
-                .exchange(i, j, amount_in, min_out)
-                .calldata()
-                .to_vec()
-        }
-    }
-
-    // Reserved for future Balancer integrations.
-    #[allow(dead_code)]
-    pub(crate) fn build_balancer_single_swap_payload(
-        &self,
-        vault: Address,
-        pool_id: B256,
-        asset_in: Address,
-        asset_out: Address,
-        amount_in: U256,
-        min_out: U256,
-        sender: Address,
-        recipient: Address,
-    ) -> Vec<u8> {
-        let assets = vec![asset_in, asset_out];
-        let swap = BalancerVault::BatchSwapStep {
-            poolId: pool_id,
-            assetInIndex: U256::ZERO,
-            assetOutIndex: U256::ONE,
-            amount: amount_in,
-            userData: Bytes::new(),
-        };
-        let funds = BalancerVault::FundManagement {
-            sender,
-            fromInternalBalance: false,
-            recipient,
-            toInternalBalance: false,
-        };
-        let limit_in = I256::try_from(amount_in).unwrap_or(I256::MAX);
-        let limit_out = I256::try_from(min_out)
-            .unwrap_or(I256::MAX)
-            .checked_neg()
-            .unwrap_or(I256::MIN);
-        let limits = vec![limit_in, limit_out];
-        BalancerVault::new(vault, self.http_provider.clone())
-            .batchSwap(
-                0u8,
-                vec![swap],
-                assets,
-                funds,
-                limits,
-                U256::from(current_unix().saturating_add(120)),
-            )
-            .calldata()
-            .to_vec()
-    }
-
     pub(crate) async fn build_executor_wrapper(
         &self,
         approvals: &[ApproveTx],
@@ -655,31 +581,6 @@ impl StrategyExecutor {
             .await?;
 
         Ok(Some((raw, request, hash)))
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn should_use_flashloan(
-        &self,
-        required_value: U256,
-        wallet_balance: U256,
-        _gas_fees: &crate::network::gas::GasFees,
-    ) -> bool {
-        if !self.flashloan_enabled || self.executor.is_none() || self.dry_run {
-            return false;
-        }
-        if !self.has_usable_flashloan_provider() {
-            return false;
-        }
-        if self.runtime.flashloan_force || self.runtime.flashloan_aggressive {
-            return true;
-        }
-        if wallet_balance <= self.runtime.flashloan_prefer_wallet_max_wei {
-            return true;
-        }
-        // Caller passes total upfront requirement for current plan phase
-        // (trade principal + adaptive bundle gas floor). If that cannot be
-        // funded from signer balance, prefer flashloan route.
-        wallet_balance < required_value
     }
 
     pub(crate) async fn build_quote_graph(

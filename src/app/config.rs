@@ -23,8 +23,6 @@ pub struct ConfigFieldSource {
     pub selected_key: Option<String>,
     pub selected_source: String,
     pub redacted_value: Option<String>,
-    pub deprecated_since: Option<String>,
-    pub remove_after: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -288,7 +286,6 @@ pub struct GlobalSettings {
     pub coinmarketcap_api_key: Option<String>,
     pub coingecko_api_key: Option<String>,
     pub cryptocompare_api_key: Option<String>,
-    pub coindesk_api_key: Option<String>,
     pub etherscan_api_key: Option<String>,
 }
 
@@ -585,11 +582,8 @@ struct EnvFieldSpec {
     field: &'static str,
     target_env_key: &'static str,
     canonical_key: &'static str,
-    aliases: &'static [&'static str],
     required: bool,
     redact: bool,
-    deprecated_since: Option<&'static str>,
-    remove_after: Option<&'static str>,
 }
 
 impl EnvFieldSpec {
@@ -597,53 +591,38 @@ impl EnvFieldSpec {
         &[
             EnvFieldSpec {
                 field: "wallet_key",
-                target_env_key: "WALLET_KEY",
+                target_env_key: "wallet_key",
                 canonical_key: "OXIDITY_WALLET_PRIVATE_KEY",
-                aliases: &["WALLET_KEY", "WALLET_PRIVATE_KEY"],
                 required: true,
                 redact: true,
-                deprecated_since: Some("0.1.1"),
-                remove_after: Some("0.3.0"),
             },
             EnvFieldSpec {
                 field: "wallet_address",
-                target_env_key: "WALLET_ADDRESS",
+                target_env_key: "wallet_address",
                 canonical_key: "OXIDITY_WALLET_ADDRESS",
-                aliases: &["WALLET_ADDRESS"],
                 required: true,
                 redact: false,
-                deprecated_since: Some("0.1.1"),
-                remove_after: Some("0.3.0"),
             },
             EnvFieldSpec {
                 field: "executor_address",
-                target_env_key: "EXECUTOR_ADDRESS",
+                target_env_key: "executor_address",
                 canonical_key: "OXIDITY_FLASHLOAN_CONTRACT_ADDRESS",
-                aliases: &["FLASHLOAN_CONTRACT_ADDRESS", "EXECUTOR_ADDRESS"],
                 required: true,
                 redact: false,
-                deprecated_since: Some("0.1.1"),
-                remove_after: Some("0.3.0"),
             },
             EnvFieldSpec {
                 field: "bundle_signer_key",
-                target_env_key: "BUNDLE_SIGNER_KEY",
+                target_env_key: "bundle_signer_key",
                 canonical_key: "OXIDITY_BUNDLE_PRIVATE_KEY",
-                aliases: &["BUNDLE_SIGNER_KEY", "BUNDLE_PRIVATE_KEY"],
                 required: true,
                 redact: true,
-                deprecated_since: Some("0.1.1"),
-                remove_after: Some("0.3.0"),
             },
             EnvFieldSpec {
                 field: "log_level",
-                target_env_key: "LOG_LEVEL",
+                target_env_key: "log_level",
                 canonical_key: "OXIDITY_LOG_LEVEL",
-                aliases: &["LOG_LEVEL", "RUST_LOG"],
                 required: false,
                 redact: false,
-                deprecated_since: Some("0.1.1"),
-                remove_after: Some("0.3.0"),
             },
         ]
     }
@@ -666,8 +645,8 @@ struct GlobalPathEntry {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct GlobalPathsManifest {
-    #[allow(dead_code)]
-    version: Option<u32>,
+    #[serde(rename = "version")]
+    _version: Option<u32>,
     #[serde(default)]
     files: HashMap<String, GlobalPathEntry>,
 }
@@ -708,7 +687,6 @@ fn is_passthrough_env_key(key: &str) -> bool {
         "COINMARKETCAP_API_KEY",
         "COINGECKO_API_KEY",
         "CRYPTOCOMPARE_API_KEY",
-        "COINDESK_API_KEY",
         "PROFIT_FLOOR_ABS_ETH",
         "PROFIT_FLOOR_MULT_GAS",
         "PROFIT_FLOOR_MIN_USD",
@@ -771,9 +749,7 @@ fn is_passthrough_env_key(key: &str) -> bool {
     const PREFIXES: &[&str] = &[
         "HTTP_PROVIDER",
         "WEBSOCKET_PROVIDER",
-        "WEBSOCKET_URL",
         "IPC_PROVIDER",
-        "IPC_PATH",
         "GAS_CAPS_GWEI",
         "ROUTER_RISK_",
         "SANDWICH_RISK_",
@@ -808,58 +784,17 @@ fn resolve_env_contract() -> EnvResolution {
     let mut used_keys: HashSet<String> = HashSet::new();
 
     for spec in EnvFieldSpec::all() {
-        let canonical = std::env::var(spec.canonical_key)
+        let selected_value = std::env::var(spec.canonical_key)
             .ok()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty());
-
-        let mut alias_hit: Option<(&'static str, String)> = None;
-        for alias in spec.aliases {
-            if let Ok(raw) = std::env::var(alias) {
-                let trimmed = raw.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                alias_hit = Some((alias, trimmed.to_string()));
-                break;
-            }
-        }
-
-        let (selected_key, selected_value, selected_source) = match (canonical, alias_hit) {
-            (Some(canonical_value), Some((alias, alias_value))) => {
-                if canonical_value != alias_value {
-                    resolution.warnings.push(format!(
-                        "Config conflict for {}: canonical {} and legacy {} differ; canonical value selected",
-                        spec.field, spec.canonical_key, alias
-                    ));
-                }
-                (
-                    Some(spec.canonical_key.to_string()),
-                    Some(canonical_value),
-                    "canonical".to_string(),
-                )
-            }
-            (Some(canonical_value), None) => (
-                Some(spec.canonical_key.to_string()),
-                Some(canonical_value),
-                "canonical".to_string(),
-            ),
-            (None, Some((alias, alias_value))) => {
-                resolution.warnings.push(format!(
-                    "Legacy env {} is deprecated for {}; use {} (deprecated since {}, remove after {})",
-                    alias,
-                    spec.field,
-                    spec.canonical_key,
-                    spec.deprecated_since.unwrap_or("n/a"),
-                    spec.remove_after.unwrap_or("n/a")
-                ));
-                (
-                    Some(alias.to_string()),
-                    Some(alias_value),
-                    "legacy_alias".to_string(),
-                )
-            }
-            (None, None) => (None, None, "unset".to_string()),
+        let selected_key = selected_value
+            .as_ref()
+            .map(|_| spec.canonical_key.to_string());
+        let selected_source = if selected_value.is_some() {
+            "canonical".to_string()
+        } else {
+            "unset".to_string()
         };
 
         if let Some(value) = selected_value.clone() {
@@ -879,8 +814,6 @@ fn resolve_env_contract() -> EnvResolution {
             redacted_value: selected_value
                 .as_deref()
                 .map(|value| redact_value(value, spec.redact)),
-            deprecated_since: spec.deprecated_since.map(ToString::to_string),
-            remove_after: spec.remove_after.map(ToString::to_string),
         });
     }
 
@@ -936,7 +869,6 @@ fn redact_effective_config(value: &mut Value) {
         "coinmarketcap_api_key",
         "coingecko_api_key",
         "cryptocompare_api_key",
-        "coindesk_api_key",
         "etherscan_api_key",
     ];
     match value {
@@ -976,6 +908,21 @@ impl GlobalSettings {
 
         let selected_config = resolve_config_path(path);
         let env_resolution = resolve_env_contract();
+        let mut missing_required_env: Vec<&str> = EnvFieldSpec::all()
+            .iter()
+            .filter(|spec| {
+                spec.required && !env_resolution.overrides.contains_key(spec.target_env_key)
+            })
+            .map(|spec| spec.canonical_key)
+            .collect();
+        if !missing_required_env.is_empty() {
+            missing_required_env.sort_unstable();
+            missing_required_env.dedup();
+            return Err(AppError::Config(format!(
+                "Missing required canonical env values: {}",
+                missing_required_env.join(", ")
+            )));
+        }
         let mut builder = Config::builder();
 
         if let Some(ref selected_path) = selected_config {
@@ -996,32 +943,6 @@ impl GlobalSettings {
         // Allow CHAINS env to be comma/space separated string (e.g. "1,137")
         if let Some(chains_str) = env_resolution.overrides.get("CHAINS") {
             settings.chains = parse_chain_list(chains_str)?;
-        }
-
-        let mut missing_required: Vec<&str> = Vec::new();
-        for spec in EnvFieldSpec::all().iter().filter(|s| s.required) {
-            let has_value = match spec.field {
-                "wallet_key" => !settings.wallet_key.trim().is_empty(),
-                "wallet_address" => settings.wallet_address != Address::ZERO,
-                "executor_address" => settings.executor_address.is_some(),
-                "bundle_signer_key" => settings
-                    .bundle_signer_key
-                    .as_deref()
-                    .map(str::trim)
-                    .is_some_and(|v| !v.is_empty()),
-                _ => false,
-            };
-            if !has_value {
-                missing_required.push(spec.canonical_key);
-            }
-        }
-        if !missing_required.is_empty() {
-            missing_required.sort();
-            missing_required.dedup();
-            return Err(AppError::Config(format!(
-                "Missing required configuration values: {}",
-                missing_required.join(", ")
-            )));
         }
 
         let report = ConfigLoadReport {
@@ -1197,13 +1118,7 @@ impl GlobalSettings {
         {
             return Some(url);
         }
-        // Environment fallbacks (accept legacy lowercase and uppercase aliases).
-        Self::first_non_empty_env([
-            "HTTP_PROVIDER",
-            "http_provider",
-            "HTTP_PROVIDER_1",
-            "http_provider_1",
-        ])
+        Self::first_non_empty_env(["HTTP_PROVIDER", "HTTP_PROVIDER_1"])
     }
 
     /// Helper to get RPC URL for a specific chain
@@ -1214,9 +1129,7 @@ impl GlobalSettings {
 
         let candidates = [
             format!("HTTP_PROVIDER_{}", chain_id),
-            format!("http_provider_{}", chain_id),
             "HTTP_PROVIDER".to_string(),
-            "http_provider".to_string(),
         ];
         if let Some(url) = Self::first_non_empty_env(candidates) {
             return Ok(url);
@@ -1236,9 +1149,7 @@ impl GlobalSettings {
 
         let candidates = [
             format!("WEBSOCKET_PROVIDER_{}", chain_id),
-            format!("WEBSOCKET_URL_{}", chain_id),
             "WEBSOCKET_PROVIDER".to_string(),
-            "WEBSOCKET_URL".to_string(),
         ];
 
         if let Some(url) = Self::first_non_empty_env(candidates) {
@@ -1259,9 +1170,7 @@ impl GlobalSettings {
 
         let candidates = [
             format!("IPC_PROVIDER_{}", chain_id),
-            format!("IPC_PATH_{}", chain_id),
             "IPC_PROVIDER".to_string(),
-            "IPC_PATH".to_string(),
         ];
 
         Self::first_non_empty_env(candidates)
@@ -1755,7 +1664,6 @@ impl GlobalSettings {
             coinmarketcap: self.coinmarketcap_api_key.clone(),
             coingecko: self.coingecko_api_key.clone(),
             cryptocompare: self.cryptocompare_api_key.clone(),
-            coindesk: self.coindesk_api_key.clone(),
             etherscan: self.etherscan_api_key.clone(),
         }
     }
@@ -2255,7 +2163,6 @@ mod tests {
             coinmarketcap_api_key: None,
             coingecko_api_key: None,
             cryptocompare_api_key: None,
-            coindesk_api_key: None,
             etherscan_api_key: None,
         }
     }
@@ -2304,17 +2211,12 @@ mod tests {
     }
 
     #[test]
-    fn http_provider_accepts_uppercase_env_aliases() {
+    fn http_provider_uses_uppercase_env_keys_only() {
         let _env_lock = env_lock_guard();
-        let old_upper_chain = std::env::var("HTTP_PROVIDER_1").ok();
-        let old_lower_chain = std::env::var("http_provider_1").ok();
-        let old_upper_default = std::env::var("HTTP_PROVIDER").ok();
-        let old_lower_default = std::env::var("http_provider").ok();
+        let snapshot = stash_env(&["HTTP_PROVIDER_1", "HTTP_PROVIDER"]);
         unsafe {
             std::env::remove_var("HTTP_PROVIDER_1");
-            std::env::remove_var("http_provider_1");
             std::env::remove_var("HTTP_PROVIDER");
-            std::env::remove_var("http_provider");
             std::env::set_var("HTTP_PROVIDER_1", "https://upper-chain.example");
         }
 
@@ -2324,40 +2226,16 @@ mod tests {
             "https://upper-chain.example"
         );
 
-        if let Some(v) = old_upper_chain {
-            unsafe { std::env::set_var("HTTP_PROVIDER_1", v) };
-        } else {
-            unsafe { std::env::remove_var("HTTP_PROVIDER_1") };
-        }
-        if let Some(v) = old_lower_chain {
-            unsafe { std::env::set_var("http_provider_1", v) };
-        } else {
-            unsafe { std::env::remove_var("http_provider_1") };
-        }
-        if let Some(v) = old_upper_default {
-            unsafe { std::env::set_var("HTTP_PROVIDER", v) };
-        } else {
-            unsafe { std::env::remove_var("HTTP_PROVIDER") };
-        }
-        if let Some(v) = old_lower_default {
-            unsafe { std::env::set_var("http_provider", v) };
-        } else {
-            unsafe { std::env::remove_var("http_provider") };
-        }
+        restore_env(snapshot);
     }
 
     #[test]
     fn ws_lookup_does_not_use_ipc_entries() {
         let _env_lock = env_lock_guard();
-        let old_ws_1 = std::env::var("WEBSOCKET_PROVIDER_1").ok();
-        let old_ws = std::env::var("WEBSOCKET_PROVIDER").ok();
-        let old_websocket_1 = std::env::var("WEBSOCKET_URL_1").ok();
-        let old_websocket = std::env::var("WEBSOCKET_URL").ok();
+        let snapshot = stash_env(&["WEBSOCKET_PROVIDER_1", "WEBSOCKET_PROVIDER"]);
         unsafe {
             std::env::remove_var("WEBSOCKET_PROVIDER_1");
             std::env::remove_var("WEBSOCKET_PROVIDER");
-            std::env::remove_var("WEBSOCKET_URL_1");
-            std::env::remove_var("WEBSOCKET_URL");
         }
 
         let mut settings = base_settings();
@@ -2373,18 +2251,7 @@ mod tests {
             other => panic!("Unexpected error variant: {other:?}"),
         }
 
-        if let Some(v) = old_ws_1 {
-            unsafe { std::env::set_var("WEBSOCKET_PROVIDER_1", v) };
-        }
-        if let Some(v) = old_ws {
-            unsafe { std::env::set_var("WEBSOCKET_PROVIDER", v) };
-        }
-        if let Some(v) = old_websocket_1 {
-            unsafe { std::env::set_var("WEBSOCKET_URL_1", v) };
-        }
-        if let Some(v) = old_websocket {
-            unsafe { std::env::set_var("WEBSOCKET_URL", v) };
-        }
+        restore_env(snapshot);
     }
 
     #[test]
@@ -2420,14 +2287,14 @@ mod tests {
     #[test]
     fn ipc_provider_requires_explicit_config_or_env() {
         let _env_lock = env_lock_guard();
+        let snapshot = stash_env(&["IPC_PROVIDER_1", "IPC_PROVIDER"]);
         unsafe {
             std::env::remove_var("IPC_PROVIDER_1");
-            std::env::remove_var("IPC_PATH_1");
             std::env::remove_var("IPC_PROVIDER");
-            std::env::remove_var("IPC_PATH");
         }
         let settings = base_settings();
         assert!(settings.get_ipc_provider(1).is_none());
+        restore_env(snapshot);
     }
 
     #[test]
@@ -2681,40 +2548,20 @@ mod tests {
     }
 
     #[test]
-    fn canonical_wins_over_legacy_alias_conflict() {
+    fn missing_required_canonical_env_values_fail_fast() {
         let _env_lock = env_lock_guard();
         let keys = [
             "OXIDITY_WALLET_PRIVATE_KEY",
-            "WALLET_KEY",
             "OXIDITY_WALLET_ADDRESS",
-            "WALLET_ADDRESS",
             "OXIDITY_FLASHLOAN_CONTRACT_ADDRESS",
-            "EXECUTOR_ADDRESS",
             "OXIDITY_BUNDLE_PRIVATE_KEY",
-            "BUNDLE_SIGNER_KEY",
         ];
         let snapshot = stash_env(&keys);
         unsafe {
-            std::env::set_var("OXIDITY_WALLET_PRIVATE_KEY", "canonical_wallet");
-            std::env::set_var("WALLET_KEY", "legacy_wallet");
-            std::env::set_var(
-                "OXIDITY_WALLET_ADDRESS",
-                "0x0000000000000000000000000000000000000001",
-            );
-            std::env::set_var(
-                "WALLET_ADDRESS",
-                "0x0000000000000000000000000000000000000003",
-            );
-            std::env::set_var(
-                "OXIDITY_FLASHLOAN_CONTRACT_ADDRESS",
-                "0x0000000000000000000000000000000000000002",
-            );
-            std::env::set_var(
-                "EXECUTOR_ADDRESS",
-                "0x0000000000000000000000000000000000000004",
-            );
-            std::env::set_var("OXIDITY_BUNDLE_PRIVATE_KEY", "canonical_bundle");
-            std::env::set_var("BUNDLE_SIGNER_KEY", "legacy_bundle");
+            std::env::remove_var("OXIDITY_WALLET_PRIVATE_KEY");
+            std::env::remove_var("OXIDITY_WALLET_ADDRESS");
+            std::env::remove_var("OXIDITY_FLASHLOAN_CONTRACT_ADDRESS");
+            std::env::remove_var("OXIDITY_BUNDLE_PRIVATE_KEY");
         }
 
         let tmp = std::env::temp_dir().join(format!(
@@ -2727,10 +2574,11 @@ mod tests {
         ));
         std::fs::write(&tmp, "").expect("write temp config");
 
-        let loaded = GlobalSettings::load_with_path(Some(tmp.to_str().expect("utf8 path")))
-            .expect("load settings");
-        assert_eq!(loaded.wallet_key, "canonical_wallet");
-        assert_eq!(loaded.bundle_signer_key(), "canonical_bundle");
+        let err = GlobalSettings::load_with_path(Some(tmp.to_str().expect("utf8 path")))
+            .expect_err("required canonical env values must be present");
+        assert!(
+            matches!(err, AppError::Config(msg) if msg.contains("Missing required canonical env values"))
+        );
 
         std::fs::remove_file(&tmp).ok();
         restore_env(snapshot);
@@ -2946,18 +2794,22 @@ bundle_signer_key = "file_bundle_signer_key"
 "#;
         std::fs::write(&tmp, body).expect("write temp config");
         let snapshot = stash_env(&[
-            "WALLET_KEY",
             "OXIDITY_WALLET_PRIVATE_KEY",
             "OXIDITY_WALLET_ADDRESS",
             "OXIDITY_FLASHLOAN_CONTRACT_ADDRESS",
             "OXIDITY_BUNDLE_PRIVATE_KEY",
         ]);
         unsafe {
-            std::env::remove_var("OXIDITY_WALLET_PRIVATE_KEY");
-            std::env::remove_var("OXIDITY_WALLET_ADDRESS");
-            std::env::remove_var("OXIDITY_FLASHLOAN_CONTRACT_ADDRESS");
-            std::env::remove_var("OXIDITY_BUNDLE_PRIVATE_KEY");
-            std::env::set_var("WALLET_KEY", "env_wallet_key");
+            std::env::set_var("OXIDITY_WALLET_PRIVATE_KEY", "env_wallet_key");
+            std::env::set_var(
+                "OXIDITY_WALLET_ADDRESS",
+                "0x0000000000000000000000000000000000000001",
+            );
+            std::env::set_var(
+                "OXIDITY_FLASHLOAN_CONTRACT_ADDRESS",
+                "0x0000000000000000000000000000000000000002",
+            );
+            std::env::set_var("OXIDITY_BUNDLE_PRIVATE_KEY", "env_bundle_key");
         }
 
         let loaded = GlobalSettings::load_with_path(Some(tmp.to_str().expect("utf8 path")))
@@ -2995,10 +2847,16 @@ chains = [1]
             "OXIDITY_BUNDLE_PRIVATE_KEY",
         ]);
         unsafe {
-            std::env::remove_var("OXIDITY_WALLET_PRIVATE_KEY");
-            std::env::remove_var("OXIDITY_WALLET_ADDRESS");
-            std::env::remove_var("OXIDITY_FLASHLOAN_CONTRACT_ADDRESS");
-            std::env::remove_var("OXIDITY_BUNDLE_PRIVATE_KEY");
+            std::env::set_var("OXIDITY_WALLET_PRIVATE_KEY", "env_wallet_key");
+            std::env::set_var(
+                "OXIDITY_WALLET_ADDRESS",
+                "0x0000000000000000000000000000000000000001",
+            );
+            std::env::set_var(
+                "OXIDITY_FLASHLOAN_CONTRACT_ADDRESS",
+                "0x0000000000000000000000000000000000000002",
+            );
+            std::env::set_var("OXIDITY_BUNDLE_PRIVATE_KEY", "env_bundle_key");
             std::env::set_var("CHAINS", "1,137");
         }
 

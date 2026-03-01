@@ -1,5 +1,5 @@
 # Development build, config and artifacts
-
+mitander.dev/
 target/
 .vscode/
 .venv/

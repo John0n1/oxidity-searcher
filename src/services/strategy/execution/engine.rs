@@ -680,7 +680,7 @@ impl Engine {
             && !capabilities.eth_simulate_shape_ok
         {
             return Err(AppError::Config(
-                "rpc_capability_strict=true but eth_simulateV1 parameter-shape compatibility check failed"
+                "rpc_capability_strict=true but eth_simulateV1 parameter-shape conformance check failed"
                     .into(),
             ));
         }
@@ -689,7 +689,7 @@ impl Engine {
             && !capabilities.debug_trace_call_many_shape_ok
         {
             return Err(AppError::Config(
-                "rpc_capability_strict=true but debug_traceCallMany parameter-shape compatibility check failed"
+                "rpc_capability_strict=true but debug_traceCallMany parameter-shape conformance check failed"
                     .into(),
             ));
         }

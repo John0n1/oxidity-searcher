@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
 const MIGRATIONS_DIR: &str = "migrations";
-const MIGRATIONS_LEGACY_DIR: &str = "migrations_legacy";
 
 fn normalize_ident(raw: &str) -> String {
     raw.trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == ';' || c == '(')
@@ -102,26 +101,5 @@ fn active_migration_targets_are_not_duplicated() {
         "Unexpected duplicate migration DDL targets in {}: {:?}",
         MIGRATIONS_DIR,
         duplicates
-    );
-}
-
-#[test]
-fn legacy_migration_targets_are_only_known_historical_duplicates() {
-    let allowed_historical_duplicates: BTreeSet<String> = ["table:nonce_state"]
-        .into_iter()
-        .map(String::from)
-        .collect();
-    let duplicates = duplicate_targets_for_dir(MIGRATIONS_LEGACY_DIR);
-    let unexpected: Vec<(String, Vec<String>)> = duplicates
-        .iter()
-        .filter(|(target, _)| !allowed_historical_duplicates.contains(*target))
-        .map(|(target, files)| (target.clone(), files.clone()))
-        .collect();
-
-    assert!(
-        unexpected.is_empty(),
-        "Unexpected duplicate migration DDL targets in {}: {:?}",
-        MIGRATIONS_LEGACY_DIR,
-        unexpected
     );
 }

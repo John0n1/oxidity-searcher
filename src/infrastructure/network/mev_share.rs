@@ -35,8 +35,8 @@ pub struct MevShareHint {
 
 #[derive(Debug, Deserialize)]
 struct RawEvent {
-    #[allow(dead_code)]
-    hash: Option<String>,
+    #[serde(rename = "hash")]
+    _hash: Option<String>,
     #[serde(default)]
     txs: Option<Vec<RawTx>>,
 }

@@ -1,5 +1,5 @@
 -- Squashed baseline migration for fresh databases.
--- Historical migrations are preserved in ./migrations_legacy for existing DBs.
+-- Canonical migration entrypoint for current databases.
 
 CREATE TABLE IF NOT EXISTS transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

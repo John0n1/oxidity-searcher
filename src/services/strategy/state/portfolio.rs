@@ -150,18 +150,6 @@ impl PortfolioManager {
             .or_insert(gas_wei);
     }
 
-    /// Backward-compatible convenience wrapper: net = revenue - gas.
-    pub fn record_profit(&self, chain_id: u64, revenue_wei: U256, gas_cost_wei: U256) {
-        self.record_trade_components(
-            chain_id,
-            revenue_wei,
-            gas_cost_wei,
-            U256::ZERO,
-            U256::ZERO,
-            revenue_wei.saturating_sub(gas_cost_wei),
-        );
-    }
-
     pub fn record_token_profit(&self, chain_id: u64, token: Address, delta_wei: I256) {
         self.token_profit_wei
             .entry((chain_id, token))
@@ -232,7 +220,7 @@ mod tests {
         let revenue = U256::from(1_500_000_000_000_000_000u128); // 1.5 ETH
         let cost = U256::from(400_000_000_000_000_000u128); // 0.4 ETH
 
-        pm.record_profit(1, revenue, cost); // Net +1.1
+        pm.record_trade_components(1, revenue, cost, U256::ZERO, U256::ZERO, U256::ZERO); // Net +1.1
 
         let pnl = pm.get_net_profit_i256(1);
         let expected = I256::from_raw(U256::from(1_100_000_000_000_000_000u128));
@@ -276,7 +264,7 @@ mod tests {
         let bribe = U256::from(250u64);
         let premium = U256::from(50u64);
 
-        // Reported net may come in clamped from older callers; computed signed net must prevail.
+        // Reported net may be unsigned/clamped by upstream callers; computed signed net must prevail.
         pm.record_trade_components(1, gross, gas, bribe, premium, U256::ZERO);
 
         assert_eq!(
@@ -293,7 +281,14 @@ mod tests {
         let dummy_provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
         let pm = PortfolioManager::new(dummy_provider, Address::ZERO);
 
-        pm.record_profit(1, U256::from(1_000u64), U256::from(1_500u64));
+        pm.record_trade_components(
+            1,
+            U256::from(1_000u64),
+            U256::from(1_500u64),
+            U256::ZERO,
+            U256::ZERO,
+            U256::ZERO,
+        );
         assert_eq!(
             pm.get_net_profit_i256(1),
             I256::from_raw(U256::from(500u64))

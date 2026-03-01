@@ -6,7 +6,7 @@ pub mod parsing;
 pub mod retry;
 pub mod seen_cache;
 
-// Re-export frequently used modules for backward compatibility
+// Shared aliases for frequently used modules.
 pub use crate::app::logging as logger;
 pub use crate::domain::constants;
 pub use crate::domain::error;

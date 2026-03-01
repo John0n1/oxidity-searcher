@@ -14,7 +14,9 @@ use oxidity_searcher::core::executor::BundleSender;
 use oxidity_searcher::core::portfolio::PortfolioManager;
 use oxidity_searcher::core::safety::SafetyGuard;
 use oxidity_searcher::core::simulation::{SimulationBackend, Simulator};
-use oxidity_searcher::core::strategy::{FlashloanProvider, StrategyExecutor, StrategyWork};
+use oxidity_searcher::core::strategy::{
+    FlashloanProvider, StrategyConfig, StrategyExecutor, StrategyWork,
+};
 use oxidity_searcher::data::db::Database;
 use oxidity_searcher::infrastructure::data::token_manager::TokenManager;
 use oxidity_searcher::network::gas::GasOracle;
@@ -81,7 +83,7 @@ async fn mev_share_hint_round_trip() {
         default_uniswap_v2_router(CHAIN_ETHEREUM).unwrap_or_else(|| Address::from([0x11; 20]));
     allowlist.insert(router);
 
-    let exec = StrategyExecutor::new(
+    let exec = StrategyExecutor::from_config(StrategyConfig {
         work_queue,
         block_rx,
         safety_guard,
@@ -90,45 +92,46 @@ async fn mev_share_hint_round_trip() {
         portfolio,
         gas_oracle,
         price_feed,
-        1,
-        200,
-        12_000,
+        chain_id: 1,
+        max_gas_price_gwei: 200,
+        gas_cap_multiplier_bps: 12_000,
         simulator,
         token_manager,
-        stats.clone(),
-        signer.clone(),
+        stats: stats.clone(),
+        signer: signer.clone(),
         nonce_manager,
-        50,
-        10_000,
-        10_000,
-        1_200,
-        1_000,
-        5_000_000_000_000,
-        http.clone(),
-        true,
-        allowlist,
+        slippage_bps: 50,
+        profit_guard_base_floor_multiplier_bps: 10_000,
+        profit_guard_cost_multiplier_bps: 10_000,
+        profit_guard_min_margin_bps: 1_200,
+        liquidity_ratio_floor_ppm: 1_000,
+        sell_min_native_out_wei: 5_000_000_000_000,
+        http_provider: http.clone(),
+        dry_run: true,
+        router_allowlist: allowlist,
         wrapper_allowlist,
         infra_allowlist,
-        None,
-        500,
-        wrapped_native_for_chain(CHAIN_ETHEREUM),
-        false,
-        None,
-        0,
-        None,
-        false,
-        vec![FlashloanProvider::Balancer],
-        None,
+        router_discovery: None,
+        skip_log_every: 500,
+        wrapped_native: wrapped_native_for_chain(CHAIN_ETHEREUM),
+        allow_non_wrapped_swaps: false,
+        executor: None,
+        executor_bribe_bps: 0,
+        executor_bribe_recipient: None,
+        flashloan_enabled: false,
+        flashloan_providers: vec![FlashloanProvider::Balancer],
+        aave_pool: None,
         reserve_cache,
-        true,
-        "revm".to_string(),
-        4,
-        tokio_util::sync::CancellationToken::new(),
-        500,
-        60_000,
-        4,
-        false,
-    );
+        sandwich_attacks_enabled: true,
+        simulation_backend: "revm".to_string(),
+        worker_limit: 4,
+        shutdown: tokio_util::sync::CancellationToken::new(),
+        receipt_poll_ms: 500,
+        receipt_timeout_ms: 60_000,
+        receipt_confirm_blocks: 4,
+        emergency_exit_on_unknown_receipt: false,
+        runtime: Default::default(),
+    });
 
     // Craft a simple V2 swapExactETHForTokens payload WETH->token.
     let token_out = Address::from([0x44; 20]);

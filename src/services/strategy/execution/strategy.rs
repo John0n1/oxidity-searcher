@@ -1150,22 +1150,6 @@ impl StrategyExecutor {
         units_to_float(amount, decimals)
     }
 
-    #[allow(dead_code)]
-    pub(in crate::services::strategy) fn ensure_native_out(
-        &self,
-        amount: U256,
-        token: Address,
-    ) -> Option<U256> {
-        if token == self.wrapped_native {
-            Some(amount)
-        } else if self.allow_non_wrapped_swaps {
-            // Non-wrapped mode permits token-denominated settlement.
-            Some(amount)
-        } else {
-            None
-        }
-    }
-
     pub(in crate::services::strategy) fn execution_router(
         &self,
         observed: &ObservedSwap,
@@ -1444,108 +1428,6 @@ impl StrategyExecutor {
             profit_floor_min_usd,
             gas_ratio_limit_floor_bps,
         }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        work_queue: SharedWorkQueue,
-        block_rx: BroadcastReceiver<Header>,
-        safety_guard: Arc<SafetyGuard>,
-        bundle_sender: SharedBundleSender,
-        db: Database,
-        portfolio: Arc<PortfolioManager>,
-        gas_oracle: GasOracle,
-        price_feed: PriceFeed,
-        chain_id: u64,
-        max_gas_price_gwei: u64,
-        gas_cap_multiplier_bps: u64,
-        simulator: Simulator,
-        token_manager: Arc<TokenManager>,
-        stats: Arc<StrategyStats>,
-        signer: PrivateKeySigner,
-        nonce_manager: NonceManager,
-        slippage_bps: u64,
-        profit_guard_base_floor_multiplier_bps: u64,
-        profit_guard_cost_multiplier_bps: u64,
-        profit_guard_min_margin_bps: u64,
-        liquidity_ratio_floor_ppm: u64,
-        sell_min_native_out_wei: u64,
-        http_provider: HttpProvider,
-        dry_run: bool,
-        router_allowlist: Arc<DashSet<Address>>,
-        wrapper_allowlist: Arc<DashSet<Address>>,
-        infra_allowlist: Arc<DashSet<Address>>,
-        router_discovery: Option<Arc<crate::services::strategy::router_discovery::RouterDiscovery>>,
-        skip_log_every: u64,
-        wrapped_native: Address,
-        allow_non_wrapped_swaps: bool,
-        executor: Option<Address>,
-        executor_bribe_bps: u64,
-        executor_bribe_recipient: Option<Address>,
-        flashloan_enabled: bool,
-        flashloan_providers: Vec<FlashloanProvider>,
-        aave_pool: Option<Address>,
-        reserve_cache: Arc<ReserveCache>,
-        sandwich_attacks_enabled: bool,
-        simulation_backend: String,
-        worker_limit: usize,
-        shutdown: CancellationToken,
-        receipt_poll_ms: u64,
-        receipt_timeout_ms: u64,
-        receipt_confirm_blocks: u64,
-        emergency_exit_on_unknown_receipt: bool,
-    ) -> Self {
-        // Backward-compatible wrapper for legacy call sites; prefer from_config.
-        let runtime = StrategyRuntimeSettings::default();
-        Self::from_config(StrategyConfig {
-            work_queue,
-            block_rx,
-            safety_guard,
-            bundle_sender,
-            db,
-            portfolio,
-            gas_oracle,
-            price_feed,
-            chain_id,
-            max_gas_price_gwei,
-            gas_cap_multiplier_bps,
-            simulator,
-            token_manager,
-            stats,
-            signer,
-            nonce_manager,
-            slippage_bps,
-            profit_guard_base_floor_multiplier_bps,
-            profit_guard_cost_multiplier_bps,
-            profit_guard_min_margin_bps,
-            liquidity_ratio_floor_ppm,
-            sell_min_native_out_wei,
-            http_provider,
-            dry_run,
-            router_allowlist,
-            wrapper_allowlist,
-            infra_allowlist,
-            router_discovery,
-            skip_log_every,
-            wrapped_native,
-            allow_non_wrapped_swaps,
-            executor,
-            executor_bribe_bps,
-            executor_bribe_recipient,
-            flashloan_enabled,
-            flashloan_providers,
-            aave_pool,
-            reserve_cache,
-            sandwich_attacks_enabled,
-            simulation_backend,
-            worker_limit,
-            shutdown,
-            receipt_poll_ms,
-            receipt_timeout_ms,
-            receipt_confirm_blocks,
-            emergency_exit_on_unknown_receipt,
-            runtime,
-        })
     }
 
     pub async fn run(self) -> Result<(), AppError> {
@@ -1899,12 +1781,10 @@ impl StrategyExecutor {
     }
 }
 
-#[allow(dead_code)]
 fn wei_to_eth_f64(value: U256) -> f64 {
     units_to_float(value, 18)
 }
 
-#[allow(dead_code)]
 fn units_to_float(value: U256, decimals: u8) -> f64 {
     let scale = 10f64.powi(decimals as i32);
     let num = value.to_string().parse::<f64>().unwrap_or(0.0);
@@ -2247,22 +2127,6 @@ mod tests {
         assert!(
             value <= wallet / U256::from(6u64),
             "value should be capped by wallet/gas buffer"
-        );
-    }
-
-    #[tokio::test]
-    async fn ensure_native_out_respects_non_wrapped_setting() {
-        let mut exec = dummy_executor_for_tests().await;
-        let other = Address::from([9u8; 20]);
-        assert!(exec.ensure_native_out(U256::from(10u64), other).is_none());
-        exec.allow_non_wrapped_swaps = true;
-        assert_eq!(
-            exec.ensure_native_out(U256::from(10u64), other),
-            Some(U256::from(10u64))
-        );
-        assert_eq!(
-            exec.ensure_native_out(U256::from(5u64), weth_mainnet()),
-            Some(U256::from(5u64))
         );
     }
 

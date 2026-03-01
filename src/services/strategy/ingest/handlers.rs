@@ -2754,7 +2754,6 @@ impl StrategyExecutor {
         let net_profit_eth_f64 = self.amount_to_display(net_profit_wei, self.wrapped_native);
 
         Ok(Some(ProfitOutcome {
-            gas_used_total,
             bundle_gas_limit,
             gas_cost_wei,
             gross_profit_wei,
@@ -2783,8 +2782,6 @@ struct BundleParts {
 }
 
 struct ProfitOutcome {
-    #[allow(dead_code)]
-    gas_used_total: u64,
     bundle_gas_limit: u64,
     gas_cost_wei: U256,
     gross_profit_wei: U256,

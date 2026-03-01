@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Integration-ish test that exercises the flash-loan request builder end to end
+// Integration test that exercises the flash-loan request builder end to end
 // without needing a running chain. It validates the encoded callback payloads
 // and transaction envelope we generate for the UnifiedHardenedExecutor.
 
@@ -14,7 +14,9 @@ use oxidity_searcher::core::executor::BundleSender;
 use oxidity_searcher::core::portfolio::PortfolioManager;
 use oxidity_searcher::core::safety::SafetyGuard;
 use oxidity_searcher::core::simulation::{SimulationBackend, Simulator};
-use oxidity_searcher::core::strategy::{FlashloanProvider, StrategyExecutor, StrategyStats};
+use oxidity_searcher::core::strategy::{
+    FlashloanProvider, StrategyConfig, StrategyExecutor, StrategyStats,
+};
 use oxidity_searcher::data::db::Database;
 use oxidity_searcher::data::executor::{FlashCallbackData, UnifiedHardenedExecutor};
 use oxidity_searcher::network::gas::GasFees;
@@ -85,8 +87,8 @@ async fn flashloan_builder_encodes_callbacks() {
 
     let executor_addr = Address::from([0x11; 20]);
 
-    let exec = StrategyExecutor::new(
-        work_queue.clone(),
+    let exec = StrategyExecutor::from_config(StrategyConfig {
+        work_queue: work_queue.clone(),
         block_rx,
         safety_guard,
         bundle_sender,
@@ -94,45 +96,46 @@ async fn flashloan_builder_encodes_callbacks() {
         portfolio,
         gas_oracle,
         price_feed,
-        1,
-        200,
-        12_000,
+        chain_id: 1,
+        max_gas_price_gwei: 200,
+        gas_cap_multiplier_bps: 12_000,
         simulator,
         token_manager,
         stats,
-        bundle_signer.clone(),
+        signer: bundle_signer.clone(),
         nonce_manager,
-        50,
-        10_000,
-        10_000,
-        1_200,
-        1_000,
-        5_000_000_000_000,
-        http.clone(),
-        true,
-        router_allowlist.clone(),
-        wrapper_allowlist.clone(),
-        infra_allowlist.clone(),
-        None,
-        500,
-        wrapped_native_for_chain(CHAIN_ETHEREUM),
-        false,
-        Some(executor_addr),
-        0,
-        None,
-        true,
-        vec![FlashloanProvider::Balancer],
-        None,
+        slippage_bps: 50,
+        profit_guard_base_floor_multiplier_bps: 10_000,
+        profit_guard_cost_multiplier_bps: 10_000,
+        profit_guard_min_margin_bps: 1_200,
+        liquidity_ratio_floor_ppm: 1_000,
+        sell_min_native_out_wei: 5_000_000_000_000,
+        http_provider: http.clone(),
+        dry_run: true,
+        router_allowlist: router_allowlist.clone(),
+        wrapper_allowlist: wrapper_allowlist.clone(),
+        infra_allowlist: infra_allowlist.clone(),
+        router_discovery: None,
+        skip_log_every: 500,
+        wrapped_native: wrapped_native_for_chain(CHAIN_ETHEREUM),
+        allow_non_wrapped_swaps: false,
+        executor: Some(executor_addr),
+        executor_bribe_bps: 0,
+        executor_bribe_recipient: None,
+        flashloan_enabled: true,
+        flashloan_providers: vec![FlashloanProvider::Balancer],
+        aave_pool: None,
         reserve_cache,
-        true,
-        "revm".to_string(),
-        4,
-        tokio_util::sync::CancellationToken::new(),
-        500,
-        60_000,
-        4,
-        false,
-    );
+        sandwich_attacks_enabled: true,
+        simulation_backend: "revm".to_string(),
+        worker_limit: 4,
+        shutdown: tokio_util::sync::CancellationToken::new(),
+        receipt_poll_ms: 500,
+        receipt_timeout_ms: 60_000,
+        receipt_confirm_blocks: 4,
+        emergency_exit_on_unknown_receipt: false,
+        runtime: Default::default(),
+    });
 
     // Two-step callback: approve + dummy swap payload; include reset approvals.
     let callbacks = vec![
@@ -250,7 +253,7 @@ async fn flashloan_builder_uses_aave_selector() {
     let executor_addr = Address::from([0x33; 20]);
     let aave_pool = Address::from([0x44; 20]);
 
-    let exec = StrategyExecutor::new(
+    let exec = StrategyExecutor::from_config(StrategyConfig {
         work_queue,
         block_rx,
         safety_guard,
@@ -259,45 +262,46 @@ async fn flashloan_builder_uses_aave_selector() {
         portfolio,
         gas_oracle,
         price_feed,
-        1,
-        200,
-        12_000,
+        chain_id: 1,
+        max_gas_price_gwei: 200,
+        gas_cap_multiplier_bps: 12_000,
         simulator,
         token_manager,
         stats,
-        bundle_signer.clone(),
+        signer: bundle_signer.clone(),
         nonce_manager,
-        50,
-        10_000,
-        10_000,
-        1_200,
-        1_000,
-        5_000_000_000_000,
-        http.clone(),
-        true,
-        router_allowlist.clone(),
-        wrapper_allowlist.clone(),
-        infra_allowlist.clone(),
-        None,
-        500,
-        wrapped_native_for_chain(CHAIN_ETHEREUM),
-        false,
-        Some(executor_addr),
-        0,
-        None,
-        true,
-        vec![FlashloanProvider::AaveV3],
-        Some(aave_pool),
+        slippage_bps: 50,
+        profit_guard_base_floor_multiplier_bps: 10_000,
+        profit_guard_cost_multiplier_bps: 10_000,
+        profit_guard_min_margin_bps: 1_200,
+        liquidity_ratio_floor_ppm: 1_000,
+        sell_min_native_out_wei: 5_000_000_000_000,
+        http_provider: http.clone(),
+        dry_run: true,
+        router_allowlist: router_allowlist.clone(),
+        wrapper_allowlist: wrapper_allowlist.clone(),
+        infra_allowlist: infra_allowlist.clone(),
+        router_discovery: None,
+        skip_log_every: 500,
+        wrapped_native: wrapped_native_for_chain(CHAIN_ETHEREUM),
+        allow_non_wrapped_swaps: false,
+        executor: Some(executor_addr),
+        executor_bribe_bps: 0,
+        executor_bribe_recipient: None,
+        flashloan_enabled: true,
+        flashloan_providers: vec![FlashloanProvider::AaveV3],
+        aave_pool: Some(aave_pool),
         reserve_cache,
-        true,
-        "revm".to_string(),
-        4,
-        tokio_util::sync::CancellationToken::new(),
-        500,
-        60_000,
-        4,
-        false,
-    );
+        sandwich_attacks_enabled: true,
+        simulation_backend: "revm".to_string(),
+        worker_limit: 4,
+        shutdown: tokio_util::sync::CancellationToken::new(),
+        receipt_poll_ms: 500,
+        receipt_timeout_ms: 60_000,
+        receipt_confirm_blocks: 4,
+        emergency_exit_on_unknown_receipt: false,
+        runtime: Default::default(),
+    });
 
     let callbacks = vec![(
         wrapped_native_for_chain(CHAIN_ETHEREUM),
@@ -331,7 +335,7 @@ async fn flashloan_builder_uses_aave_selector() {
     let (_raw, request, _hash, _premium, _overhead) = match built {
         Ok(v) => v,
         Err(e) => {
-            // Some local Nethermind/Anvil configs disable access-list calls; skip instead of failing.
+            // Some local Nethermind/Anvil configs disable access-list calls; skip gracefully.
             eprintln!("skipping aave selector test: {}", e);
             return;
         }
@@ -507,7 +511,7 @@ async fn flashloan_builder_rejects_when_no_provider_available() {
     let (_block_tx, block_rx) = broadcast::channel(4);
     let executor_addr = Address::from([0x55; 20]);
 
-    let exec = StrategyExecutor::new(
+    let exec = StrategyExecutor::from_config(StrategyConfig {
         work_queue,
         block_rx,
         safety_guard,
@@ -516,45 +520,46 @@ async fn flashloan_builder_rejects_when_no_provider_available() {
         portfolio,
         gas_oracle,
         price_feed,
-        1,
-        200,
-        12_000,
+        chain_id: 1,
+        max_gas_price_gwei: 200,
+        gas_cap_multiplier_bps: 12_000,
         simulator,
         token_manager,
         stats,
-        bundle_signer.clone(),
+        signer: bundle_signer.clone(),
         nonce_manager,
-        50,
-        10_000,
-        10_000,
-        1_200,
-        1_000,
-        5_000_000_000_000,
-        http.clone(),
-        true,
+        slippage_bps: 50,
+        profit_guard_base_floor_multiplier_bps: 10_000,
+        profit_guard_cost_multiplier_bps: 10_000,
+        profit_guard_min_margin_bps: 1_200,
+        liquidity_ratio_floor_ppm: 1_000,
+        sell_min_native_out_wei: 5_000_000_000_000,
+        http_provider: http.clone(),
+        dry_run: true,
         router_allowlist,
         wrapper_allowlist,
         infra_allowlist,
-        None,
-        500,
-        wrapped_native_for_chain(CHAIN_ETHEREUM),
-        false,
-        Some(executor_addr),
-        0,
-        None,
-        true,
-        vec![],
-        None,
+        router_discovery: None,
+        skip_log_every: 500,
+        wrapped_native: wrapped_native_for_chain(CHAIN_ETHEREUM),
+        allow_non_wrapped_swaps: false,
+        executor: Some(executor_addr),
+        executor_bribe_bps: 0,
+        executor_bribe_recipient: None,
+        flashloan_enabled: true,
+        flashloan_providers: vec![],
+        aave_pool: None,
         reserve_cache,
-        true,
-        "revm".to_string(),
-        4,
-        tokio_util::sync::CancellationToken::new(),
-        500,
-        60_000,
-        4,
-        false,
-    );
+        sandwich_attacks_enabled: true,
+        simulation_backend: "revm".to_string(),
+        worker_limit: 4,
+        shutdown: tokio_util::sync::CancellationToken::new(),
+        receipt_poll_ms: 500,
+        receipt_timeout_ms: 60_000,
+        receipt_confirm_blocks: 4,
+        emergency_exit_on_unknown_receipt: false,
+        runtime: Default::default(),
+    });
 
     let callbacks = vec![(
         wrapped_native_for_chain(CHAIN_ETHEREUM),

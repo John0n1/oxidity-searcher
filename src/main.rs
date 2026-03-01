@@ -175,7 +175,7 @@ async fn main() -> Result<(), AppError> {
     let wallet_address = wallet_signer.address();
     if wallet_address != settings.wallet_address {
         return Err(AppError::Config(format!(
-            "wallet_address {} does not match wallet_key address {}",
+            "wallet_address {} does not match wallet private key address {}",
             settings.wallet_address, wallet_address
         )));
     }
@@ -192,7 +192,7 @@ async fn main() -> Result<(), AppError> {
             vec![cid_u64]
         } else {
             return Err(AppError::Config(
-                "No chains configured and no http_provider available to auto-detect".into(),
+                "No chains configured and no HTTP_PROVIDER available to auto-detect".into(),
             ));
         }
     } else {

@@ -11,7 +11,7 @@ use oxidity_searcher::core::portfolio::PortfolioManager;
 use oxidity_searcher::core::safety::SafetyGuard;
 use oxidity_searcher::core::simulation::{SimulationBackend, Simulator};
 use oxidity_searcher::core::strategy::{
-    FlashloanProvider, StrategyExecutor, StrategyStats, StrategyWork,
+    FlashloanProvider, StrategyConfig, StrategyExecutor, StrategyStats, StrategyWork,
 };
 use oxidity_searcher::data::db::Database;
 use oxidity_searcher::infrastructure::data::token_manager::TokenManager;
@@ -32,21 +32,21 @@ use url::Url;
 async fn mev_share_v3_pipeline_manual() {
     use std::env;
 
-    let rpc = match env::var("http_provider_1") {
+    let rpc = match env::var("HTTP_PROVIDER_1") {
         Ok(v) => v,
         Err(_) => {
-            eprintln!("skipping: set http_provider_1 / WEBSOCKET_URL_1 (Nethermind/Anvil)");
+            eprintln!("skip: set HTTP_PROVIDER_1 and WEBSOCKET_PROVIDER_1 (Nethermind/Anvil)");
             return;
         }
     };
-    let _ws = match env::var("WEBSOCKET_URL_1") {
+    let _ws = match env::var("WEBSOCKET_PROVIDER_1") {
         Ok(v) => v,
         Err(_) => {
-            eprintln!("skipping: set WEBSOCKET_URL_1 (Nethermind/Anvil)");
+            eprintln!("skip: set WEBSOCKET_PROVIDER_1 (Nethermind/Anvil)");
             return;
         }
     };
-    let wallet_key = env::var("WALLET_KEY").unwrap_or_else(|_| {
+    let wallet_key = env::var("OXIDITY_WALLET_PRIVATE_KEY").unwrap_or_else(|_| {
         // dev key funded by most test nodes; change via env for production‑like runs.
         "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d".to_string()
     });
@@ -100,7 +100,7 @@ async fn mev_share_v3_pipeline_manual() {
         Address::from_str("E592427A0AEce92De3Edee1F18E0157C05861564").expect("router addr");
     router_allowlist.insert(uni_v3_router);
 
-    let exec = StrategyExecutor::new(
+    let exec = StrategyExecutor::from_config(StrategyConfig {
         work_queue,
         block_rx,
         safety_guard,
@@ -110,44 +110,45 @@ async fn mev_share_v3_pipeline_manual() {
         gas_oracle,
         price_feed,
         chain_id,
-        200,
-        12_000,
+        max_gas_price_gwei: 200,
+        gas_cap_multiplier_bps: 12_000,
         simulator,
         token_manager,
-        stats.clone(),
-        signer.clone(),
+        stats: stats.clone(),
+        signer: signer.clone(),
         nonce_manager,
-        50,
-        10_000,
-        10_000,
-        1_200,
-        1_000,
-        5_000_000_000_000,
-        http.clone(),
-        true,
+        slippage_bps: 50,
+        profit_guard_base_floor_multiplier_bps: 10_000,
+        profit_guard_cost_multiplier_bps: 10_000,
+        profit_guard_min_margin_bps: 1_200,
+        liquidity_ratio_floor_ppm: 1_000,
+        sell_min_native_out_wei: 5_000_000_000_000,
+        http_provider: http.clone(),
+        dry_run: true,
         router_allowlist,
         wrapper_allowlist,
         infra_allowlist,
-        None,
-        500,
-        wrapped_native_for_chain(CHAIN_ETHEREUM),
-        false,
-        None,
-        0,
-        None,
-        false,
-        vec![FlashloanProvider::Balancer],
-        None,
+        router_discovery: None,
+        skip_log_every: 500,
+        wrapped_native: wrapped_native_for_chain(CHAIN_ETHEREUM),
+        allow_non_wrapped_swaps: false,
+        executor: None,
+        executor_bribe_bps: 0,
+        executor_bribe_recipient: None,
+        flashloan_enabled: false,
+        flashloan_providers: vec![FlashloanProvider::Balancer],
+        aave_pool: None,
         reserve_cache,
-        true,
-        "revm".to_string(),
-        4,
-        tokio_util::sync::CancellationToken::new(),
-        500,
-        60_000,
-        4,
-        false,
-    );
+        sandwich_attacks_enabled: true,
+        simulation_backend: "revm".to_string(),
+        worker_limit: 4,
+        shutdown: tokio_util::sync::CancellationToken::new(),
+        receipt_poll_ms: 500,
+        receipt_timeout_ms: 60_000,
+        receipt_confirm_blocks: 4,
+        emergency_exit_on_unknown_receipt: false,
+        runtime: Default::default(),
+    });
 
     // Build a simple V3 exactInputSingle payload swapping WETH -> WETH (no-op) for smoke test.
     let params = UniV3Router::ExactInputSingleParams {

@@ -46,8 +46,6 @@ fn chainlink_staleness_threshold_secs(chain_id: u64, symbol: &str) -> u64 {
 
 #[derive(Deserialize, Debug)]
 struct BinanceTicker {
-    #[allow(dead_code)]
-    symbol: String,
     price: String,
 }
 
@@ -101,7 +99,6 @@ pub struct PriceApiKeys {
     pub coingecko: Option<String>,
     pub coinmarketcap: Option<String>,
     pub cryptocompare: Option<String>,
-    pub coindesk: Option<String>,
     pub etherscan: Option<String>,
 }
 
@@ -372,7 +369,7 @@ impl PriceFeed {
             return Ok(q);
         }
 
-        // 8. CryptoCompare public BTC fallback (legacy COINDESK_API_KEY alias supported)
+        // 8. CryptoCompare public BTC fallback
         if normalized.chainlink_symbol == "BTC"
             && let Some(q) = self.try_cryptocompare_btc_public().await?
         {
@@ -667,11 +664,7 @@ impl PriceFeed {
         if !self.allow("cryptocompare_public", 30).await {
             return Ok(None);
         }
-        let key = self
-            .api_keys
-            .cryptocompare
-            .as_ref()
-            .or(self.api_keys.coindesk.as_ref());
+        let key = self.api_keys.cryptocompare.as_ref();
         let url = if let Some(key) = key {
             format!(
                 "https://min-api.cryptocompare.com/data/price?fsym=BTC&tsyms=USD,JPY,EUR&api_key={key}"

@@ -16,7 +16,7 @@ struct RpcErrorBody {
 }
 
 fn nethermind_http_provider() -> Option<String> {
-    std::env::var("NETHERMIND_http_provider")
+    std::env::var("NETHERMIND_HTTP_PROVIDER")
         .ok()
         .filter(|v| !v.trim().is_empty())
 }
@@ -43,7 +43,7 @@ async fn rpc_call(client: &Client, url: &str, method: &str, params: Value) -> Rp
         .expect("rpc response decode")
 }
 
-fn assert_shape_compatible(method: &str, resp: &RpcResponse) {
+fn assert_shape_conformant(method: &str, resp: &RpcResponse) {
     if let Some(err) = &resp.error {
         let msg = err.message.to_lowercase();
         assert_ne!(
@@ -61,7 +61,7 @@ fn assert_shape_compatible(method: &str, resp: &RpcResponse) {
                 && !msg.contains("missing value for required argument")
                 && !msg.contains("cannot unmarshal")
                 && !msg.contains("invalid argument"),
-            "{method} appears parameter-shape incompatible: code={} message={}",
+            "{method} appears parameter-shape non-conformant: code={} message={}",
             err.code,
             err.message
         );
@@ -76,7 +76,7 @@ fn assert_shape_compatible(method: &str, resp: &RpcResponse) {
 #[tokio::test]
 async fn eth_simulate_v1_shape_matches_nethermind_expectations() {
     let Some(url) = nethermind_http_provider() else {
-        eprintln!("skipping eth_simulateV1 compat test: NETHERMIND_http_provider is not set");
+        eprintln!("skipping eth_simulateV1 conformance test: NETHERMIND_HTTP_PROVIDER is not set");
         return;
     };
     let client = Client::builder()
@@ -89,7 +89,7 @@ async fn eth_simulate_v1_shape_matches_nethermind_expectations() {
     assert_eq!(
         chain_id.as_deref(),
         Some("0x1"),
-        "NETHERMIND_http_provider must point to Ethereum mainnet"
+        "NETHERMIND_HTTP_PROVIDER must point to Ethereum mainnet"
     );
 
     let params = json!([
@@ -113,13 +113,15 @@ async fn eth_simulate_v1_shape_matches_nethermind_expectations() {
     ]);
 
     let resp = rpc_call(&client, &url, "eth_simulateV1", params).await;
-    assert_shape_compatible("eth_simulateV1", &resp);
+    assert_shape_conformant("eth_simulateV1", &resp);
 }
 
 #[tokio::test]
 async fn debug_trace_call_many_shape_matches_nethermind_expectations() {
     let Some(url) = nethermind_http_provider() else {
-        eprintln!("skipping debug_traceCallMany compat test: NETHERMIND_http_provider is not set");
+        eprintln!(
+            "skipping debug_traceCallMany conformance test: NETHERMIND_HTTP_PROVIDER is not set"
+        );
         return;
     };
     let client = Client::builder()
@@ -132,7 +134,7 @@ async fn debug_trace_call_many_shape_matches_nethermind_expectations() {
     assert_eq!(
         chain_id.as_deref(),
         Some("0x1"),
-        "NETHERMIND_http_provider must point to Ethereum mainnet"
+        "NETHERMIND_HTTP_PROVIDER must point to Ethereum mainnet"
     );
 
     let params = json!([
@@ -152,5 +154,5 @@ async fn debug_trace_call_many_shape_matches_nethermind_expectations() {
     ]);
 
     let resp = rpc_call(&client, &url, "debug_traceCallMany", params).await;
-    assert_shape_compatible("debug_traceCallMany", &resp);
+    assert_shape_conformant("debug_traceCallMany", &resp);
 }
