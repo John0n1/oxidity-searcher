@@ -85,6 +85,7 @@ pub struct GlobalSettings {
     pub tokenlist_path: Option<String>,
     pub address_registry_path: Option<String>,
     pub data_dir: Option<String>,
+    pub global_paths_path: Option<String>,
     #[serde(default = "default_metrics_port")]
     pub metrics_port: u16,
     #[serde(default = "default_log_level")]
@@ -656,6 +657,21 @@ struct EnvResolution {
     config_debug: bool,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+struct GlobalPathEntry {
+    enabled: Option<bool>,
+    path: Option<String>,
+    required: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct GlobalPathsManifest {
+    #[allow(dead_code)]
+    version: Option<u32>,
+    #[serde(default)]
+    files: HashMap<String, GlobalPathEntry>,
+}
+
 fn redact_value(raw: &str, redact: bool) -> String {
     if redact {
         if raw.trim().is_empty() {
@@ -680,6 +696,8 @@ fn is_passthrough_env_key(key: &str) -> bool {
         "METRICS_PORT",
         "METRICS_ENABLE_SHUTDOWN",
         "DATA_DIR",
+        "GLOBAL_PATHS_PATH",
+        "GLOBAL_DATA_PATH",
         "TOKENLIST_PATH",
         "ADDRESS_REGISTRY_PATH",
         "PAIRS_PATH",
@@ -1036,13 +1054,76 @@ impl GlobalSettings {
         self.data_dir_value()
     }
 
+    fn global_paths_manifest_path(&self) -> String {
+        let raw = std::env::var("GLOBAL_PATHS_PATH")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                self.global_paths_path
+                    .as_ref()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or_else(|| "data/global_paths.json".to_string());
+        let data_dir = self.data_dir_value();
+        resolve_data_path(&raw, data_dir.as_deref())
+            .to_string_lossy()
+            .to_string()
+    }
+
+    fn load_global_paths_manifest(&self) -> Option<GlobalPathsManifest> {
+        let path = self.global_paths_manifest_path();
+        let p = Path::new(&path);
+        if !p.exists() {
+            return None;
+        }
+        let raw = match fs::read_to_string(p) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    target: "config",
+                    path = %path,
+                    error = %e,
+                    "Failed to read global paths manifest; falling back to explicit/default paths"
+                );
+                return None;
+            }
+        };
+        match serde_json::from_str::<GlobalPathsManifest>(&raw) {
+            Ok(manifest) => Some(manifest),
+            Err(e) => {
+                tracing::warn!(
+                    target: "config",
+                    path = %path,
+                    error = %e,
+                    "Failed to parse global paths manifest; falling back to explicit/default paths"
+                );
+                None
+            }
+        }
+    }
+
+    fn global_path_entry(&self, logical_key: &str) -> Option<GlobalPathEntry> {
+        self.load_global_paths_manifest()
+            .and_then(|m| m.files.get(logical_key).cloned())
+    }
+
+    fn data_file_enabled(&self, logical_key: &str, default: bool) -> bool {
+        self.global_path_entry(logical_key)
+            .and_then(|entry| entry.enabled)
+            .unwrap_or(default)
+    }
+
     fn resolve_path_setting(
         &self,
+        logical_key: &str,
         env_key: &str,
         configured: Option<&str>,
         default_path: &str,
         required: bool,
     ) -> Result<String, AppError> {
+        let manifest_entry = self.global_path_entry(logical_key);
         let raw = std::env::var(env_key)
             .ok()
             .map(|s| s.trim().to_string())
@@ -1053,7 +1134,17 @@ impl GlobalSettings {
                     .filter(|s| !s.is_empty())
                     .map(ToString::to_string)
             })
+            .or_else(|| {
+                manifest_entry
+                    .as_ref()
+                    .and_then(|entry| entry.path.as_ref())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
             .unwrap_or_else(|| default_path.to_string());
+        let required = manifest_entry
+            .and_then(|entry| entry.required)
+            .unwrap_or(required);
         let data_dir = self.data_dir_value();
         let resolved = if required {
             resolve_required_data_path(&raw, data_dir.as_deref())?
@@ -1182,35 +1273,42 @@ impl GlobalSettings {
             .and_then(|m| m.get(&symbol.to_uppercase()).cloned())
     }
 
+    fn global_data_path(&self) -> Result<String, AppError> {
+        self.resolve_path_setting(
+            "global_data",
+            "GLOBAL_DATA_PATH",
+            None,
+            "data/global_data.json",
+            true,
+        )
+    }
+
     pub fn profit_receiver_or_wallet(&self) -> Address {
         self.profit_receiver_address.unwrap_or(self.wallet_address)
     }
 
     pub fn tokenlist_path(&self) -> Result<String, AppError> {
-        self.resolve_path_setting(
-            "TOKENLIST_PATH",
-            self.tokenlist_path.as_deref(),
-            "data/tokenlist.json",
-            true,
-        )
+        self.global_data_path()
+    }
+
+    pub fn tokenlist_enabled(&self) -> bool {
+        self.data_file_enabled("tokenlist", true)
     }
 
     pub fn address_registry_path(&self) -> Result<String, AppError> {
-        self.resolve_path_setting(
-            "ADDRESS_REGISTRY_PATH",
-            self.address_registry_path.as_deref(),
-            "data/address_registry.json",
-            true,
-        )
+        self.global_data_path()
+    }
+
+    pub fn address_registry_enabled(&self) -> bool {
+        self.data_file_enabled("address_registry", true)
     }
 
     pub fn pairs_path(&self) -> Result<String, AppError> {
-        self.resolve_path_setting(
-            "PAIRS_PATH",
-            self.pairs_path.as_deref(),
-            "data/pairs.json",
-            false,
-        )
+        self.global_data_path()
+    }
+
+    pub fn pairs_enabled(&self) -> bool {
+        self.data_file_enabled("pairs", true)
     }
 
     pub fn database_url(&self) -> String {
@@ -1290,6 +1388,7 @@ impl GlobalSettings {
 
     pub fn router_discovery_cache_path(&self) -> Result<String, AppError> {
         self.resolve_path_setting(
+            "router_discovery_cache",
             "ROUTER_DISCOVERY_CACHE_PATH",
             self.router_discovery_cache_path.as_deref(),
             "data/router_discovery_cache.json",
@@ -1422,6 +1521,7 @@ impl GlobalSettings {
         }
 
         if out.is_empty()
+            && self.chainlink_feeds_file_enabled()
             && let Some(map) = load_chainlink_feeds_from_file(
                 &self.chainlink_feeds_path()?,
                 chain_id,
@@ -1450,12 +1550,11 @@ impl GlobalSettings {
     }
 
     pub fn chainlink_feeds_path(&self) -> Result<String, AppError> {
-        self.resolve_path_setting(
-            "CHAINLINK_FEEDS_PATH",
-            self.chainlink_feeds_path.as_deref(),
-            "data/chainlink_feeds.json",
-            false,
-        )
+        self.global_data_path()
+    }
+
+    pub fn chainlink_feeds_file_enabled(&self) -> bool {
+        self.data_file_enabled("chainlink_feeds", true)
     }
 
     pub fn mev_share_relay_url(&self) -> String {
@@ -1769,6 +1868,12 @@ struct ChainlinkFeedEntry {
     address: String,
 }
 
+#[derive(Deserialize, Default)]
+struct GlobalDataChainlinkFeeds {
+    #[serde(default)]
+    chainlink_feeds: Vec<ChainlinkFeedEntry>,
+}
+
 fn alias_base_symbol(base: &str) -> String {
     match base.to_uppercase().as_str() {
         "WETH" => "ETH".to_string(),
@@ -1842,9 +1947,10 @@ fn load_chainlink_feeds_from_file(
     }
 
     let raw = fs::read_to_string(file_path)
-        .map_err(|e| AppError::Config(format!("chainlink_feeds json read failed: {}", e)))?;
-    let entries: Vec<ChainlinkFeedEntry> = serde_json::from_str(&raw)
-        .map_err(|e| AppError::Config(format!("chainlink_feeds json parse failed: {}", e)))?;
+        .map_err(|e| AppError::Config(format!("global_data json read failed: {}", e)))?;
+    let global_data: GlobalDataChainlinkFeeds = serde_json::from_str(&raw)
+        .map_err(|e| AppError::Config(format!("global_data json parse failed: {}", e)))?;
+    let entries = global_data.chainlink_feeds;
     let (normalized_entries, deduped_count) = normalize_chainlink_feed_entries(entries, chain_id)?;
 
     let canonical = constants::default_chainlink_feeds(chain_id);
@@ -1980,7 +2086,7 @@ fn load_chainlink_feeds_from_file(
             tracing::warn!(
                 target: "config",
                 chain_id,
-                "No usable Chainlink feed entries selected from chainlink_feeds file"
+                "No usable Chainlink feed entries selected from global_data.chainlink_feeds"
             );
         }
         return Ok(None);
@@ -2039,6 +2145,7 @@ mod tests {
             tokenlist_path: None,
             address_registry_path: None,
             data_dir: None,
+            global_paths_path: None,
             metrics_port: default_metrics_port(),
             log_level: default_log_level(),
             strategy_enabled: default_true(),
@@ -2393,10 +2500,12 @@ mod tests {
         let tmp =
             std::env::temp_dir().join(format!("chainlink-feeds-test-{}.json", std::process::id()));
         let body = r#"
-[
-  {"base":"ETH","quote":"USD","chainId":1,"address":"0x5147eA642CAEF7BD9c1265AadcA78f997AbB9649"},
-  {"base":"ETH","quote":"USD","chainId":1,"address":"0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"}
-]
+{
+  "chainlink_feeds": [
+    {"base":"ETH","quote":"USD","chainId":1,"address":"0x5147eA642CAEF7BD9c1265AadcA78f997AbB9649"},
+    {"base":"ETH","quote":"USD","chainId":1,"address":"0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"}
+  ]
+}
 "#;
         std::fs::write(&tmp, body).expect("write temp chainlink file");
 
@@ -2420,10 +2529,12 @@ mod tests {
             std::process::id()
         ));
         let body = r#"
-[
-  {"base":"ETH","quote":"USD","chainId":1,"address":"0x5147eA642CAEF7BD9c1265AadcA78f997AbB9649"},
-  {"base":"ETH","quote":"USD","chainId":1,"address":"0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"}
-]
+{
+  "chainlink_feeds": [
+    {"base":"ETH","quote":"USD","chainId":1,"address":"0x5147eA642CAEF7BD9c1265AadcA78f997AbB9649"},
+    {"base":"ETH","quote":"USD","chainId":1,"address":"0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"}
+  ]
+}
 "#;
         std::fs::write(&tmp, body).expect("write temp chainlink file");
 
@@ -2447,10 +2558,12 @@ mod tests {
             std::process::id()
         ));
         let body = r#"
-[
-  {"base":"WETH","quote":"USD","chainId":1,"address":"0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"},
-  {"base":"ETH","quote":"USD","chainId":1,"address":"0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"}
-]
+{
+  "chainlink_feeds": [
+    {"base":"WETH","quote":"USD","chainId":1,"address":"0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"},
+    {"base":"ETH","quote":"USD","chainId":1,"address":"0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"}
+  ]
+}
 "#;
         std::fs::write(&tmp, body).expect("write temp chainlink file");
         let selected = load_chainlink_feeds_from_file(tmp.to_str().expect("utf8 path"), 1, false)
@@ -2469,9 +2582,11 @@ mod tests {
             std::process::id()
         ));
         let body = r#"
-[
-  {"base":"FOO","quote":"ETH","chainId":1,"address":"0x1111111111111111111111111111111111111111"}
-]
+{
+  "chainlink_feeds": [
+    {"base":"FOO","quote":"ETH","chainId":1,"address":"0x1111111111111111111111111111111111111111"}
+  ]
+}
 "#;
         std::fs::write(&tmp, body).expect("write temp chainlink file");
         let selected = load_chainlink_feeds_from_file(tmp.to_str().expect("utf8 path"), 1, false)
@@ -2489,10 +2604,12 @@ mod tests {
             std::process::id()
         ));
         let body = r#"
-[
-  {"base":"FOO","quote":"USD","chainId":1,"address":"0x1111111111111111111111111111111111111111"},
-  {"base":"FOO","quote":"USD","chainId":1,"address":"0x2222222222222222222222222222222222222222"}
-]
+{
+  "chainlink_feeds": [
+    {"base":"FOO","quote":"USD","chainId":1,"address":"0x1111111111111111111111111111111111111111"},
+    {"base":"FOO","quote":"USD","chainId":1,"address":"0x2222222222222222222222222222222222222222"}
+  ]
+}
 "#;
         std::fs::write(&tmp, body).expect("write temp chainlink file");
 
@@ -2709,6 +2826,104 @@ mod tests {
         assert!(!loaded.settings.debug);
 
         std::fs::remove_file(&tmp).ok();
+        restore_env(snapshot);
+    }
+
+    #[test]
+    fn global_paths_manifest_overrides_global_data_path() {
+        let _env_lock = env_lock_guard();
+        let snapshot = stash_env(&["DATA_DIR", "GLOBAL_PATHS_PATH"]);
+        unsafe {
+            std::env::remove_var("DATA_DIR");
+            std::env::remove_var("GLOBAL_PATHS_PATH");
+        }
+
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "global-paths-global-data-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp_dir).expect("create temp dir");
+
+        let global_data_path = tmp_dir.join("custom-global-data.json");
+        std::fs::write(&global_data_path, "{}").expect("write global data");
+        let manifest = serde_json::json!({
+            "version": 1,
+            "files": {
+                "global_data": {
+                    "enabled": true,
+                    "required": true,
+                    "path": "custom-global-data.json"
+                }
+            }
+        });
+        std::fs::write(
+            tmp_dir.join("global_paths.json"),
+            serde_json::to_vec(&manifest).expect("serialize manifest"),
+        )
+        .expect("write manifest");
+
+        let mut settings = base_settings();
+        settings.data_dir = Some(tmp_dir.to_string_lossy().to_string());
+        let resolved = settings.tokenlist_path().expect("resolve tokenlist path");
+        assert_eq!(resolved, global_data_path.to_string_lossy());
+
+        std::fs::remove_file(tmp_dir.join("global_paths.json")).ok();
+        std::fs::remove_file(global_data_path).ok();
+        std::fs::remove_dir_all(tmp_dir).ok();
+        restore_env(snapshot);
+    }
+
+    #[test]
+    fn global_paths_manifest_can_disable_chainlink_file_loading() {
+        let _env_lock = env_lock_guard();
+        let snapshot = stash_env(&["DATA_DIR", "GLOBAL_PATHS_PATH"]);
+        unsafe {
+            std::env::remove_var("DATA_DIR");
+            std::env::remove_var("GLOBAL_PATHS_PATH");
+        }
+
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "global-paths-chainlink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp_dir).expect("create temp dir");
+
+        std::fs::write(tmp_dir.join("broken-chainlink-feeds.json"), "{").expect("write bad json");
+        let manifest = serde_json::json!({
+            "version": 1,
+            "files": {
+                "chainlink_feeds": {
+                    "enabled": false,
+                    "required": false,
+                    "path": "broken-chainlink-feeds.json"
+                }
+            }
+        });
+        std::fs::write(
+            tmp_dir.join("global_paths.json"),
+            serde_json::to_vec(&manifest).expect("serialize manifest"),
+        )
+        .expect("write manifest");
+
+        let mut settings = base_settings();
+        settings.data_dir = Some(tmp_dir.to_string_lossy().to_string());
+        assert!(!settings.chainlink_feeds_file_enabled());
+        let feeds = settings
+            .chainlink_feeds_for_chain(constants::CHAIN_ETHEREUM)
+            .expect("fallback to defaults when file disabled");
+        assert!(!feeds.is_empty());
+
+        std::fs::remove_file(tmp_dir.join("global_paths.json")).ok();
+        std::fs::remove_file(tmp_dir.join("broken-chainlink-feeds.json")).ok();
+        std::fs::remove_dir_all(tmp_dir).ok();
         restore_env(snapshot);
     }
 

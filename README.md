@@ -165,9 +165,8 @@ Provider env key conventions in current code:
 ### Optional Runtime Paths and Persistence
 
 - `DATABASE_URL` (default `sqlite://oxidity_searcher.db`)
-- `TOKENLIST_PATH` (default `data/tokenlist.json`)
-- `ADDRESS_REGISTRY_PATH` (default `data/address_registry.json`)
-- `CHAINLINK_FEEDS_PATH` (default `data/chainlink_feeds.json`)
+- `GLOBAL_PATHS_PATH` (default `data/global_paths.json`)
+- `GLOBAL_DATA_PATH` (default `data/global_data.json`)
 
 ### Optional Relay and Market API Keys
 
@@ -276,11 +275,16 @@ The test suite asserts the endpoint is mainnet (`eth_chainId == 0x1`) and fails 
 
 ## Data Files
 
-- `data/address_registry.json`: known protocol addresses by chain
-- `data/tokenlist.json`: token metadata and wrapped/native hints
-- `data/chainlink_feeds.json`: Chainlink feed candidates/canonical selection source
-- `data/pairs.json`: optional liquidity reserve warmup input
+- `data/global_data.json`: single canonical data source for address registry, token list (including merged MetaMask/contract-map entries), Chainlink feeds, pairs, and executor ABI
+- `data/global_paths.json`: optional manifest for feature toggles and global data path override
 - `data/UnifiedHardenedExecutor.sol`: on-chain executor contract source
+- `data/global_data.json` includes `_notes` with inline section descriptions for maintainers
+
+Rebuild canonical data file after source updates:
+
+```bash
+./scripts/rebuild_global_data.sh
+```
 
 ## Database and Migrations
 
@@ -331,7 +335,7 @@ Metrics server starts only when `METRICS_TOKEN` is non-empty.
 ### `Chainlink feed audit failed (...)`
 
 - Verify node time synchronization and mainnet chain (`chain_id=1`).
-- Check canonical feed selection logs and feed addresses in `data/chainlink_feeds.json`.
+- Check canonical feed selection logs and feed addresses in `data/global_data.json` under `chainlink_feeds`.
 - Understand strictness semantics:
   - `stale_critical > 0` fails even if `strict=false`
   - `strict=true` additionally fails on non-critical stale feeds

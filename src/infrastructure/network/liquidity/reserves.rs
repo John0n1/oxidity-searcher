@@ -114,6 +114,12 @@ struct PairEntryRaw {
     chain_id: Option<u64>,
 }
 
+#[derive(Deserialize)]
+struct GlobalDataPairs {
+    #[serde(default)]
+    pairs: Vec<PairEntryRaw>,
+}
+
 impl ReserveCache {
     pub fn new(http_provider: HttpProvider) -> Self {
         Self {
@@ -353,10 +359,26 @@ impl ReserveCache {
         Some((expected_out, meta.pool_id))
     }
 
+    #[cfg(test)]
     fn parse_pairs_entries(raw: &str, chain_id: u64) -> Result<Vec<PairEntryResolved>, AppError> {
         let entries: Vec<PairEntryRaw> = serde_json::from_str(raw)
-            .map_err(|e| AppError::Config(format!("pairs.json parse failed: {}", e)))?;
+            .map_err(|e| AppError::Config(format!("global_data.pairs parse failed: {}", e)))?;
+        Self::parse_pairs_entries_from_vec(entries, chain_id)
+    }
 
+    fn parse_pairs_entries_from_global_data(
+        raw: &str,
+        chain_id: u64,
+    ) -> Result<Vec<PairEntryResolved>, AppError> {
+        let file: GlobalDataPairs = serde_json::from_str(raw)
+            .map_err(|e| AppError::Config(format!("global_data pairs parse failed: {}", e)))?;
+        Self::parse_pairs_entries_from_vec(file.pairs, chain_id)
+    }
+
+    fn parse_pairs_entries_from_vec(
+        entries: Vec<PairEntryRaw>,
+        chain_id: u64,
+    ) -> Result<Vec<PairEntryResolved>, AppError> {
         let mut out = Vec::new();
         let mut seen_by_key: HashMap<(Address, Address), Vec<PairMetadata>> = HashMap::new();
         for (idx, entry) in entries.into_iter().enumerate() {
@@ -368,15 +390,21 @@ impl ReserveCache {
 
             let pair = Address::from_str(&entry.pair).map_err(|_| {
                 AppError::Config(format!(
-                    "Invalid pair address in pairs.json at index {}",
+                    "Invalid pair address in global_data.pairs at index {}",
                     idx
                 ))
             })?;
             let token0 = Address::from_str(&entry.token0).map_err(|_| {
-                AppError::Config(format!("Invalid token0 in pairs.json at index {}", idx))
+                AppError::Config(format!(
+                    "Invalid token0 in global_data.pairs at index {}",
+                    idx
+                ))
             })?;
             let token1 = Address::from_str(&entry.token1).map_err(|_| {
-                AppError::Config(format!("Invalid token1 in pairs.json at index {}", idx))
+                AppError::Config(format!(
+                    "Invalid token1 in global_data.pairs at index {}",
+                    idx
+                ))
             })?;
             let metadata = PairMetadata {
                 dex: entry
@@ -389,7 +417,10 @@ impl ReserveCache {
                     .map(Address::from_str)
                     .transpose()
                     .map_err(|_| {
-                        AppError::Config(format!("Invalid factory in pairs.json at index {}", idx))
+                        AppError::Config(format!(
+                            "Invalid factory in global_data.pairs at index {}",
+                            idx
+                        ))
                     })?,
                 pool_address: entry
                     .pool_address
@@ -398,7 +429,7 @@ impl ReserveCache {
                     .transpose()
                     .map_err(|_| {
                         AppError::Config(format!(
-                            "Invalid pool_address in pairs.json at index {}",
+                            "Invalid pool_address in global_data.pairs at index {}",
                             idx
                         ))
                     })?,
@@ -414,7 +445,7 @@ impl ReserveCache {
                     pair = %format!("{:#x}", pair),
                     token0 = %format!("{:#x}", token0),
                     token1 = %format!("{:#x}", token1),
-                    "Duplicate pairs.json entry with identical metadata; skipping duplicate"
+                    "Duplicate global_data.pairs entry with identical metadata; skipping duplicate"
                 );
                 continue;
             }
@@ -440,11 +471,11 @@ impl ReserveCache {
         Ok(out)
     }
 
-    /// Optional preload from a JSON file: [{"pair":"0x...","token0":"0x...","token1":"0x..."}]
+    /// Optional preload from global_data.pairs section.
     pub fn load_pairs_from_file(&self, path: &str, chain_id: u64) -> Result<(), AppError> {
         let raw = fs::read_to_string(path)
-            .map_err(|e| AppError::Config(format!("pairs.json read failed: {}", e)))?;
-        let entries = Self::parse_pairs_entries(&raw, chain_id)?;
+            .map_err(|e| AppError::Config(format!("global_data read failed: {}", e)))?;
+        let entries = Self::parse_pairs_entries_from_global_data(&raw, chain_id)?;
 
         for entry in entries {
             let pair = entry.pair;
@@ -473,8 +504,8 @@ impl ReserveCache {
         chain_id: u64,
     ) -> Result<(), AppError> {
         let raw = fs::read_to_string(path)
-            .map_err(|e| AppError::Config(format!("pairs.json read failed: {}", e)))?;
-        let entries = Self::parse_pairs_entries(&raw, chain_id)?;
+            .map_err(|e| AppError::Config(format!("global_data read failed: {}", e)))?;
+        let entries = Self::parse_pairs_entries_from_global_data(&raw, chain_id)?;
 
         let mut kept = 0usize;
         let mut metadata_kept = 0usize;
@@ -496,7 +527,7 @@ impl ReserveCache {
                     pair = %format!("{:#x}", pair),
                     token0 = %format!("{:#x}", token0),
                     token1 = %format!("{:#x}", token1),
-                    "pairs.json entry has missing code; skipping"
+                    "global_data.pairs entry has missing code; skipping"
                 );
                 continue;
             }
@@ -521,7 +552,7 @@ impl ReserveCache {
             target: "reserves",
             kept,
             metadata_kept,
-            "✔ Validated pairs.json entries loaded"
+            "✔ Validated global_data.pairs entries loaded"
         );
         Ok(())
     }

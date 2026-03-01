@@ -54,14 +54,17 @@ lazy_static! {
     // 0.00002 ETH
     pub static ref LOW_BALANCE_THRESHOLD_WEI: U256 = U256::from(20_000_000_000_000u64);
 
+    static ref GLOBAL_DATA_DEFAULTS: GlobalDataFileRaw = {
+        let path = resolve_default_data_file("global_data.json", None);
+        load_global_data_defaults(path.as_path())
+    };
+
     static ref ADDRESS_REGISTRY_DEFAULTS: AddressRegistryDefaults = {
-        let path = resolve_default_data_file("address_registry.json", None);
-        load_address_registry_defaults(path.as_path())
+        load_address_registry_defaults(&GLOBAL_DATA_DEFAULTS.address_registry)
     };
 
     static ref WRAPPED_NATIVE_BY_CHAIN: HashMap<u64, Address> = {
-        let tokenlist = resolve_default_data_file("tokenlist.json", None);
-        let mut merged = load_wrapped_native_from_tokenlist(tokenlist.as_path());
+        let mut merged = load_wrapped_native_from_tokenlist(&GLOBAL_DATA_DEFAULTS.tokenlist);
         // If registry provides a wrapped-native address per chain, prefer it.
         for (chain_id, addr) in ADDRESS_REGISTRY_DEFAULTS.wrapped_native_by_chain.iter() {
             merged.insert(*chain_id, *addr);
@@ -70,8 +73,7 @@ lazy_static! {
     };
 
     static ref NATIVE_SENTINEL_BY_CHAIN: HashMap<u64, Address> = {
-        let tokenlist = resolve_default_data_file("tokenlist.json", None);
-        load_native_sentinel_from_tokenlist(tokenlist.as_path())
+        load_native_sentinel_from_tokenlist(&GLOBAL_DATA_DEFAULTS.tokenlist)
     };
 }
 
@@ -85,13 +87,13 @@ struct AddressRegistryDefaults {
     chainlink_feeds_by_chain: HashMap<u64, HashMap<String, Address>>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, Clone)]
 struct AddressRegistryFileRaw {
     #[serde(default)]
     chains: HashMap<String, AddressRegistryChainRaw>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, Clone)]
 struct AddressRegistryChainRaw {
     #[serde(default)]
     routers: HashMap<String, String>,
@@ -102,7 +104,7 @@ struct AddressRegistryChainRaw {
     chainlink_feeds: HashMap<String, String>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, Clone)]
 struct TokenlistEntryRaw {
     symbol: String,
     #[serde(default)]
@@ -111,28 +113,35 @@ struct TokenlistEntryRaw {
     tags: Vec<String>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct GlobalDataFileRaw {
+    #[serde(default)]
+    address_registry: AddressRegistryFileRaw,
+    #[serde(default)]
+    tokenlist: Vec<TokenlistEntryRaw>,
+}
+
 fn parse_address(raw: &str) -> Option<Address> {
     Address::from_str(raw).ok()
 }
 
-fn load_address_registry_defaults(path: &Path) -> AddressRegistryDefaults {
+fn load_global_data_defaults(path: &Path) -> GlobalDataFileRaw {
     let p = path;
     if !p.exists() {
-        return AddressRegistryDefaults::default();
+        return GlobalDataFileRaw::default();
     }
 
     let raw = match fs::read_to_string(p) {
         Ok(v) => v,
-        Err(_) => return AddressRegistryDefaults::default(),
+        Err(_) => return GlobalDataFileRaw::default(),
     };
-    let parsed: AddressRegistryFileRaw = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => return AddressRegistryDefaults::default(),
-    };
+    serde_json::from_str(&raw).unwrap_or_default()
+}
 
+fn load_address_registry_defaults(parsed: &AddressRegistryFileRaw) -> AddressRegistryDefaults {
     let mut out = AddressRegistryDefaults::default();
 
-    for (chain_raw, chain) in parsed.chains {
+    for (chain_raw, chain) in parsed.chains.clone() {
         let Ok(chain_id) = chain_raw.parse::<u64>() else {
             continue;
         };
@@ -204,23 +213,9 @@ fn native_symbol_match(chain_id: u64, symbol_upper: &str) -> bool {
     }
 }
 
-fn load_wrapped_native_from_tokenlist(path: &Path) -> HashMap<u64, Address> {
-    let p = path;
-    if !p.exists() {
-        return HashMap::new();
-    }
-
-    let raw = match fs::read_to_string(p) {
-        Ok(v) => v,
-        Err(_) => return HashMap::new(),
-    };
-    let entries: Vec<TokenlistEntryRaw> = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => return HashMap::new(),
-    };
-
+fn load_wrapped_native_from_tokenlist(entries: &[TokenlistEntryRaw]) -> HashMap<u64, Address> {
     let mut out = HashMap::new();
-    for entry in entries {
+    for entry in entries.iter().cloned() {
         let symbol_upper = entry.symbol.trim().to_ascii_uppercase();
         for (chain_raw, addr_raw) in entry.addresses {
             let Ok(chain_id) = chain_raw.parse::<u64>() else {
@@ -239,23 +234,9 @@ fn load_wrapped_native_from_tokenlist(path: &Path) -> HashMap<u64, Address> {
     out
 }
 
-fn load_native_sentinel_from_tokenlist(path: &Path) -> HashMap<u64, Address> {
-    let p = path;
-    if !p.exists() {
-        return HashMap::new();
-    }
-
-    let raw = match fs::read_to_string(p) {
-        Ok(v) => v,
-        Err(_) => return HashMap::new(),
-    };
-    let entries: Vec<TokenlistEntryRaw> = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => return HashMap::new(),
-    };
-
+fn load_native_sentinel_from_tokenlist(entries: &[TokenlistEntryRaw]) -> HashMap<u64, Address> {
     let mut out = HashMap::new();
-    for entry in entries {
+    for entry in entries.iter().cloned() {
         let symbol_upper = entry.symbol.trim().to_ascii_uppercase();
         let has_native_tag = entry
             .tags

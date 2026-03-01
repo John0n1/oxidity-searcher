@@ -207,19 +207,37 @@ async fn main() -> Result<(), AppError> {
     let strategy_enabled_flag =
         !cli.no_strategy && cli.strategy_enabled && settings.strategy_enabled;
     let worker_limit = settings.strategy_worker_limit();
-    let tokenlist_path = settings.tokenlist_path()?;
-    let pairs_path = settings.pairs_path()?;
-    let address_registry_path = settings.address_registry_path()?;
-    let token_manager = Arc::new(
-        TokenManager::load_from_file(&tokenlist_path).unwrap_or_else(|e| {
+    let tokenlist_path = if settings.tokenlist_enabled() {
+        Some(settings.tokenlist_path()?)
+    } else {
+        None
+    };
+    let pairs_path = if settings.pairs_enabled() {
+        Some(settings.pairs_path()?)
+    } else {
+        None
+    };
+    let address_registry_path = if settings.address_registry_enabled() {
+        Some(settings.address_registry_path()?)
+    } else {
+        None
+    };
+    let token_manager = if let Some(path) = tokenlist_path.as_deref() {
+        Arc::new(TokenManager::load_from_file(path).unwrap_or_else(|e| {
             tracing::warn!(
                 "TokenManager: failed to load {}; defaulting to empty list: {}",
-                tokenlist_path,
+                path,
                 e
             );
             TokenManager::default()
-        }),
-    );
+        }))
+    } else {
+        tracing::warn!(
+            target: "config",
+            "tokenlist disabled by global_paths.json; strategy will use empty token metadata"
+        );
+        Arc::new(TokenManager::default())
+    };
     let mut engine_tasks = Vec::new();
     let relay_http_client = reqwest::Client::builder()
         .timeout(Duration::from_millis(2_500))

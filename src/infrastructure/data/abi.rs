@@ -3,12 +3,20 @@
 
 use crate::common::error::AppError;
 use alloy_json_abi::JsonAbi;
+use serde::Deserialize;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
 pub struct AbiRegistry {
     abis: HashMap<String, JsonAbi>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct GlobalDataAbiFile {
+    #[serde(default)]
+    executor_abi: Vec<Value>,
 }
 
 impl Default for AbiRegistry {
@@ -34,29 +42,35 @@ impl AbiRegistry {
             )));
         }
 
-        for entry in fs::read_dir(path).map_err(|e| AppError::Initialization(e.to_string()))? {
-            let entry = entry.map_err(|e| AppError::Initialization(e.to_string()))?;
-            let path = entry.path();
-
-            if path.extension().and_then(|s| s.to_str()) == Some("json") {
-                let file_stem = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-
-                let file_content = fs::read_to_string(&path).map_err(|e| {
-                    AppError::Config(format!("Failed to read ABI {}: {}", file_stem, e))
-                })?;
-
-                let abi: JsonAbi = serde_json::from_str(&file_content).map_err(|e| {
-                    AppError::Config(format!("Failed to parse ABI {}: {}", file_stem, e))
-                })?;
-
-                tracing::info!("Loaded ABI: {}", file_stem);
-                self.abis.insert(file_stem, abi);
-            }
+        let global_data_path = path.join("global_data.json");
+        let raw = fs::read_to_string(&global_data_path).map_err(|e| {
+            AppError::Config(format!(
+                "Failed to read ABI source {}: {}",
+                global_data_path.display(),
+                e
+            ))
+        })?;
+        let parsed: GlobalDataAbiFile = serde_json::from_str(&raw).map_err(|e| {
+            AppError::Config(format!(
+                "Failed to parse ABI source {}: {}",
+                global_data_path.display(),
+                e
+            ))
+        })?;
+        if parsed.executor_abi.is_empty() {
+            return Err(AppError::Config(format!(
+                "Missing executor_abi in {}",
+                global_data_path.display()
+            )));
         }
+        let abi_raw = serde_json::to_string(&parsed.executor_abi)
+            .map_err(|e| AppError::Config(format!("Failed to serialize executor_abi: {}", e)))?;
+        let abi: JsonAbi = serde_json::from_str(&abi_raw)
+            .map_err(|e| AppError::Config(format!("Failed to parse executor_abi: {}", e)))?;
+        self.abis
+            .insert("UnifiedHardenedExecutor_abi".to_string(), abi.clone());
+        self.abis.insert("UnifiedHardenedExecutor".to_string(), abi);
+        tracing::info!("Loaded ABI: UnifiedHardenedExecutor from global_data.json");
         Ok(())
     }
 

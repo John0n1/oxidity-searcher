@@ -1,16 +1,14 @@
-# Local configs and secrets
+# Development build, config and artifacts
+
+target/
+.vscode/
+.venv/
+tmp/
 config.toml
 .env
 .cargo
-.venv
-target/
-dist/
-.DS_Store
-*.log
-.vscode/
 *.db
-scripts/
-installer/
-assets/
-*.svg
-website/
+*.ipc
+
+
+

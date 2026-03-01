@@ -105,8 +105,8 @@ pub struct EngineConfig {
     pub bundle_use_replacement_uuid: bool,
     pub bundle_cancel_previous: bool,
     pub worker_limit: usize,
-    pub address_registry_path: String,
-    pub pairs_path: String,
+    pub address_registry_path: Option<String>,
+    pub pairs_path: Option<String>,
     pub receipt_poll_ms: u64,
     pub receipt_timeout_ms: u64,
     pub receipt_confirm_blocks: u64,
@@ -174,8 +174,8 @@ pub struct Engine {
     bundle_use_replacement_uuid: bool,
     bundle_cancel_previous: bool,
     worker_limit: usize,
-    address_registry_path: String,
-    pairs_path: String,
+    address_registry_path: Option<String>,
+    pairs_path: Option<String>,
     receipt_poll_ms: u64,
     receipt_timeout_ms: u64,
     receipt_confirm_blocks: u64,
@@ -732,16 +732,18 @@ impl Engine {
             self.bundle_target_blocks,
         ));
         let reserve_cache = Arc::new(ReserveCache::new(self.http_provider.clone()));
-        if Path::new(&self.pairs_path).exists() {
+        if let Some(pairs_path) = self.pairs_path.as_deref()
+            && Path::new(pairs_path).exists()
+        {
             if let Err(e) = reserve_cache
-                .load_pairs_from_file_validated(
-                    &self.pairs_path,
-                    &self.http_provider,
-                    self.chain_id,
-                )
+                .load_pairs_from_file_validated(pairs_path, &self.http_provider, self.chain_id)
                 .await
             {
-                tracing::warn!(target: "reserves", error=%e, "Failed to preload pairs.json");
+                tracing::warn!(
+                    target: "reserves",
+                    error=%e,
+                    "Failed to preload global_data.pairs"
+                );
             } else if let Err(e) = reserve_cache.warmup_v2_reserves(1_000).await {
                 tracing::warn!(
                     target: "reserves",
@@ -753,51 +755,58 @@ impl Engine {
 
         let mut aave_pool = self.aave_pool;
         // Address registry: validate and apply optional protocol addresses.
-        if let Ok(registry) = AddressRegistry::load_from_file(&self.address_registry_path) {
-            if let Some(chain_reg) = registry.chain(self.chain_id) {
-                let chain_reg = chain_reg.validate_with_provider(&self.http_provider).await;
-                for (name, addr) in chain_reg.routers {
-                    match classify_allowlist_entry(&name) {
-                        crate::services::strategy::strategy::AllowlistCategory::Routers => {
-                            self.router_allowlist.insert(addr);
-                        }
-                        crate::services::strategy::strategy::AllowlistCategory::Wrappers => {
-                            self.wrapper_allowlist.insert(addr);
-                        }
-                        crate::services::strategy::strategy::AllowlistCategory::Infra => {
-                            self.infra_allowlist.insert(addr);
+        if let Some(address_registry_path) = self.address_registry_path.as_deref() {
+            if let Ok(registry) = AddressRegistry::load_from_file(address_registry_path) {
+                if let Some(chain_reg) = registry.chain(self.chain_id) {
+                    let chain_reg = chain_reg.validate_with_provider(&self.http_provider).await;
+                    for (name, addr) in chain_reg.routers {
+                        match classify_allowlist_entry(&name) {
+                            crate::services::strategy::strategy::AllowlistCategory::Routers => {
+                                self.router_allowlist.insert(addr);
+                            }
+                            crate::services::strategy::strategy::AllowlistCategory::Wrappers => {
+                                self.wrapper_allowlist.insert(addr);
+                            }
+                            crate::services::strategy::strategy::AllowlistCategory::Infra => {
+                                self.infra_allowlist.insert(addr);
+                            }
                         }
                     }
+                    if let Some(vault) = chain_reg.balancer_vault {
+                        reserve_cache.set_balancer_vault(vault).await;
+                    }
+                    for addr in chain_reg.curve_registries {
+                        reserve_cache.add_curve_registry(addr);
+                    }
+                    for addr in chain_reg.curve_meta_registries {
+                        reserve_cache.add_curve_meta_registry(addr);
+                    }
+                    for addr in chain_reg.curve_crypto_registries {
+                        reserve_cache.add_curve_crypto_registry(addr);
+                    }
+                    if let Some(aave_pool_reg) = chain_reg.aave_pool
+                        && aave_pool.is_none()
+                    {
+                        tracing::info!(
+                            target: "registry",
+                            chain_id = self.chain_id,
+                            pool = %format!("{:#x}", aave_pool_reg),
+                            "Using Aave pool from registry"
+                        );
+                        aave_pool = Some(aave_pool_reg);
+                    }
                 }
-                if let Some(vault) = chain_reg.balancer_vault {
-                    reserve_cache.set_balancer_vault(vault).await;
-                }
-                for addr in chain_reg.curve_registries {
-                    reserve_cache.add_curve_registry(addr);
-                }
-                for addr in chain_reg.curve_meta_registries {
-                    reserve_cache.add_curve_meta_registry(addr);
-                }
-                for addr in chain_reg.curve_crypto_registries {
-                    reserve_cache.add_curve_crypto_registry(addr);
-                }
-                if let Some(aave_pool_reg) = chain_reg.aave_pool
-                    && aave_pool.is_none()
-                {
-                    tracing::info!(
-                        target: "registry",
-                        chain_id = self.chain_id,
-                        pool = %format!("{:#x}", aave_pool_reg),
-                        "Using Aave pool from registry"
-                    );
-                    aave_pool = Some(aave_pool_reg);
-                }
+            } else {
+                tracing::warn!(
+                    target: "registry",
+                    path = %address_registry_path,
+                    "Address registry not loaded; proceeding with defaults"
+                );
             }
         } else {
-            tracing::warn!(
+            tracing::info!(
                 target: "registry",
-                path = %self.address_registry_path,
-                "Address registry not loaded; proceeding with defaults"
+                "Address registry disabled by global paths manifest; proceeding with defaults"
             );
         }
 

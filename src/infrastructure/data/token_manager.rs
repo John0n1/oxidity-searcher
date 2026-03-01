@@ -3,7 +3,6 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
 
 use alloy::primitives::Address;
 use alloy::providers::Provider;
@@ -38,28 +37,9 @@ struct TokenEntry {
 }
 
 #[derive(Deserialize)]
-struct MetaMaskTokenListFile {
+struct GlobalDataTokenSources {
     #[serde(default)]
-    tokens: Vec<MetaMaskTokenEntry>,
-}
-
-#[derive(Deserialize)]
-struct MetaMaskTokenEntry {
-    #[serde(rename = "chainId")]
-    chain_id: u64,
-    address: String,
-    symbol: String,
-    decimals: u8,
-}
-
-#[derive(Deserialize)]
-struct ContractMapEntry {
-    symbol: String,
-    decimals: u8,
-    #[serde(default)]
-    erc20: bool,
-    #[serde(default, rename = "chainId")]
-    chain_id: Option<u64>,
+    tokenlist: Vec<TokenEntry>,
 }
 
 impl TokenManager {
@@ -69,131 +49,12 @@ impl TokenManager {
             .any(|tag| tag.trim().eq_ignore_ascii_case("native"))
     }
 
-    fn insert_if_missing(
-        tokens_by_chain: &mut HashMap<u64, HashMap<Address, TokenInfo>>,
-        chain_id: u64,
-        address: Address,
-        symbol: String,
-        decimals: u8,
-        tags: Vec<String>,
-    ) {
-        tokens_by_chain
-            .entry(chain_id)
-            .or_default()
-            .entry(address)
-            .or_insert(TokenInfo {
-                symbol,
-                decimals,
-                tags,
-            });
-    }
-
-    fn merge_metamask_uniswap_tokenlist(
-        tokens_by_chain: &mut HashMap<u64, HashMap<Address, TokenInfo>>,
-        tokenlist_path: &Path,
-    ) {
-        let Some(parent) = tokenlist_path.parent() else {
-            return;
-        };
-        let path = parent.join("metamask-uniswap-tokenlist.json");
-        if !path.exists() {
-            return;
-        }
-        let raw = match fs::read_to_string(&path) {
-            Ok(raw) => raw,
-            Err(e) => {
-                tracing::warn!(
-                    target: "token_manager",
-                    path = %path.display(),
-                    error = %e,
-                    "Failed to read supplemental metamask token list"
-                );
-                return;
-            }
-        };
-        let parsed: MetaMaskTokenListFile = match serde_json::from_str(&raw) {
-            Ok(parsed) => parsed,
-            Err(e) => {
-                tracing::warn!(
-                    target: "token_manager",
-                    path = %path.display(),
-                    error = %e,
-                    "Failed to parse supplemental metamask token list"
-                );
-                return;
-            }
-        };
-        for token in parsed.tokens {
-            if let Ok(address) = token.address.parse::<Address>() {
-                Self::insert_if_missing(
-                    tokens_by_chain,
-                    token.chain_id,
-                    address,
-                    token.symbol,
-                    token.decimals,
-                    vec!["supplemental".to_string(), "metamask_uniswap".to_string()],
-                );
-            }
-        }
-    }
-
-    fn merge_contract_map(
-        tokens_by_chain: &mut HashMap<u64, HashMap<Address, TokenInfo>>,
-        tokenlist_path: &Path,
-    ) {
-        let Some(parent) = tokenlist_path.parent() else {
-            return;
-        };
-        let path = parent.join("contract-map.json");
-        if !path.exists() {
-            return;
-        }
-        let raw = match fs::read_to_string(&path) {
-            Ok(raw) => raw,
-            Err(e) => {
-                tracing::warn!(
-                    target: "token_manager",
-                    path = %path.display(),
-                    error = %e,
-                    "Failed to read supplemental contract map"
-                );
-                return;
-            }
-        };
-        let parsed: HashMap<String, ContractMapEntry> = match serde_json::from_str(&raw) {
-            Ok(parsed) => parsed,
-            Err(e) => {
-                tracing::warn!(
-                    target: "token_manager",
-                    path = %path.display(),
-                    error = %e,
-                    "Failed to parse supplemental contract map"
-                );
-                return;
-            }
-        };
-        for (address_raw, token) in parsed {
-            if !token.erc20 {
-                continue;
-            }
-            if let Ok(address) = address_raw.parse::<Address>() {
-                Self::insert_if_missing(
-                    tokens_by_chain,
-                    token.chain_id.unwrap_or(1),
-                    address,
-                    token.symbol,
-                    token.decimals,
-                    vec!["supplemental".to_string(), "contract_map".to_string()],
-                );
-            }
-        }
-    }
-
     pub fn load_from_file(path: &str) -> Result<Self, AppError> {
         let raw = fs::read_to_string(path)
-            .map_err(|e| AppError::Config(format!("Failed to read tokenlist {path}: {e}")))?;
-        let entries: Vec<TokenEntry> = serde_json::from_str(&raw)
-            .map_err(|e| AppError::Config(format!("Invalid tokenlist JSON {path}: {e}")))?;
+            .map_err(|e| AppError::Config(format!("Failed to read global_data {path}: {e}")))?;
+        let sources: GlobalDataTokenSources = serde_json::from_str(&raw)
+            .map_err(|e| AppError::Config(format!("Invalid global_data JSON {path}: {e}")))?;
+        let entries = sources.tokenlist;
 
         let mut tokens_by_chain: HashMap<u64, HashMap<Address, TokenInfo>> = HashMap::new();
 
@@ -202,21 +63,18 @@ impl TokenManager {
                 if let Ok(chain_id) = chain_str.parse::<u64>()
                     && let Ok(addr) = addr_str.parse::<Address>()
                 {
-                    tokens_by_chain.entry(chain_id).or_default().insert(
-                        addr,
-                        TokenInfo {
+                    tokens_by_chain
+                        .entry(chain_id)
+                        .or_default()
+                        .entry(addr)
+                        .or_insert(TokenInfo {
                             symbol: entry.symbol.clone(),
                             decimals: entry.decimals,
                             tags: entry.tags.clone(),
-                        },
-                    );
+                        });
                 }
             }
         }
-
-        let tokenlist_path = Path::new(path);
-        Self::merge_metamask_uniswap_tokenlist(&mut tokens_by_chain, tokenlist_path);
-        Self::merge_contract_map(&mut tokens_by_chain, tokenlist_path);
 
         Ok(Self {
             tokens_by_chain,
@@ -316,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn load_from_file_merges_supplemental_lists_without_overriding_primary() {
+    fn load_from_file_uses_merged_tokenlist_without_overriding_first_entry() {
         use std::fs;
         use std::time::{SystemTime, UNIX_EPOCH};
         let nanos = SystemTime::now()
@@ -329,40 +187,42 @@ mod tests {
             nanos
         ));
         fs::create_dir_all(&base).expect("tmp dir");
-        let tokenlist = base.join("tokenlist.json");
-        let metamask = base.join("metamask-uniswap-tokenlist.json");
-        let contract_map = base.join("contract-map.json");
-
-        let tokenlist_body = r#"
-[
-  {
-    "symbol":"MAIN",
-    "decimals":8,
-    "tags":["core"],
-    "addresses":{"1":"0x0000000000000000000000000000000000000001"}
-  }
-]
-"#;
-        let metamask_body = r#"
+        let global_data = base.join("global_data.json");
+        let global_data_body = r#"
 {
-  "tokens":[
-    {"chainId":1,"address":"0x0000000000000000000000000000000000000001","symbol":"MM_DUP","decimals":18},
-    {"chainId":1,"address":"0x0000000000000000000000000000000000000002","symbol":"MM_NEW","decimals":18}
+  "tokenlist": [
+    {
+      "symbol": "MAIN",
+      "decimals": 8,
+      "tags": ["core"],
+      "addresses": {"1": "0x0000000000000000000000000000000000000001"}
+    }
+    ,
+    {
+      "symbol": "MM_NEW",
+      "decimals": 18,
+      "tags": ["supplemental", "metamask_uniswap"],
+      "addresses": {"1": "0x0000000000000000000000000000000000000002"}
+    },
+    {
+      "symbol": "CM_NEW",
+      "decimals": 6,
+      "tags": ["supplemental", "contract_map"],
+      "addresses": {"1": "0x0000000000000000000000000000000000000003"}
+    },
+    {
+      "symbol": "DUP_IGNORED",
+      "decimals": 18,
+      "tags": ["supplemental"],
+      "addresses": {"1": "0x0000000000000000000000000000000000000001"}
+    }
   ]
 }
 "#;
-        let contract_map_body = r#"
-{
-  "0x0000000000000000000000000000000000000003":{"symbol":"CM_NEW","decimals":6,"erc20":true},
-  "0x0000000000000000000000000000000000000004":{"symbol":"CM_NFT","decimals":0,"erc20":false}
-}
-"#;
-        fs::write(&tokenlist, tokenlist_body).expect("tokenlist write");
-        fs::write(&metamask, metamask_body).expect("metamask write");
-        fs::write(&contract_map, contract_map_body).expect("contract map write");
+        fs::write(&global_data, global_data_body).expect("global data write");
 
         let mgr =
-            TokenManager::load_from_file(tokenlist.to_str().expect("utf8 path")).expect("load");
+            TokenManager::load_from_file(global_data.to_str().expect("utf8 path")).expect("load");
 
         let info_primary = mgr
             .info(
@@ -397,19 +257,7 @@ mod tests {
         assert_eq!(info_contract.symbol, "CM_NEW");
         assert_eq!(info_contract.decimals, 6);
 
-        assert!(
-            mgr.info(
-                1,
-                "0x0000000000000000000000000000000000000004"
-                    .parse()
-                    .expect("addr")
-            )
-            .is_none()
-        );
-
-        let _ = fs::remove_file(tokenlist);
-        let _ = fs::remove_file(metamask);
-        let _ = fs::remove_file(contract_map);
+        let _ = fs::remove_file(global_data);
         let _ = fs::remove_dir(base);
     }
 }

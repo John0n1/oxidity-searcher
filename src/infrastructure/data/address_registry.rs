@@ -78,6 +78,11 @@ struct AddressRegistryFile {
 }
 
 #[derive(Deserialize, Debug)]
+struct GlobalDataAddressRegistry {
+    address_registry: AddressRegistryFile,
+}
+
+#[derive(Deserialize, Debug)]
 struct ChainRegistryFile {
     #[serde(default)]
     routers: HashMap<String, String>,
@@ -107,17 +112,21 @@ impl AddressRegistry {
         let p = Path::new(path);
         if !p.exists() {
             return Err(AppError::Config(format!(
-                "Address registry not found: {}",
+                "Global data file not found: {}",
                 path
             )));
         }
         let raw = fs::read_to_string(p)
-            .map_err(|e| AppError::Config(format!("Failed to read registry {}: {e}", path)))?;
-        let file: AddressRegistryFile = serde_json::from_str(&raw)
-            .map_err(|e| AppError::Config(format!("Failed to parse registry {}: {e}", path)))?;
+            .map_err(|e| AppError::Config(format!("Failed to read global_data {}: {e}", path)))?;
+        let file: GlobalDataAddressRegistry = serde_json::from_str(&raw).map_err(|e| {
+            AppError::Config(format!(
+                "Failed to parse address_registry from {}: {e}",
+                path
+            ))
+        })?;
 
         let mut chains: HashMap<u64, ChainRegistry> = HashMap::new();
-        for (chain_str, c) in file.chains {
+        for (chain_str, c) in file.address_registry.chains {
             let Ok(chain_id) = chain_str.parse::<u64>() else {
                 continue;
             };
