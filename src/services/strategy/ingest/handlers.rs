@@ -201,19 +201,21 @@ impl StrategyExecutor {
                 continue;
             };
 
-            let needed_nonces = 1u64 + parts.approvals.len() as u64;
-            let lease = self.lease_nonces(needed_nonces).await?;
             let mut approvals = parts.approvals;
-            let backrun = parts.backrun;
-            let mut main_request = parts
-                .executor_request
-                .clone()
-                .unwrap_or_else(|| backrun.request.clone());
-            Self::apply_nonce_plan(
+            if parts.executor_request.is_some() {
+                approvals.clear();
+            }
+            let needed_nonces = 1u64 + approvals.len() as u64;
+            let lease = self.lease_nonces(needed_nonces).await?;
+            let mut front_run = None;
+            let mut backrun = parts.backrun;
+            let mut executor_request = parts.executor_request;
+            let main_request = Self::apply_nonce_plan_with_backrun(
                 &lease,
-                &mut None,
+                &mut front_run,
                 approvals.as_mut_slice(),
-                &mut main_request,
+                &mut backrun,
+                &mut executor_request,
             )?;
 
             let mut bundle_requests = Vec::new();
@@ -1140,33 +1142,25 @@ impl StrategyExecutor {
             None => return Ok(None),
         };
 
-        let needed_nonces = 1u64 + parts.front_run.is_some() as u64 + parts.approvals.len() as u64;
-        let lease = self.lease_nonces(needed_nonces).await?;
-
         let mut front_run = parts.front_run;
         let mut approvals = parts.approvals;
         let mut backrun = parts.backrun;
         let mut executor_request = parts.executor_request;
-        let mut main_request = executor_request
-            .clone()
-            .unwrap_or_else(|| backrun.request.clone());
 
         // If we're wrapping everything inside the executor, drop standalone approval txes to
         // avoid double approvals (they are already encoded in the executor payload).
         if executor_request.is_some() {
             approvals.clear();
         }
-
-        Self::apply_nonce_plan(
+        let needed_nonces = 1u64 + front_run.is_some() as u64 + approvals.len() as u64;
+        let lease = self.lease_nonces(needed_nonces).await?;
+        let main_request = Self::apply_nonce_plan_with_backrun(
             &lease,
             &mut front_run,
             approvals.as_mut_slice(),
-            &mut main_request,
+            &mut backrun,
+            &mut executor_request,
         )?;
-        if let Some(exec) = executor_request.as_mut() {
-            exec.nonce = main_request.nonce;
-        }
-        backrun.request.nonce = main_request.nonce;
 
         let victim_request = tx.clone().into_request();
 
@@ -1515,20 +1509,13 @@ impl StrategyExecutor {
         let mut approvals: Vec<ApproveTx> = Vec::new();
         let mut backrun = parts.backrun;
         let mut executor_request = parts.executor_request;
-        let mut main_request = executor_request
-            .clone()
-            .unwrap_or_else(|| backrun.request.clone());
-
-        Self::apply_nonce_plan(
+        let main_request = Self::apply_nonce_plan_with_backrun(
             &lease,
             &mut front_run,
             approvals.as_mut_slice(),
-            &mut main_request,
+            &mut backrun,
+            &mut executor_request,
         )?;
-        if let Some(exec) = executor_request.as_mut() {
-            exec.nonce = main_request.nonce;
-        }
-        backrun.request.nonce = main_request.nonce;
 
         let max_fee_hint = hint
             .max_fee_per_gas
@@ -2419,6 +2406,24 @@ impl StrategyExecutor {
         Ok(())
     }
 
+    fn apply_nonce_plan_with_backrun(
+        lease: &NonceLease,
+        front_run: &mut Option<FrontRunTx>,
+        approvals: &mut [ApproveTx],
+        backrun: &mut BackrunTx,
+        executor_request: &mut Option<TransactionRequest>,
+    ) -> Result<TransactionRequest, AppError> {
+        let mut main = executor_request
+            .clone()
+            .unwrap_or_else(|| backrun.request.clone());
+        Self::apply_nonce_plan(lease, front_run, approvals, &mut main)?;
+        if let Some(exec) = executor_request.as_mut() {
+            exec.nonce = main.nonce;
+        }
+        backrun.request.nonce = main.nonce;
+        Ok(main)
+    }
+
     async fn simulate_and_score(
         &self,
         mut bundle_requests: Vec<TransactionRequest>,
@@ -2628,7 +2633,6 @@ impl StrategyExecutor {
             .unwrap_or(backrun.value)
             .max(backrun.value);
         let principal_wei = backrun_value.saturating_add(attack_value_eth);
-        let total_eth_in = principal_wei.saturating_add(bribe_wei);
         let upfront_need = Self::required_wallet_upfront_wei(
             backrun.uses_flashloan,
             principal_wei,
@@ -2658,7 +2662,8 @@ impl StrategyExecutor {
             );
             return Ok(None);
         };
-        let gross_profit_wei = native_out.saturating_sub(total_eth_in);
+        // Gross profit excludes execution costs; net profit applies gas/bribe/premium exactly once.
+        let gross_profit_wei = native_out.saturating_sub(principal_wei);
 
         if gas_cost_wei > gross_profit_wei {
             self.log_skip(SkipReason::ProfitOrGasGuard, "Gas > Gross Profit");

@@ -384,9 +384,14 @@ impl PriceFeed {
             return Ok(stale);
         }
 
+        tracing::warn!(
+            target: "price_feed",
+            symbol = %normalized.cache_key,
+            "Price lookup exhausted all providers without a usable quote"
+        );
         Err(AppError::ApiCall {
-            provider: "Binance".into(),
-            status: 429,
+            provider: format!("price_feed_all_providers:{}", normalized.cache_key),
+            status: 503,
         })
     }
 

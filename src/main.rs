@@ -181,9 +181,10 @@ async fn main() -> Result<(), AppError> {
     }
 
     // Auto-detect chain if not explicitly configured
+    let global_provider_jwt_secret_path = settings.provider_jwt_secret_path();
     let chains: Vec<u64> = if settings.chains.is_empty() {
         if let Some(url) = settings.primary_http_provider() {
-            let http = ConnectionFactory::http(&url)?;
+            let http = ConnectionFactory::http(&url, global_provider_jwt_secret_path.as_deref())?;
             let cid_u64: u64 = http
                 .get_chain_id()
                 .await
@@ -246,6 +247,7 @@ async fn main() -> Result<(), AppError> {
 
     for (idx, chain_id) in chains.iter().copied().enumerate() {
         let http_provider_url = settings.get_http_provider(chain_id)?;
+        let provider_jwt_secret_path = settings.get_provider_jwt_secret_path(chain_id);
         let ipc_provider = settings.get_ipc_provider(chain_id);
         let (websocket_provider, http_provider) = if let Some(ipc_provider) = ipc_provider {
             let ipc = ConnectionFactory::ipc(&ipc_provider).await.map_err(|e| {
@@ -254,7 +256,9 @@ async fn main() -> Result<(), AppError> {
                 ))
             })?;
             let websocket_provider = match settings.get_websocket_provider(chain_id) {
-                Ok(url) => ConnectionFactory::ws(&url).await.unwrap_or_else(|e| {
+                Ok(url) => ConnectionFactory::ws(&url, provider_jwt_secret_path.as_deref())
+                    .await
+                    .unwrap_or_else(|e| {
                     tracing::warn!(target: "rpc", chain_id, error=%e, "WS unavailable, using IPC for streaming");
                     ipc.clone()
                 }),
@@ -278,6 +282,7 @@ async fn main() -> Result<(), AppError> {
                 None,
                 websocket_provider_url.as_deref(),
                 &http_provider_url,
+                provider_jwt_secret_path.as_deref(),
             )
             .await?
         };

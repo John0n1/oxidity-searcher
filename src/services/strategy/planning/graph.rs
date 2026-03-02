@@ -72,7 +72,7 @@ impl QuoteGraph {
             score: U256::ZERO,
         }];
 
-        let mut solutions: Vec<RoutePlan> = Vec::new();
+        let mut solutions: Vec<(U256, RoutePlan)> = Vec::new();
 
         for _depth in 0..opts.max_hops {
             let mut next: Vec<Path> = Vec::new();
@@ -140,10 +140,7 @@ impl QuoteGraph {
 
                     if edge.token_out == target {
                         if let Some(plan) = Self::to_plan(&new_path.legs) {
-                            solutions.push(plan);
-                            if solutions.len() >= k {
-                                return solutions;
-                            }
+                            solutions.push((new_path.score, plan));
                         }
                     } else {
                         next.push(new_path);
@@ -162,7 +159,11 @@ impl QuoteGraph {
             }
         }
 
-        solutions
+        solutions.sort_by(|a, b| b.0.cmp(&a.0));
+        if solutions.len() > k {
+            solutions.truncate(k);
+        }
+        solutions.into_iter().map(|(_, plan)| plan).collect()
     }
 
     fn to_plan(legs: &[QuoteEdge]) -> Option<RoutePlan> {
@@ -243,5 +244,35 @@ mod tests {
         assert_eq!(plans[0].legs.len(), 1, "cyclic expansion should be pruned");
         assert_eq!(plans[0].legs[0].token_in, a);
         assert_eq!(plans[0].legs[0].token_out, c);
+    }
+
+    #[test]
+    fn k_best_sorts_by_score_not_discovery_order() {
+        let a = Address::from([0x11; 20]);
+        let c = Address::from([0x33; 20]);
+        let mut graph = QuoteGraph::default();
+
+        let mut lower = edge(a, c, 105, 104, 0);
+        lower.pool = Address::from([0xaa; 20]);
+        graph.add_edge(lower);
+
+        let mut higher = edge(a, c, 120, 119, 0);
+        higher.pool = Address::from([0xbb; 20]);
+        graph.add_edge(higher.clone());
+
+        let plans = graph.k_best(
+            a,
+            c,
+            U256::from(100u64),
+            1,
+            QuoteSearchOptions {
+                gas_price: 0,
+                max_hops: 2,
+                beam_size: 8,
+                min_ratio_ppm: 500_000,
+            },
+        );
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].legs[0].target, higher.pool);
     }
 }

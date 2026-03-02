@@ -614,7 +614,7 @@ impl EnvFieldSpec {
                 field: "bundle_signer_key",
                 target_env_key: "bundle_signer_key",
                 canonical_key: "OXIDITY_BUNDLE_PRIVATE_KEY",
-                required: true,
+                required: false,
                 redact: true,
             },
             EnvFieldSpec {
@@ -681,6 +681,7 @@ fn is_passthrough_env_key(key: &str) -> bool {
         "ADDRESS_REGISTRY_PATH",
         "PAIRS_PATH",
         "CHAINLINK_FEEDS_PATH",
+        "PROVIDER_JWT_SECRET_PATH",
         "STRATEGY_WORKERS",
         "ETHERSCAN_API_KEY",
         "BINANCE_API_KEY",
@@ -750,6 +751,7 @@ fn is_passthrough_env_key(key: &str) -> bool {
         "HTTP_PROVIDER",
         "WEBSOCKET_PROVIDER",
         "IPC_PROVIDER",
+        "PROVIDER_JWT_SECRET_PATH_",
         "GAS_CAPS_GWEI",
         "ROUTER_RISK_",
         "SANDWICH_RISK_",
@@ -1176,6 +1178,20 @@ impl GlobalSettings {
         Self::first_non_empty_env(candidates)
     }
 
+    /// Optional JWT secret file path, with chain-specific env fallback.
+    pub fn get_provider_jwt_secret_path(&self, chain_id: u64) -> Option<String> {
+        let candidates = [
+            format!("PROVIDER_JWT_SECRET_PATH_{}", chain_id),
+            "PROVIDER_JWT_SECRET_PATH".to_string(),
+        ];
+        Self::first_non_empty_env(candidates)
+    }
+
+    /// Optional global JWT secret file path used when chain ID is not known yet.
+    pub fn provider_jwt_secret_path(&self) -> Option<String> {
+        Self::first_non_empty_env(["PROVIDER_JWT_SECRET_PATH"])
+    }
+
     pub fn get_chainlink_feed(&self, symbol: &str) -> Option<String> {
         self.chainlink_feeds
             .as_ref()
@@ -1192,12 +1208,45 @@ impl GlobalSettings {
         )
     }
 
+    fn resolve_global_data_derived_path(
+        &self,
+        logical_key: &str,
+        env_key: &str,
+        configured: Option<&str>,
+    ) -> Result<String, AppError> {
+        let env_override_present = std::env::var(env_key)
+            .ok()
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+        let configured_present = configured.map(|v| !v.trim().is_empty()).unwrap_or(false);
+        let manifest_override_present = self
+            .global_path_entry(logical_key)
+            .and_then(|entry| entry.path)
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+        if env_override_present || configured_present || manifest_override_present {
+            self.resolve_path_setting(
+                logical_key,
+                env_key,
+                configured,
+                "data/global_data.json",
+                true,
+            )
+        } else {
+            self.global_data_path()
+        }
+    }
+
     pub fn profit_receiver_or_wallet(&self) -> Address {
         self.profit_receiver_address.unwrap_or(self.wallet_address)
     }
 
     pub fn tokenlist_path(&self) -> Result<String, AppError> {
-        self.global_data_path()
+        self.resolve_global_data_derived_path(
+            "tokenlist",
+            "TOKENLIST_PATH",
+            self.tokenlist_path.as_deref(),
+        )
     }
 
     pub fn tokenlist_enabled(&self) -> bool {
@@ -1205,7 +1254,11 @@ impl GlobalSettings {
     }
 
     pub fn address_registry_path(&self) -> Result<String, AppError> {
-        self.global_data_path()
+        self.resolve_global_data_derived_path(
+            "address_registry",
+            "ADDRESS_REGISTRY_PATH",
+            self.address_registry_path.as_deref(),
+        )
     }
 
     pub fn address_registry_enabled(&self) -> bool {
@@ -1213,7 +1266,7 @@ impl GlobalSettings {
     }
 
     pub fn pairs_path(&self) -> Result<String, AppError> {
-        self.global_data_path()
+        self.resolve_global_data_derived_path("pairs", "PAIRS_PATH", self.pairs_path.as_deref())
     }
 
     pub fn pairs_enabled(&self) -> bool {
@@ -1459,7 +1512,11 @@ impl GlobalSettings {
     }
 
     pub fn chainlink_feeds_path(&self) -> Result<String, AppError> {
-        self.global_data_path()
+        self.resolve_global_data_derived_path(
+            "chainlink_feeds",
+            "CHAINLINK_FEEDS_PATH",
+            self.chainlink_feeds_path.as_deref(),
+        )
     }
 
     pub fn chainlink_feeds_file_enabled(&self) -> bool {
@@ -2298,6 +2355,55 @@ mod tests {
     }
 
     #[test]
+    fn provider_jwt_secret_path_prefers_chain_specific_env_key() {
+        let _env_lock = env_lock_guard();
+        let snapshot = stash_env(&["PROVIDER_JWT_SECRET_PATH_1", "PROVIDER_JWT_SECRET_PATH"]);
+        unsafe {
+            std::env::set_var("PROVIDER_JWT_SECRET_PATH", "/tmp/default.jwt");
+            std::env::set_var("PROVIDER_JWT_SECRET_PATH_1", "/tmp/mainnet.jwt");
+        }
+
+        let settings = base_settings();
+        assert_eq!(
+            settings.get_provider_jwt_secret_path(1).as_deref(),
+            Some("/tmp/mainnet.jwt")
+        );
+
+        restore_env(snapshot);
+    }
+
+    #[test]
+    fn provider_jwt_secret_path_global_fallback_is_available() {
+        let _env_lock = env_lock_guard();
+        let snapshot = stash_env(&["PROVIDER_JWT_SECRET_PATH"]);
+        unsafe {
+            std::env::set_var("PROVIDER_JWT_SECRET_PATH", "/tmp/shared.jwt");
+        }
+
+        let settings = base_settings();
+        assert_eq!(
+            settings.provider_jwt_secret_path().as_deref(),
+            Some("/tmp/shared.jwt")
+        );
+
+        restore_env(snapshot);
+    }
+
+    #[test]
+    fn bundle_signer_key_falls_back_to_wallet_key_when_unset() {
+        let mut settings = base_settings();
+        settings.wallet_key = "wallet_key_fallback".to_string();
+        settings.bundle_signer_key = None;
+        assert_eq!(
+            settings.bundle_signer_key(),
+            "wallet_key_fallback".to_string()
+        );
+
+        settings.bundle_signer_key = Some("bundle_override".to_string());
+        assert_eq!(settings.bundle_signer_key(), "bundle_override".to_string());
+    }
+
+    #[test]
     fn mevshare_builders_defaults_when_empty() {
         let mut settings = base_settings();
         settings.mevshare_builders.clear();
@@ -2721,6 +2827,43 @@ mod tests {
 
         std::fs::remove_file(tmp_dir.join("global_paths.json")).ok();
         std::fs::remove_file(global_data_path).ok();
+        std::fs::remove_dir_all(tmp_dir).ok();
+        restore_env(snapshot);
+    }
+
+    #[test]
+    fn dedicated_tokenlist_path_overrides_global_data_default() {
+        let _env_lock = env_lock_guard();
+        let snapshot = stash_env(&["DATA_DIR", "GLOBAL_PATHS_PATH", "TOKENLIST_PATH"]);
+        unsafe {
+            std::env::remove_var("DATA_DIR");
+            std::env::remove_var("GLOBAL_PATHS_PATH");
+            std::env::remove_var("TOKENLIST_PATH");
+        }
+
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "tokenlist-dedicated-path-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp_dir).expect("create temp dir");
+        std::fs::write(tmp_dir.join("global_data.json"), "{}").expect("write global data");
+        std::fs::write(tmp_dir.join("tokenlist-custom.json"), "{}").expect("write tokenlist");
+
+        let mut settings = base_settings();
+        settings.data_dir = Some(tmp_dir.to_string_lossy().to_string());
+        settings.tokenlist_path = Some("tokenlist-custom.json".to_string());
+        let resolved = settings.tokenlist_path().expect("resolve tokenlist path");
+        assert_eq!(
+            resolved,
+            tmp_dir.join("tokenlist-custom.json").to_string_lossy()
+        );
+
+        std::fs::remove_file(tmp_dir.join("global_data.json")).ok();
+        std::fs::remove_file(tmp_dir.join("tokenlist-custom.json")).ok();
         std::fs::remove_dir_all(tmp_dir).ok();
         restore_env(snapshot);
     }

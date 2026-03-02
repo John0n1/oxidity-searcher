@@ -358,6 +358,7 @@ Provider env key conventions in current code:
 - HTTP: `HTTP_PROVIDER_<chain_id>`, fallback `HTTP_PROVIDER`
 - WS: `WEBSOCKET_PROVIDER_<chain_id>`, fallback `WEBSOCKET_PROVIDER`
 - IPC: `IPC_PROVIDER_<chain_id>`, fallback `IPC_PROVIDER`
+- JWT secret path (optional): `PROVIDER_JWT_SECRET_PATH_<chain_id>`, fallback `PROVIDER_JWT_SECRET_PATH`
 
 ## Environment Variables
 
@@ -375,6 +376,7 @@ Provider env key conventions in current code:
 - `OXIDITY_LOG_LEVEL`: logging level (default `info`)
 - `WEBSOCKET_PROVIDER_1`: WS endpoint for streaming path
 - `IPC_PROVIDER_1`: IPC endpoint for preferred low-latency path
+- `PROVIDER_JWT_SECRET_PATH`: JWT secret file used for auth-protected RPC endpoints
 - `METRICS_TOKEN`: enables authenticated metrics server
 
 ### Optional Runtime Paths and Persistence

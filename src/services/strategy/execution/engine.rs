@@ -458,7 +458,7 @@ impl Engine {
         state.local_tip = state.current_block;
 
         if let Some(url) = public_tip_rpc {
-            match ConnectionFactory::http(url) {
+            match ConnectionFactory::http(url, None) {
                 Ok(public_provider) => match public_provider.get_block_number().await {
                     Ok(public_tip) => {
                         state.public_tip = Some(public_tip);

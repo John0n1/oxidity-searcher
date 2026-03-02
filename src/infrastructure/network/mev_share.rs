@@ -115,7 +115,13 @@ impl MevShareClient {
     }
 
     pub async fn run(mut self) -> Result<(), AppError> {
-        self.backfill_history().await?;
+        if let Err(err) = self.backfill_history().await {
+            tracing::warn!(
+                target: "mev_share",
+                error = %err,
+                "Initial history backfill failed; continuing with live SSE stream"
+            );
+        }
         let mut reconnect_backoff_secs: u64 = 2;
         loop {
             if self.shutdown.is_cancelled() {

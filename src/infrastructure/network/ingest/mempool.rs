@@ -260,6 +260,14 @@ impl MempoolScanner {
             }
         }
 
+        if let Err(err) = self.provider.uninstall_filter(filter_id).await {
+            tracing::debug!(
+                target: "mempool",
+                error = %err,
+                "Failed to uninstall pending tx filter"
+            );
+        }
+
         Ok(())
     }
 

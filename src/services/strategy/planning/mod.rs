@@ -784,10 +784,27 @@ impl StrategyExecutor {
         gas_fees: &GasFees,
         nonce: u64,
     ) -> Result<(Vec<u8>, TransactionRequest, B256, U256, u64), AppError> {
-        let provider = self
+        let provider = match self
             .select_flashloan_provider(asset, amount, gas_fees)
             .await?
-            .ok_or_else(|| AppError::Strategy("No flashloan provider available".into()))?;
+        {
+            Some(provider) => provider,
+            None if self.dry_run => {
+                let fallback =
+                    self.flashloan_providers.first().copied().ok_or_else(|| {
+                        AppError::Strategy("No flashloan provider available".into())
+                    })?;
+                tracing::debug!(
+                    target: "flashloan",
+                    provider = ?fallback,
+                    asset = %format!("{asset:#x}"),
+                    amount = %amount,
+                    "No live flashloan quote available in dry-run; using configured provider fallback"
+                );
+                fallback
+            }
+            None => return Err(AppError::Strategy("No flashloan provider available".into())),
+        };
 
         let mut targets = Vec::new();
         let mut values = Vec::new();
@@ -2355,11 +2372,24 @@ impl StrategyExecutor {
     ) -> Result<Option<(U256, u64)>, AppError> {
         let vault = default_balancer_vault_for_chain(self.chain_id)
             .ok_or_else(|| AppError::Strategy("Balancer vault not configured for chain".into()))?;
-        let balance: U256 = ERC20::new(asset, self.http_provider.clone())
+        let balance: U256 = match ERC20::new(asset, self.http_provider.clone())
             .balanceOf(vault)
             .call()
             .await
-            .unwrap_or(U256::MAX);
+        {
+            Ok(balance) => balance,
+            Err(err) => {
+                tracing::debug!(
+                    target: "flashloan",
+                    provider = "balancer",
+                    asset = %format!("{asset:#x}"),
+                    vault = %format!("{vault:#x}"),
+                    error = %err,
+                    "Balancer liquidity probe failed; treating provider as unavailable"
+                );
+                return Ok(None);
+            }
+        };
         if balance < amount {
             return Ok(None);
         }

@@ -993,7 +993,9 @@ fn decode_universal_router(
         let input = &inputs[idx];
         match cmd {
             UR_CMD_V2_SWAP_EXACT_IN => {
-                let decoded = V2SwapExactInParams::abi_decode(input.as_ref()).ok()?;
+                let Ok(decoded) = V2SwapExactInParams::abi_decode(input.as_ref()) else {
+                    continue;
+                };
                 return Some(ObservedSwap {
                     router,
                     path: decoded.path,
@@ -1006,7 +1008,9 @@ fn decode_universal_router(
                 });
             }
             UR_CMD_V2_SWAP_EXACT_OUT => {
-                let decoded = V2SwapExactOutParams::abi_decode(input.as_ref()).ok()?;
+                let Ok(decoded) = V2SwapExactOutParams::abi_decode(input.as_ref()) else {
+                    continue;
+                };
                 return Some(ObservedSwap {
                     router,
                     path: decoded.path,
@@ -1019,7 +1023,9 @@ fn decode_universal_router(
                 });
             }
             UR_CMD_V3_SWAP_EXACT_IN => {
-                let decoded = V3SwapExactInParams::abi_decode(input.as_ref()).ok()?;
+                let Ok(decoded) = V3SwapExactInParams::abi_decode(input.as_ref()) else {
+                    continue;
+                };
                 let Some(path) = parse_v3_path(decoded.path.as_ref()) else {
                     continue;
                 };
@@ -1035,7 +1041,9 @@ fn decode_universal_router(
                 });
             }
             UR_CMD_V3_SWAP_EXACT_OUT => {
-                let decoded = V3SwapExactOutParams::abi_decode(input.as_ref()).ok()?;
+                let Ok(decoded) = V3SwapExactOutParams::abi_decode(input.as_ref()) else {
+                    continue;
+                };
                 let Some(path) = parse_v3_path(decoded.path.as_ref()) else {
                     continue;
                 };
@@ -1708,6 +1716,35 @@ mod tests {
         assert_eq!(observed.path, vec![token_in, token_out]);
         assert_eq!(observed.amount_in, U256::from(333u64));
         assert_eq!(observed.min_out, U256::from(222u64));
+        assert_eq!(observed.router_kind, RouterKind::V2Like);
+    }
+
+    #[test]
+    fn universal_router_skips_invalid_v2_decode_and_decodes_next_command() {
+        let router = Address::from([0xe1; 20]);
+        let token_in = Address::from([0xe2; 20]);
+        let token_out = Address::from([0xe3; 20]);
+
+        let valid_v2 = V2SwapExactInParams {
+            recipient: Address::from([0xe4; 20]),
+            amountIn: U256::from(444u64),
+            amountOutMin: U256::from(555u64),
+            path: vec![token_in, token_out],
+            payerIsUser: true,
+        };
+        let call = UniversalRouter::executeCall {
+            commands: Bytes::from(vec![UR_CMD_V2_SWAP_EXACT_OUT, UR_CMD_V2_SWAP_EXACT_IN]),
+            inputs: vec![
+                Bytes::from(vec![0xde, 0xad, 0xbe, 0xef]),
+                Bytes::from(valid_v2.abi_encode()),
+            ],
+        };
+
+        let observed =
+            decode_swap_input(router, &call.abi_encode(), U256::ZERO).expect("decode fallback ur");
+        assert_eq!(observed.path, vec![token_in, token_out]);
+        assert_eq!(observed.amount_in, U256::from(444u64));
+        assert_eq!(observed.min_out, U256::from(555u64));
         assert_eq!(observed.router_kind, RouterKind::V2Like);
     }
 

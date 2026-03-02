@@ -39,6 +39,7 @@ pub struct RouterDiscovery {
     budget: RouterDiscoveryBudget,
     cache_path: Option<String>,
     force_full_rescan: bool,
+    cache_write_lock: Arc<TokioMutex<()>>,
     cooldown_until: Arc<TokioMutex<Option<Instant>>>,
     metrics: Arc<RouterDiscoveryMetrics>,
     state: Arc<DashMap<Address, DiscoveryState>>,
@@ -157,6 +158,7 @@ impl RouterDiscovery {
             },
             cache_path: config.cache_path,
             force_full_rescan: config.force_full_rescan,
+            cache_write_lock: Arc::new(TokioMutex::new(())),
             cooldown_until: Arc::new(TokioMutex::new(None)),
             metrics: Arc::new(RouterDiscoveryMetrics::default()),
             state: Arc::new(DashMap::new()),
@@ -315,7 +317,9 @@ impl RouterDiscovery {
         let kind = kind.to_string();
         let note = note.to_string();
         let chain_id = self.chain_id;
+        let cache_write_lock = self.cache_write_lock.clone();
         tokio::spawn(async move {
+            let _write_guard = cache_write_lock.lock().await;
             if let Some(parent) = parent {
                 let _ = tokio::fs::create_dir_all(parent).await;
             }

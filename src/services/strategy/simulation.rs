@@ -17,7 +17,8 @@ use alloy::sol_types::SolInterface;
 use alloy::transports::{RpcError as TransportRpcError, TransportError};
 use alloy_sol_types::{Revert, SolError};
 use serde_json::json;
-use std::sync::OnceLock;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug, Clone)]
 pub struct SimulationOutcome {
@@ -27,8 +28,11 @@ pub struct SimulationOutcome {
     pub reason: Option<String>,
 }
 
-static ETH_SIMULATE_MISSING: OnceLock<()> = OnceLock::new();
-static DEBUG_TRACE_MISSING: OnceLock<()> = OnceLock::new();
+#[derive(Debug, Default)]
+struct MethodAvailability {
+    eth_simulate_missing: AtomicBool,
+    debug_trace_missing: AtomicBool,
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RpcCapabilities {
@@ -119,15 +123,46 @@ impl SimulationBackendMethod {
 pub struct Simulator {
     provider: HttpProvider,
     backend: SimulationBackend,
+    missing_methods: Arc<MethodAvailability>,
 }
 
 impl Simulator {
     pub fn new(provider: HttpProvider, backend: SimulationBackend) -> Self {
-        Self { provider, backend }
+        Self {
+            provider,
+            backend,
+            missing_methods: Arc::new(MethodAvailability::default()),
+        }
+    }
+
+    fn eth_simulate_missing(&self) -> bool {
+        self.missing_methods
+            .eth_simulate_missing
+            .load(Ordering::Relaxed)
+    }
+
+    fn debug_trace_missing(&self) -> bool {
+        self.missing_methods
+            .debug_trace_missing
+            .load(Ordering::Relaxed)
+    }
+
+    fn mark_eth_simulate_missing(&self) -> bool {
+        !self
+            .missing_methods
+            .eth_simulate_missing
+            .swap(true, Ordering::Relaxed)
+    }
+
+    fn mark_debug_trace_missing(&self) -> bool {
+        !self
+            .missing_methods
+            .debug_trace_missing
+            .swap(true, Ordering::Relaxed)
     }
 
     async fn probe_eth_simulate_v1_internal(&self) -> bool {
-        if ETH_SIMULATE_MISSING.get().is_some() {
+        if self.eth_simulate_missing() {
             return false;
         }
         let req = TransactionRequest {
@@ -156,7 +191,7 @@ impl Simulator {
             }
             Err(e) => {
                 if rpc_method_unavailable(&e) {
-                    let _ = ETH_SIMULATE_MISSING.set(());
+                    self.mark_eth_simulate_missing();
                     tracing::warn!(
                         target: "simulation",
                         "eth_simulateV1 not available on node; falling back"
@@ -205,7 +240,7 @@ impl Simulator {
     }
 
     async fn probe_debug_trace_call_internal(&self) -> bool {
-        if DEBUG_TRACE_MISSING.get().is_some() {
+        if self.debug_trace_missing() {
             return false;
         }
         let req = TransactionRequest {
@@ -224,7 +259,7 @@ impl Simulator {
             Ok(_) => true,
             Err(e) => {
                 if rpc_method_unavailable(&e) {
-                    let _ = DEBUG_TRACE_MISSING.set(());
+                    self.mark_debug_trace_missing();
                     tracing::warn!(
                         target: "simulation",
                         "debug_traceCall not available on node; falling back"
@@ -269,7 +304,7 @@ impl Simulator {
     }
 
     async fn probe_debug_trace_many_internal(&self) -> bool {
-        if DEBUG_TRACE_MISSING.get().is_some() {
+        if self.debug_trace_missing() {
             return false;
         }
         let req = TransactionRequest {
@@ -292,7 +327,7 @@ impl Simulator {
             Ok(_) => true,
             Err(e) => {
                 if rpc_method_unavailable(&e) {
-                    let _ = DEBUG_TRACE_MISSING.set(());
+                    self.mark_debug_trace_missing();
                     tracing::warn!(
                         target: "simulation",
                         "debug_traceCallMany not available on node; falling back"
@@ -405,7 +440,7 @@ impl Simulator {
         req: TransactionRequest,
         state_override: Option<StateOverride>,
     ) -> Result<Option<SimulationOutcome>, AppError> {
-        if ETH_SIMULATE_MISSING.get().is_some() {
+        if self.eth_simulate_missing() {
             return Ok(None);
         }
         let block = SimBlock {
@@ -429,7 +464,7 @@ impl Simulator {
             Err(e) => {
                 let rpc_code = rpc_error_info(&e).code;
                 if rpc_method_unavailable(&e) {
-                    if ETH_SIMULATE_MISSING.set(()).is_ok() {
+                    if self.mark_eth_simulate_missing() {
                         tracing::warn!(
                             target: "simulation",
                             "eth_simulateV1 not available on node; falling back"
@@ -461,7 +496,7 @@ impl Simulator {
         &self,
         req: TransactionRequest,
     ) -> Result<Option<SimulationOutcome>, AppError> {
-        if DEBUG_TRACE_MISSING.get().is_some() {
+        if self.debug_trace_missing() {
             return Ok(None);
         }
         let trace_options = GethDebugTracingCallOptions::default();
@@ -486,7 +521,7 @@ impl Simulator {
             Err(e) => {
                 let rpc_code = rpc_error_info(&e).code;
                 if rpc_method_unavailable(&e) {
-                    if DEBUG_TRACE_MISSING.set(()).is_ok() {
+                    if self.mark_debug_trace_missing() {
                         tracing::warn!(
                             target: "simulation",
                             "debug_traceCall not available on node; falling back"
@@ -625,7 +660,7 @@ impl Simulator {
         txs: &[TransactionRequest],
         state_override: Option<StateOverride>,
     ) -> Result<Option<Vec<SimulationOutcome>>, AppError> {
-        if ETH_SIMULATE_MISSING.get().is_some() {
+        if self.eth_simulate_missing() {
             return Ok(None);
         }
         let block = SimBlock {
@@ -656,7 +691,7 @@ impl Simulator {
             }
             Err(e) => {
                 let rpc_code = rpc_error_info(&e).code;
-                if rpc_method_unavailable(&e) && ETH_SIMULATE_MISSING.set(()).is_ok() {
+                if rpc_method_unavailable(&e) && self.mark_eth_simulate_missing() {
                     tracing::warn!(
                         target: "simulation",
                         "eth_simulateV1 unavailable for bundles; cached fallback"
@@ -688,7 +723,7 @@ impl Simulator {
         &self,
         txs: &[TransactionRequest],
     ) -> Result<Option<Vec<SimulationOutcome>>, AppError> {
-        if DEBUG_TRACE_MISSING.get().is_some() {
+        if self.debug_trace_missing() {
             return Ok(None);
         }
         if txs.is_empty() {
@@ -731,7 +766,7 @@ impl Simulator {
             }
             Err(e) => {
                 let rpc_code = rpc_error_info(&e).code;
-                if rpc_method_unavailable(&e) && DEBUG_TRACE_MISSING.set(()).is_ok() {
+                if rpc_method_unavailable(&e) && self.mark_debug_trace_missing() {
                     tracing::warn!(
                         target: "simulation",
                         "debug_traceCallMany unavailable; cached fallback"
