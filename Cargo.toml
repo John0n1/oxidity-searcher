@@ -18,30 +18,31 @@ dotenvy = "0.15.7"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "json", "fmt", "registry", "parking_lot"] }
 thiserror = "2.0.18"
-anyhow = "1.0.101"
-alloy = { version = "1.6.3", features = ["full", "node-bindings", "serde"] }
-alloy-consensus = { version = "1.6.3", features = ["serde"] } 
-alloy-primitives = { version = "1.5.4", features = ["serde"] } 
-alloy-json-abi = "1.5.4" 
-alloy-sol-types = { version = "1.5.4"}
-alloy-rpc-client = "1.6.3"
-alloy-rpc-types-engine = "1.6.3"
-alloy-transport-http = { version = "1.6.3", features = ["jwt-auth"] }
+anyhow = "1.0.102"
+alloy = { version = "1.7.3", features = ["full", "node-bindings", "serde"] }
+alloy-consensus = { version = "1.7.3", features = ["serde"] } 
+alloy-primitives = { version = "1.5.7", features = ["serde"] } 
+alloy-json-abi = "1.5.7" 
+alloy-sol-types = { version = "1.5.7"}
+alloy-rpc-client = "1.7.3"
+alloy-rpc-types-engine = "1.7.3"
+alloy-transport-http = { version = "1.7.3", features = ["jwt-auth"] }
 sqlx = { version = "0.8.6", features = ["runtime-tokio-native-tls", "sqlite", "macros", "chrono"] }
-chrono = { version = "0.4.43", features = ["serde"] }
+chrono = { version = "0.4.44", features = ["serde"] }
 dashmap = "6.1.0" # Concurrent HashMap
-futures = "0.3.31" 
+futures = "0.3.32" 
 reqwest = { version = "0.13.2", features = ["json", "stream", "blocking"] }
 async-trait = "0.1.89"
 lazy_static = "1.5.0"
 url = "2.5.8"
 hex = "0.4.3"
 once_cell = "1.21.3"
-clap = { version = "4.5.57", features = ["derive"] }
+clap = { version = "4.5.60", features = ["derive"] }
 crypto-common = "0.2.1"
 
 [dev-dependencies]
 regex = "1.12.3"
+cargo-deb = "3.6.3"
 
 [package.metadata.deb]
 name = "oxidity-searcher"

@@ -194,6 +194,62 @@ impl BundleSender {
         }
     }
 
+    fn relay_retry_count(attempts: u64) -> u64 {
+        attempts.saturating_sub(1)
+    }
+
+    fn record_relay_attempt_metric(
+        &self,
+        relay_metric: &str,
+        success: bool,
+        saw_timeout: bool,
+        attempts: u64,
+    ) {
+        self.stats.record_relay_attempt(
+            relay_metric,
+            success,
+            saw_timeout,
+            Self::relay_retry_count(attempts),
+        );
+    }
+
+    async fn post_json_with_relay_metrics(
+        &self,
+        relay_metric: &str,
+        url: &str,
+        body_bytes: &[u8],
+        signature_header: Option<&str>,
+        relay_name: Option<&str>,
+        retry_context: &str,
+        bundle_status_on_post_error: Option<(&str, Option<&str>)>,
+    ) -> Result<(reqwest::StatusCode, String, u64, bool), AppError> {
+        match self
+            .post_json_with_retries(url, body_bytes, signature_header, relay_name, retry_context)
+            .await
+        {
+            Ok(result) => Ok(result),
+            Err((e, attempts, saw_timeout)) => {
+                self.record_relay_attempt_metric(relay_metric, false, saw_timeout, attempts);
+                if let Some((status_label, replacement_uuid)) = bundle_status_on_post_error {
+                    self.stats.record_relay_bundle_status(
+                        relay_metric,
+                        status_label,
+                        replacement_uuid,
+                        None,
+                    );
+                }
+                Err(e)
+            }
+        }
+    }
+
+    async fn current_block_number(&self) -> Result<u64, AppError> {
+        self.provider
+            .get_block_number()
+            .await
+            .map_err(|e| AppError::Connection(format!("Failed to fetch block number: {}", e)))
+    }
+
     /// Send a MEV-Share bundle that references tx hashes (instead of raw bytes).
     pub async fn send_mev_share_bundle(&self, body: &[BundleItem]) -> Result<(), AppError> {
         let hash_count = body
@@ -217,10 +273,7 @@ impl BundleSender {
             return Ok(());
         }
 
-        let block_number =
-            self.provider.get_block_number().await.map_err(|e| {
-                AppError::Connection(format!("Failed to fetch block number: {}", e))
-            })?;
+        let block_number = self.current_block_number().await?;
         let params = json!({
             "version": "v0.1",
             "inclusion": {
@@ -244,39 +297,23 @@ impl BundleSender {
             serde_json::to_vec(&payload).map_err(|e| AppError::Initialization(e.to_string()))?;
         let sig_header = self.sign_request(&body_bytes)?;
 
-        let (status, body_text, attempts, saw_timeout) = match self
-            .post_json_with_retries(
+        let (status, body_text, attempts, saw_timeout) = self
+            .post_json_with_relay_metrics(
+                "mev_share",
                 &self.mev_share_relay_url,
                 &body_bytes,
                 Some(&sig_header),
                 None,
                 "mev_sendBundle",
+                None,
             )
-            .await
-        {
-            Ok(v) => v,
-            Err((e, attempts, saw_timeout)) => {
-                self.stats.record_relay_attempt(
-                    "mev_share",
-                    false,
-                    saw_timeout,
-                    attempts.saturating_sub(1),
-                );
-                return Err(e);
-            }
-        };
+            .await?;
 
         if status.is_success() {
             tracing::info!(target: "executor", relay=%self.mev_share_relay_url, block=block_number + 1, legs=body.len(), body=%body_text, "MEV-Share bundle submitted");
-            self.stats
-                .record_relay_attempt("mev_share", true, false, attempts.saturating_sub(1));
+            self.record_relay_attempt_metric("mev_share", true, false, attempts);
         } else {
-            self.stats.record_relay_attempt(
-                "mev_share",
-                false,
-                saw_timeout,
-                attempts.saturating_sub(1),
-            );
+            self.record_relay_attempt_metric("mev_share", false, saw_timeout, attempts);
             return Err(AppError::Connection(format!(
                 "Relay rejected mev_sendBundle: {} body={}",
                 status, body_text
@@ -429,10 +466,7 @@ impl BundleSender {
     }
 
     async fn send_mainnet_builders(&self, raw_txs: &[Vec<u8>]) -> Result<(), AppError> {
-        let block_number =
-            self.provider.get_block_number().await.map_err(|e| {
-                AppError::Connection(format!("Failed to fetch block number: {}", e))
-            })?;
+        let block_number = self.current_block_number().await?;
         let target_blocks = self.target_blocks;
 
         let relays: Vec<(String, bool, String)> = vec![
@@ -620,23 +654,17 @@ impl BundleSender {
         request_label: &str,
         success_label: &str,
     ) -> Result<(), AppError> {
-        let (status, body_text, attempts, saw_timeout) = match self
-            .post_json_with_retries(url, body_bytes, sig_header, Some(name), request_label)
-            .await
-        {
-            Ok(v) => v,
-            Err((e, attempts, saw_timeout)) => {
-                self.stats.record_relay_attempt(
-                    name,
-                    false,
-                    saw_timeout,
-                    attempts.saturating_sub(1),
-                );
-                self.stats
-                    .record_relay_bundle_status(name, "post_error", replacement_uuid, None);
-                return Err(e);
-            }
-        };
+        let (status, body_text, attempts, saw_timeout) = self
+            .post_json_with_relay_metrics(
+                name,
+                url,
+                body_bytes,
+                sig_header,
+                Some(name),
+                request_label,
+                Some(("post_error", replacement_uuid)),
+            )
+            .await?;
 
         if status.is_success() {
             let bundle_id = Self::extract_bundle_id(&body_text);
@@ -650,8 +678,7 @@ impl BundleSender {
                 message = success_label,
                 "Bundle relay response"
             );
-            self.stats
-                .record_relay_attempt(name, true, false, attempts.saturating_sub(1));
+            self.record_relay_attempt_metric(name, true, false, attempts);
             self.stats.record_relay_bundle_status(
                 name,
                 "accepted",
@@ -661,8 +688,7 @@ impl BundleSender {
             return Ok(());
         }
 
-        self.stats
-            .record_relay_attempt(name, false, saw_timeout, attempts.saturating_sub(1));
+        self.record_relay_attempt_metric(name, false, saw_timeout, attempts);
         self.stats
             .record_relay_bundle_status(name, "rejected", replacement_uuid, None);
         Err(AppError::Connection(format!(
@@ -718,24 +744,16 @@ impl BundleSender {
             serde_json::to_vec(&payload).map_err(|e| AppError::Initialization(e.to_string()))?;
         let sig_header = self.sign_request(&body_bytes)?;
 
-        let resp = self
-            .relay_client
-            .post(url)
-            .header("Content-Type", "application/json")
-            .header(
-                "X-Flashbots-Signature",
-                HeaderValue::from_str(&sig_header).map_err(|e| {
-                    AppError::Connection(format!("Signature header invalid: {}", e))
-                })?,
+        let (status, body, _, _) = self
+            .post_json_with_retries(
+                url,
+                &body_bytes,
+                Some(&sig_header),
+                Some(relay_name),
+                "eth_cancelBundle",
             )
-            .body(body_bytes)
-            .timeout(Duration::from_millis(RELAY_TIMEOUT_MS))
-            .send()
             .await
-            .map_err(|e| AppError::Connection(format!("Relay cancel POST failed: {}", e)))?;
-
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+            .map_err(|(e, _, _)| e)?;
         if status.is_success() {
             self.stats.record_relay_bundle_status(
                 relay_name,

@@ -150,6 +150,139 @@ impl StrategyExecutor {
         }
     }
 
+    async fn persist_profit_and_market_data(
+        &self,
+        strategy_tx_hash: &str,
+        strategy_label: &str,
+        profit: &ProfitOutcome,
+    ) -> Result<(), AppError> {
+        self.save_strategy_profit_record(strategy_tx_hash, strategy_label, profit)
+            .await?;
+
+        self.portfolio.record_trade_components(
+            self.chain_id,
+            profit.gross_profit_wei,
+            profit.gas_cost_wei,
+            profit.bribe_wei,
+            profit.flashloan_premium_wei,
+            profit.net_profit_wei,
+        );
+
+        let price_symbol = format!(
+            "{}USD",
+            crate::common::constants::native_symbol_for_chain(self.chain_id)
+        );
+        let _ = self
+            .db
+            .save_market_price(
+                self.chain_id,
+                &price_symbol,
+                profit.eth_quote.price,
+                &profit.eth_quote.source,
+            )
+            .await;
+        Ok(())
+    }
+
+    async fn save_strategy_profit_record(
+        &self,
+        strategy_tx_hash: &str,
+        strategy_label: &str,
+        profit: &ProfitOutcome,
+    ) -> Result<(), AppError> {
+        self.db
+            .save_profit_record(
+                strategy_tx_hash,
+                self.chain_id,
+                strategy_label,
+                profit.profit_eth_f64,
+                profit.gas_cost_eth_f64,
+                profit.net_profit_eth_f64,
+                &profit.gross_profit_wei.to_string(),
+                &profit.gas_cost_wei.to_string(),
+                &profit.net_profit_wei.to_string(),
+                &profit.bribe_wei.to_string(),
+                &profit.flashloan_premium_wei.to_string(),
+                &profit.effective_cost_wei.to_string(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn handle_submitted_receipt(
+        &self,
+        receipt_target: B256,
+        revert_exit_reason: &str,
+        timeout_exit_reason: &str,
+        timeout_warn_message: &str,
+    ) -> Result<(), AppError> {
+        match self.await_receipt(&receipt_target).await? {
+            ReceiptStatus::ConfirmedSuccess => {}
+            ReceiptStatus::ConfirmedRevert => {
+                self.emergency_exit_inventory(revert_exit_reason).await;
+            }
+            ReceiptStatus::UnknownTimeout => {
+                if self.emergency_exit_on_unknown_receipt {
+                    self.emergency_exit_inventory(timeout_exit_reason).await;
+                } else {
+                    tracing::warn!(
+                        target: "strategy",
+                        tx_hash = %format!("{:#x}", receipt_target),
+                        "{timeout_warn_message}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn record_bundle_telemetry(
+        &self,
+        submitted_hash: B256,
+        source: &'static str,
+        profit: &ProfitOutcome,
+    ) {
+        self.stats.record_bundle(BundleTelemetry {
+            tx_hash: format!("{submitted_hash:#x}"),
+            source: source.to_string(),
+            profit_eth: profit.profit_eth_f64,
+            gas_cost_eth: profit.gas_cost_eth_f64,
+            net_eth: profit.net_profit_eth_f64,
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+        });
+    }
+
+    fn tx_kind_call_address(kind: Option<&TxKind>) -> Option<Address> {
+        kind.and_then(|k| match k {
+            TxKind::Call(addr) => Some(*addr),
+            TxKind::Create => None,
+        })
+    }
+
+    async fn save_strategy_transaction_record(
+        &self,
+        tx_hash: &str,
+        from: Address,
+        to: Option<Address>,
+        value: U256,
+        strategy_label: &'static str,
+    ) -> Result<(), AppError> {
+        let from_hex = format!("{from:#x}");
+        let to_hex = to.map(|addr| format!("{addr:#x}"));
+        let value_dec = value.to_string();
+        self.db
+            .save_transaction(
+                tx_hash,
+                self.chain_id,
+                &from_hex,
+                to_hex.as_deref(),
+                &value_dec,
+                Some(strategy_label),
+            )
+            .await?;
+        Ok(())
+    }
+
     fn sig_selector(signature: &str) -> [u8; 4] {
         let h = keccak256(signature.as_bytes());
         [h[0], h[1], h[2], h[3]]
@@ -348,43 +481,20 @@ impl StrategyExecutor {
             } else {
                 "strategy_atomic_arb"
             };
-            self.db
-                .save_transaction(
-                    &format!("{submitted_hash:#x}"),
-                    self.chain_id,
-                    &format!("{:#x}", self.signer.address()),
-                    main_request
-                        .to
-                        .as_ref()
-                        .and_then(|k| match k {
-                            TxKind::Call(addr) => Some(format!("{addr:#x}")),
-                            _ => None,
-                        })
-                        .as_deref(),
-                    main_request
-                        .value
-                        .unwrap_or(U256::ZERO)
-                        .to_string()
-                        .as_str(),
-                    Some(strategy_label),
-                )
-                .await?;
-            self.db
-                .save_profit_record(
-                    &format!("{submitted_hash:#x}"),
-                    self.chain_id,
-                    strategy_label,
-                    profit.profit_eth_f64,
-                    profit.gas_cost_eth_f64,
-                    profit.net_profit_eth_f64,
-                    &profit.gross_profit_wei.to_string(),
-                    &profit.gas_cost_wei.to_string(),
-                    &profit.net_profit_wei.to_string(),
-                    &profit.bribe_wei.to_string(),
-                    &profit.flashloan_premium_wei.to_string(),
-                    &profit.effective_cost_wei.to_string(),
-                )
-                .await?;
+            self.save_strategy_transaction_record(
+                &format!("{submitted_hash:#x}"),
+                self.signer.address(),
+                Self::tx_kind_call_address(main_request.to.as_ref()),
+                main_request.value.unwrap_or(U256::ZERO),
+                strategy_label,
+            )
+            .await?;
+            self.save_strategy_profit_record(
+                &format!("{submitted_hash:#x}"),
+                strategy_label,
+                &profit,
+            )
+            .await?;
             self.stats.record_bundle(BundleTelemetry {
                 tx_hash: format!("{submitted_hash:#x}"),
                 source: if liquidation_signal {
@@ -1287,122 +1397,49 @@ impl StrategyExecutor {
             Err(e) => return Err(e),
         };
 
-        let to_addr = match tx.kind() {
-            TxKind::Call(addr) => Some(addr),
-            TxKind::Create => None,
-        };
+        let to_addr = Self::tx_kind_call_address(Some(&tx.kind()));
 
-        self.db
-            .save_transaction(
-                &format!("{tx_hash:#x}"),
-                self.chain_id,
-                &format!("{:#x}", tx.from()),
-                to_addr.as_ref().map(|a| format!("{:#x}", a)).as_deref(),
-                tx.value().to_string().as_str(),
-                Some("strategy_v1"),
-            )
-            .await?;
+        self.save_strategy_transaction_record(
+            &format!("{tx_hash:#x}"),
+            tx.from(),
+            to_addr,
+            tx.value(),
+            "strategy_v1",
+        )
+        .await?;
         let submitted_hash = plan_hashes.main;
         let recorded_to = main_request.to.or(Some(TxKind::Call(backrun.to)));
         let recorded_value = main_request.value.unwrap_or(U256::ZERO);
-        self.db
-            .save_transaction(
-                &format!("{:#x}", submitted_hash),
-                self.chain_id,
-                &format!("{:#x}", self.signer.address()),
-                recorded_to
-                    .as_ref()
-                    .and_then(|k| match k {
-                        TxKind::Call(a) => Some(format!("{:#x}", a)),
-                        _ => None,
-                    })
-                    .as_deref(),
-                recorded_value.to_string().as_str(),
-                Some("strategy_backrun"),
-            )
-            .await?;
+        self.save_strategy_transaction_record(
+            &format!("{submitted_hash:#x}"),
+            self.signer.address(),
+            Self::tx_kind_call_address(recorded_to.as_ref()),
+            recorded_value,
+            "strategy_backrun",
+        )
+        .await?;
         if let Some(f) = &front_run {
-            self.db
-                .save_transaction(
-                    &format!("{:#x}", plan_hashes.front_run.unwrap_or(f.hash)),
-                    self.chain_id,
-                    &format!("{:#x}", self.signer.address()),
-                    Some(format!("{:#x}", f.to)).as_deref(),
-                    f.value.to_string().as_str(),
-                    Some("strategy_front_run"),
-                )
-                .await?;
-        }
-
-        self.db
-            .save_profit_record(
-                &format!("{tx_hash:#x}"),
-                self.chain_id,
-                "strategy_v1",
-                profit.profit_eth_f64,
-                profit.gas_cost_eth_f64,
-                profit.net_profit_eth_f64,
-                &profit.gross_profit_wei.to_string(),
-                &profit.gas_cost_wei.to_string(),
-                &profit.net_profit_wei.to_string(),
-                &profit.bribe_wei.to_string(),
-                &profit.flashloan_premium_wei.to_string(),
-                &profit.effective_cost_wei.to_string(),
+            self.save_strategy_transaction_record(
+                &format!("{:#x}", plan_hashes.front_run.unwrap_or(f.hash)),
+                self.signer.address(),
+                Some(f.to),
+                f.value,
+                "strategy_front_run",
             )
             .await?;
-
-        self.portfolio.record_trade_components(
-            self.chain_id,
-            profit.gross_profit_wei,
-            profit.gas_cost_wei,
-            profit.bribe_wei,
-            profit.flashloan_premium_wei,
-            profit.net_profit_wei,
-        );
-
-        let price_symbol = format!(
-            "{}USD",
-            crate::common::constants::native_symbol_for_chain(self.chain_id)
-        );
-        let _ = self
-            .db
-            .save_market_price(
-                self.chain_id,
-                &price_symbol,
-                profit.eth_quote.price,
-                &profit.eth_quote.source,
-            )
-            .await;
-
-        let receipt_target = submitted_hash;
-        match self.await_receipt(&receipt_target).await? {
-            ReceiptStatus::ConfirmedSuccess => {}
-            ReceiptStatus::ConfirmedRevert => {
-                self.emergency_exit_inventory("bundle receipt reverted")
-                    .await;
-            }
-            ReceiptStatus::UnknownTimeout => {
-                if self.emergency_exit_on_unknown_receipt {
-                    self.emergency_exit_inventory("bundle receipt unknown timeout")
-                        .await;
-                } else {
-                    tracing::warn!(
-                        target: "strategy",
-                        tx_hash = %format!("{:#x}", receipt_target),
-                        "Receipt timeout without confirmed revert; emergency exit suppressed"
-                    );
-                }
-            }
         }
 
-        self.stats.record_bundle(BundleTelemetry {
-            tx_hash: format!("{submitted_hash:#x}"),
-            source: "mempool".to_string(),
-            profit_eth: profit.profit_eth_f64,
-            gas_cost_eth: profit.gas_cost_eth_f64,
-            net_eth: profit.net_profit_eth_f64,
-            timestamp_ms: chrono::Utc::now().timestamp_millis(),
-        });
+        let tx_hash_label = format!("{tx_hash:#x}");
+        self.persist_profit_and_market_data(&tx_hash_label, "strategy_v1", &profit)
+            .await?;
+        self.handle_submitted_receipt(
+            submitted_hash,
+            "bundle receipt reverted",
+            "bundle receipt unknown timeout",
+            "Receipt timeout without confirmed revert; emergency exit suppressed",
+        )
+        .await?;
+        self.record_bundle_telemetry(submitted_hash, "mempool", &profit);
 
         Ok(Some(format!("{submitted_hash:#x}")))
     }
@@ -1622,109 +1659,35 @@ impl StrategyExecutor {
             .await?;
 
         let from_addr = hint.from.unwrap_or(Address::ZERO);
-        self.db
-            .save_transaction(
-                &victim_tx_hash,
-                self.chain_id,
-                &format!("{:#x}", from_addr),
-                Some(format!("{:#x}", hint.router)).as_deref(),
-                hint.value.to_string().as_str(),
-                Some("strategy_mev_share"),
-            )
-            .await?;
+        self.save_strategy_transaction_record(
+            &victim_tx_hash,
+            from_addr,
+            Some(hint.router),
+            hint.value,
+            "strategy_mev_share",
+        )
+        .await?;
 
         let submitted_hash = executor_hash.unwrap_or(backrun.hash);
-        self.db
-            .save_transaction(
-                &format!("{:#x}", submitted_hash),
-                self.chain_id,
-                &format!("{:#x}", self.signer.address()),
-                main_request
-                    .to
-                    .as_ref()
-                    .and_then(|k| match k {
-                        TxKind::Call(addr) => Some(format!("{:#x}", addr)),
-                        _ => None,
-                    })
-                    .as_deref(),
-                main_request
-                    .value
-                    .unwrap_or(U256::ZERO)
-                    .to_string()
-                    .as_str(),
-                Some("strategy_backrun"),
-            )
+        self.save_strategy_transaction_record(
+            &format!("{submitted_hash:#x}"),
+            self.signer.address(),
+            Self::tx_kind_call_address(main_request.to.as_ref()),
+            main_request.value.unwrap_or(U256::ZERO),
+            "strategy_backrun",
+        )
+        .await?;
+
+        self.persist_profit_and_market_data(&victim_tx_hash, "strategy_mev_share", &profit)
             .await?;
-
-        self.db
-            .save_profit_record(
-                &victim_tx_hash,
-                self.chain_id,
-                "strategy_mev_share",
-                profit.profit_eth_f64,
-                profit.gas_cost_eth_f64,
-                profit.net_profit_eth_f64,
-                &profit.gross_profit_wei.to_string(),
-                &profit.gas_cost_wei.to_string(),
-                &profit.net_profit_wei.to_string(),
-                &profit.bribe_wei.to_string(),
-                &profit.flashloan_premium_wei.to_string(),
-                &profit.effective_cost_wei.to_string(),
-            )
-            .await?;
-
-        self.portfolio.record_trade_components(
-            self.chain_id,
-            profit.gross_profit_wei,
-            profit.gas_cost_wei,
-            profit.bribe_wei,
-            profit.flashloan_premium_wei,
-            profit.net_profit_wei,
-        );
-
-        let price_symbol = format!(
-            "{}USD",
-            crate::common::constants::native_symbol_for_chain(self.chain_id)
-        );
-        let _ = self
-            .db
-            .save_market_price(
-                self.chain_id,
-                &price_symbol,
-                profit.eth_quote.price,
-                &profit.eth_quote.source,
-            )
-            .await;
-
-        let receipt_target = submitted_hash;
-        match self.await_receipt(&receipt_target).await? {
-            ReceiptStatus::ConfirmedSuccess => {}
-            ReceiptStatus::ConfirmedRevert => {
-                self.emergency_exit_inventory("mev_share receipt reverted")
-                    .await;
-            }
-            ReceiptStatus::UnknownTimeout => {
-                if self.emergency_exit_on_unknown_receipt {
-                    self.emergency_exit_inventory("mev_share receipt unknown timeout")
-                        .await;
-                } else {
-                    tracing::warn!(
-                        target: "strategy",
-                        tx_hash = %format!("{:#x}", receipt_target),
-                        "MEV-Share receipt timeout without confirmed revert; emergency exit suppressed"
-                    );
-                }
-            }
-        }
-
-        self.stats.record_bundle(BundleTelemetry {
-            tx_hash: format!("{submitted_hash:#x}"),
-            source: "mev_share".to_string(),
-            profit_eth: profit.profit_eth_f64,
-            gas_cost_eth: profit.gas_cost_eth_f64,
-            net_eth: profit.net_profit_eth_f64,
-            timestamp_ms: chrono::Utc::now().timestamp_millis(),
-        });
+        self.handle_submitted_receipt(
+            submitted_hash,
+            "mev_share receipt reverted",
+            "mev_share receipt unknown timeout",
+            "MEV-Share receipt timeout without confirmed revert; emergency exit suppressed",
+        )
+        .await?;
+        self.record_bundle_telemetry(submitted_hash, "mev_share", &profit);
 
         Ok(Some(format!("{submitted_hash:#x}")))
     }

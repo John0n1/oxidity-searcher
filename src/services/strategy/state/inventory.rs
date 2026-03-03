@@ -60,6 +60,29 @@ impl StrategyExecutor {
         Ok(())
     }
 
+    async fn send_inventory_bundle_with_public_fallback(&self, raw_tx: &Vec<u8>, stage: &str) {
+        if let Err(e) = self
+            .bundle_sender
+            .send_bundle(std::slice::from_ref(raw_tx), self.chain_id)
+            .await
+        {
+            tracing::warn!(
+                target: "inventory",
+                stage,
+                error = %e,
+                "Bundle submit failed for inventory tx; falling back to public send"
+            );
+            if let Err(public_err) = self.bundle_sender.send_public_tx(raw_tx).await {
+                tracing::warn!(
+                    target: "inventory",
+                    stage,
+                    error = %public_err,
+                    "Public fallback send failed for inventory tx"
+                );
+            }
+        }
+    }
+
     pub async fn rebalance_token(&self, token: Address, router: Address) -> Result<(), AppError> {
         if token == self.wrapped_native {
             return Ok(());
@@ -146,18 +169,8 @@ impl StrategyExecutor {
                     nonce,
                 )
                 .await?;
-            if let Err(e) = self
-                .bundle_sender
-                .send_bundle(std::slice::from_ref(&approval.raw), self.chain_id)
-                .await
-            {
-                tracing::warn!(
-                    target: "inventory",
-                    error = %e,
-                    "Bundle submit failed for approval; falling back to public send"
-                );
-                let _ = self.bundle_sender.send_public_tx(&approval.raw).await;
-            }
+            self.send_inventory_bundle_with_public_fallback(&approval.raw, "approval")
+                .await;
         }
 
         let nonce_sell = nonce_cursor;
@@ -191,18 +204,8 @@ impl StrategyExecutor {
             )
             .await;
         let (raw, _, _) = self.sign_with_access_list(request, access_list).await?;
-        if let Err(e) = self
-            .bundle_sender
-            .send_bundle(std::slice::from_ref(&raw), self.chain_id)
-            .await
-        {
-            tracing::warn!(
-                target: "inventory",
-                error = %e,
-                "Bundle submit failed for inventory swap; falling back to public send"
-            );
-            let _ = self.bundle_sender.send_public_tx(&raw).await;
-        }
+        self.send_inventory_bundle_with_public_fallback(&raw, "swap")
+            .await;
 
         Ok(())
     }

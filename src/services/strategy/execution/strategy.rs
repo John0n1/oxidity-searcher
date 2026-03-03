@@ -1007,13 +1007,7 @@ impl StrategyExecutor {
             let touched = Self::deserialize_pools(&touched_raw);
             {
                 let mut guard = self.bundle_state.lock().await;
-                *guard = Some(BundleState {
-                    block,
-                    next_nonce: next,
-                    raw: Vec::new(),
-                    touched_pools: touched,
-                    send_pending: false,
-                });
+                *guard = Some(BundleState::with_touched(block, next, touched));
             }
             self.current_block.store(block, Ordering::Relaxed);
             self.stats.nonce_state_loads.fetch_add(1, Ordering::Relaxed);
@@ -1824,7 +1818,7 @@ mod tests {
     };
     use crate::services::strategy::routers::UniV2Router;
     use alloy::rpc::types::Header;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use std::sync::atomic::Ordering;
     use url::Url;
 
@@ -2137,19 +2131,11 @@ mod tests {
 
     #[tokio::test]
     async fn lease_and_peek_respects_reserved_nonces() {
-        use std::collections::HashSet;
-
         let exec = dummy_executor_for_tests().await;
         exec.current_block.store(10, Ordering::Relaxed);
         {
             let mut guard = exec.bundle_state.lock().await;
-            *guard = Some(BundleState {
-                block: 10,
-                next_nonce: 5,
-                raw: Vec::new(),
-                touched_pools: HashSet::new(),
-                send_pending: false,
-            });
+            *guard = Some(BundleState::new(10, 5));
         }
 
         let lease = exec.lease_nonces(3).await.expect("lease");
@@ -2236,13 +2222,7 @@ mod tests {
         exec.current_block.store(100, Ordering::Relaxed);
         {
             let mut guard = exec.bundle_state.lock().await;
-            *guard = Some(BundleState {
-                block: 100,
-                next_nonce: 5,
-                raw: Vec::new(),
-                touched_pools: HashSet::new(),
-                send_pending: false,
-            });
+            *guard = Some(BundleState::new(100, 5));
         }
 
         let lease = exec.lease_nonces(2).await.expect("lease");

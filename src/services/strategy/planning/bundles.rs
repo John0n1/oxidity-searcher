@@ -60,6 +60,37 @@ pub struct BundleState {
     pub send_pending: bool,
 }
 
+impl BundleState {
+    pub(crate) fn new(block: u64, next_nonce: u64) -> Self {
+        Self::with_touched(block, next_nonce, HashSet::new())
+    }
+
+    pub(crate) fn with_touched(
+        block: u64,
+        next_nonce: u64,
+        touched_pools: HashSet<Address>,
+    ) -> Self {
+        Self {
+            block,
+            next_nonce,
+            raw: Vec::new(),
+            touched_pools,
+            send_pending: false,
+        }
+    }
+
+    fn drain_for_flush(&mut self) -> (Vec<Vec<u8>>, u64, u64) {
+        let flush_bundle = self.raw.clone();
+        let block_for_flush = self.block;
+        let next_nonce_flush = self.next_nonce;
+        // Clear current buffer before releasing lock to avoid duplicate sends via scheduler.
+        self.raw.clear();
+        self.touched_pools.clear();
+        self.send_pending = false;
+        (flush_bundle, block_for_flush, next_nonce_flush)
+    }
+}
+
 impl StrategyExecutor {
     pub fn build_access_list(router: Address, tokens: &[Address]) -> AccessList {
         let mut seen = HashSet::new();
@@ -192,6 +223,48 @@ impl StrategyExecutor {
         self.sign_with_access_list(request, access_list).await
     }
 
+    async fn flush_pending_bundle(
+        &self,
+        flush_bundle: &[Vec<u8>],
+        dry_run_message: &str,
+    ) -> Result<(), AppError> {
+        if self.dry_run {
+            tracing::info!(
+                target: "bundle_merge",
+                txs = flush_bundle.len(),
+                bytes = bundle_bytes(flush_bundle),
+                "{dry_run_message}"
+            );
+            return Ok(());
+        }
+        self.bundle_sender
+            .send_bundle(flush_bundle, self.chain_id)
+            .await
+            .map_err(|e| AppError::Strategy(format!("Flush bundle failed: {e}")))?;
+        Ok(())
+    }
+
+    async fn sign_planned_request(
+        &self,
+        mut request: TransactionRequest,
+        nonce_cursor: &mut u64,
+        lease_end: u64,
+        nonce_label: &str,
+    ) -> Result<(Vec<u8>, B256), AppError> {
+        let next = request.nonce.unwrap_or(*nonce_cursor);
+        if next < *nonce_cursor || next >= lease_end {
+            return Err(AppError::Strategy(format!(
+                "{nonce_label} nonce outside lease"
+            )));
+        }
+        *nonce_cursor = next;
+        request.nonce = Some(*nonce_cursor);
+        let fallback = request.access_list.clone().unwrap_or_default();
+        let (raw, _, hash) = self.sign_with_access_list(request, fallback).await?;
+        *nonce_cursor = nonce_cursor.saturating_add(1);
+        Ok((raw, hash))
+    }
+
     pub async fn merge_and_send_bundle(
         &self,
         plan: BundlePlan,
@@ -213,13 +286,7 @@ impl StrategyExecutor {
             .map(|s| s.block != block)
             .unwrap_or(true)
         {
-            *state_guard = Some(BundleState {
-                block,
-                next_nonce: lease.end(),
-                raw: Vec::new(),
-                touched_pools: HashSet::new(),
-                send_pending: false,
-            });
+            *state_guard = Some(BundleState::new(block, lease.end()));
         } else if let Some(state) = state_guard.as_mut() {
             state.next_nonce = state.next_nonce.max(lease.end());
         }
@@ -250,39 +317,18 @@ impl StrategyExecutor {
                 if state.raw.is_empty() {
                     return Ok(None);
                 }
-                let flush_bundle = state.raw.clone();
-                let block_for_flush = state.block;
-                let next_nonce_flush = state.next_nonce;
-                state.raw.clear();
-                state.touched_pools.clear();
-                state.send_pending = false;
-                (flush_bundle, block_for_flush, next_nonce_flush)
+                state.drain_for_flush()
             };
-            let chain_id = self.chain_id;
             drop(state_guard);
 
-            if self.dry_run {
-                tracing::info!(
-                    target: "bundle_merge",
-                    txs = flush_bundle.len(),
-                    bytes = flush_bundle.iter().map(|b| b.len()).sum::<usize>(),
-                    "Dry-run: would flush bundle due to pool conflict"
-                );
-            } else {
-                self.bundle_sender
-                    .send_bundle(&flush_bundle, chain_id)
-                    .await
-                    .map_err(|e| AppError::Strategy(format!("Flush bundle failed: {e}")))?;
-            }
+            self.flush_pending_bundle(
+                &flush_bundle,
+                "Dry-run: would flush bundle due to pool conflict",
+            )
+            .await?;
 
             state_guard = self.bundle_state.lock().await;
-            *state_guard = Some(BundleState {
-                block: block_for_flush,
-                next_nonce: next_nonce_flush,
-                raw: Vec::new(),
-                touched_pools: HashSet::new(),
-                send_pending: false,
-            });
+            *state_guard = Some(BundleState::new(block_for_flush, next_nonce_flush));
         }
 
         let mut nonce = lease.base;
@@ -291,31 +337,19 @@ impl StrategyExecutor {
         let mut new_raw: Vec<Vec<u8>> = Vec::new();
 
         // Approvals must precede any tx that depends on them (front-run/backrun).
-        for mut approval in plan.approvals {
-            let next = approval.nonce.unwrap_or(nonce);
-            if next < nonce || next >= lease_end {
-                return Err(AppError::Strategy("approval nonce outside lease".into()));
-            }
-            nonce = next;
-            approval.nonce = Some(nonce);
-            let fallback = approval.access_list.clone().unwrap_or_default();
-            let (raw, _, hash) = self.sign_with_access_list(approval, fallback).await?;
+        for approval in plan.approvals {
+            let (raw, hash) = self
+                .sign_planned_request(approval, &mut nonce, lease_end, "approval")
+                .await?;
             hashes.approvals.push(hash);
-            nonce = nonce.saturating_add(1);
             new_raw.push(raw);
         }
 
-        if let Some(mut fr) = plan.front_run {
-            let next = fr.nonce.unwrap_or(nonce);
-            if next < nonce || next >= lease_end {
-                return Err(AppError::Strategy("front-run nonce outside lease".into()));
-            }
-            nonce = next;
-            fr.nonce = Some(nonce);
-            let fallback = fr.access_list.clone().unwrap_or_default();
-            let (raw, _, hash) = self.sign_with_access_list(fr, fallback).await?;
+        if let Some(fr) = plan.front_run {
+            let (raw, hash) = self
+                .sign_planned_request(fr, &mut nonce, lease_end, "front-run")
+                .await?;
             hashes.front_run = Some(hash);
-            nonce = nonce.saturating_add(1);
             new_raw.push(raw);
         }
 
@@ -323,17 +357,10 @@ impl StrategyExecutor {
             new_raw.push(victim);
         }
 
-        let mut main = plan.main;
-        let next = main.nonce.unwrap_or(nonce);
-        if next < nonce || next >= lease_end {
-            return Err(AppError::Strategy("main nonce outside lease".into()));
-        }
-        main.nonce = Some(next);
-        nonce = next;
-        let fallback = main.access_list.clone().unwrap_or_default();
-        let (raw, _, hash) = self.sign_with_access_list(main, fallback).await?;
+        let (raw, hash) = self
+            .sign_planned_request(plan.main, &mut nonce, lease_end, "main")
+            .await?;
         hashes.main = hash;
-        nonce = nonce.saturating_add(1);
         new_raw.push(raw);
 
         if nonce > lease_end {
@@ -360,39 +387,18 @@ impl StrategyExecutor {
         if (combined_txs > FLASHBOTS_MAX_TXS || combined_bytes > FLASHBOTS_MAX_BYTES)
             && !state.raw.is_empty()
         {
-            let flush_bundle = state.raw.clone();
-            let chain_id = self.chain_id;
-            let block_for_flush = state.block;
-            let next_nonce_flush = state.next_nonce;
-            // clear current buffer before releasing lock to avoid double-send via schedule.
-            state.raw.clear();
-            state.touched_pools.clear();
-            state.send_pending = false;
+            let (flush_bundle, block_for_flush, next_nonce_flush) = state.drain_for_flush();
             drop(state_guard);
 
-            if self.dry_run {
-                tracing::info!(
-                    target: "bundle_merge",
-                    txs = flush_bundle.len(),
-                    bytes = flush_bundle.iter().map(|b| b.len()).sum::<usize>(),
-                    "Dry-run: would flush bundle before exceeding limits"
-                );
-            } else {
-                self.bundle_sender
-                    .send_bundle(&flush_bundle, chain_id)
-                    .await
-                    .map_err(|e| AppError::Strategy(format!("Flush bundle failed: {e}")))?;
-            }
+            self.flush_pending_bundle(
+                &flush_bundle,
+                "Dry-run: would flush bundle before exceeding limits",
+            )
+            .await?;
 
             // Re-establish state after flush
             state_guard = self.bundle_state.lock().await;
-            *state_guard = Some(BundleState {
-                block: block_for_flush,
-                next_nonce: next_nonce_flush,
-                raw: Vec::new(),
-                touched_pools: HashSet::new(),
-                send_pending: false,
-            });
+            *state_guard = Some(BundleState::new(block_for_flush, next_nonce_flush));
         }
 
         let Some(state) = state_guard.as_mut() else {
@@ -507,13 +513,7 @@ impl StrategyExecutor {
         let mut guard = self.bundle_state.lock().await;
         if guard.as_ref().map(|s| s.block != block).unwrap_or(true) {
             let base_nonce = self.nonce_manager.get_base_nonce(block).await?;
-            *guard = Some(BundleState {
-                block,
-                next_nonce: base_nonce,
-                raw: Vec::new(),
-                touched_pools: HashSet::new(),
-                send_pending: false,
-            });
+            *guard = Some(BundleState::new(block, base_nonce));
         }
         let Some(state) = guard.as_mut() else {
             return Err(AppError::Strategy(
