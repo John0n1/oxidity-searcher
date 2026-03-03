@@ -495,7 +495,7 @@ impl StrategyExecutor {
             .clone()
             .into_input()
             .unwrap_or_default();
-        let backrun_value = backrun.request.value.unwrap_or(backrun.value);
+        let backrun_value = backrun.request.value.unwrap_or(U256::ZERO);
         targets.push(backrun_target);
         payloads.push(backrun_payload);
         values.push(backrun_value);
@@ -1637,6 +1637,12 @@ impl StrategyExecutor {
                             route_plan: None,
                         });
                     }
+                    let starts_with_wrapped = path.first().copied() == Some(self.wrapped_native);
+                    let tx_value = if !use_flashloan && starts_with_wrapped {
+                        value
+                    } else {
+                        U256::ZERO
+                    };
                     if let Some(addr) = access_list.0.first().map(|a| a.address)
                         && addr != forward_router
                     {
@@ -1649,19 +1655,81 @@ impl StrategyExecutor {
                             self.wrapped_native,
                         );
                         gas_limit = gas_limit.max(gas_limit_hint);
+                        return Ok(BackrunTx {
+                            raw: Vec::new(),
+                            hash: B256::ZERO,
+                            to: forward_router,
+                            value: tx_value,
+                            request: TransactionRequest {
+                                from: Some(self.signer.address()),
+                                to: Some(TxKind::Call(forward_router)),
+                                max_fee_per_gas: Some(gas_fees.max_fee_per_gas),
+                                max_priority_fee_per_gas: Some(gas_fees.max_priority_fee_per_gas),
+                                gas: Some(gas_limit),
+                                value: Some(tx_value),
+                                input: TransactionInput::new(calldata.into()),
+                                nonce: Some(nonce),
+                                chain_id: Some(self.chain_id),
+                                access_list: Some(access_list),
+                                ..Default::default()
+                            },
+                            expected_out: tokens_out,
+                            expected_out_token,
+                            unwrap_to_native,
+                            uses_flashloan: false,
+                            flashloan_premium: U256::ZERO,
+                            flashloan_overhead_gas: 0,
+                            router_kind: observed.router_kind,
+                            route_plan: self
+                                .best_route_plan(
+                                    if has_wrapped {
+                                        self.wrapped_native
+                                    } else {
+                                        observed
+                                            .path
+                                            .first()
+                                            .copied()
+                                            .unwrap_or(self.wrapped_native)
+                                    },
+                                    expected_out_token,
+                                    value,
+                                    gas_fees.max_fee_per_gas,
+                                )
+                                .await
+                                .or_else(|| {
+                                    StrategyExecutor::single_leg_route(
+                                        RouteVenue::UniV2,
+                                        forward_router,
+                                        if has_wrapped {
+                                            self.wrapped_native
+                                        } else {
+                                            observed
+                                                .path
+                                                .first()
+                                                .copied()
+                                                .unwrap_or(self.wrapped_native)
+                                        },
+                                        expected_out_token,
+                                        value,
+                                        tokens_out,
+                                        None,
+                                        None,
+                                    )
+                                }),
+                        });
                     }
                     return Ok(BackrunTx {
                         raw: Vec::new(),
                         hash: B256::ZERO,
                         to: forward_router,
-                        value,
+                        value: tx_value,
                         request: TransactionRequest {
                             from: Some(self.signer.address()),
                             to: Some(TxKind::Call(forward_router)),
                             max_fee_per_gas: Some(gas_fees.max_fee_per_gas),
                             max_priority_fee_per_gas: Some(gas_fees.max_priority_fee_per_gas),
                             gas: Some(gas_limit),
-                            value: Some(value),
+                            value: Some(tx_value),
                             input: TransactionInput::new(calldata.into()),
                             nonce: Some(nonce),
                             chain_id: Some(self.chain_id),
@@ -1998,7 +2066,7 @@ impl StrategyExecutor {
                         raw: Vec::new(),
                         hash: B256::ZERO,
                         to: exec_router,
-                        value,
+                        value: tx_value,
                         request: TransactionRequest {
                             from: Some(self.signer.address()),
                             to: Some(TxKind::Call(exec_router)),

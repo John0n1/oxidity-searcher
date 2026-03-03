@@ -594,14 +594,34 @@ impl BundleSender {
         replacement_uuid: Option<&str>,
     ) -> Result<(), AppError> {
         let sig_header = self.sign_request(body_bytes)?;
+        self.post_bundle_request(
+            url,
+            body_bytes,
+            Some(&sig_header),
+            name,
+            target_block,
+            txs,
+            replacement_uuid,
+            "eth_sendBundle_signed",
+            "Bundle submitted",
+        )
+        .await
+    }
+
+    async fn post_bundle_request(
+        &self,
+        url: &str,
+        body_bytes: &[u8],
+        sig_header: Option<&str>,
+        name: &str,
+        target_block: u64,
+        txs: usize,
+        replacement_uuid: Option<&str>,
+        request_label: &str,
+        success_label: &str,
+    ) -> Result<(), AppError> {
         let (status, body_text, attempts, saw_timeout) = match self
-            .post_json_with_retries(
-                url,
-                body_bytes,
-                Some(&sig_header),
-                Some(name),
-                "eth_sendBundle_signed",
-            )
+            .post_json_with_retries(url, body_bytes, sig_header, Some(name), request_label)
             .await
         {
             Ok(v) => v,
@@ -620,7 +640,16 @@ impl BundleSender {
 
         if status.is_success() {
             let bundle_id = Self::extract_bundle_id(&body_text);
-            tracing::info!(target: "executor", relay=%url, name=%name, block=target_block, txs=txs, body=%body_text, "Bundle submitted");
+            tracing::info!(
+                target: "executor",
+                relay=%url,
+                name=%name,
+                block=target_block,
+                txs=txs,
+                body=%body_text,
+                message = success_label,
+                "Bundle relay response"
+            );
             self.stats
                 .record_relay_attempt(name, true, false, attempts.saturating_sub(1));
             self.stats.record_relay_bundle_status(
@@ -657,53 +686,18 @@ impl BundleSender {
                 .post_bundle_with_sig(url, body_bytes, name, target_block, txs, replacement_uuid)
                 .await;
         }
-
-        let (status, body_text, attempts, saw_timeout) = match self
-            .post_json_with_retries(
-                url,
-                body_bytes,
-                None,
-                Some(name),
-                "eth_sendBundle_best_effort",
-            )
-            .await
-        {
-            Ok(v) => v,
-            Err((e, attempts, saw_timeout)) => {
-                self.stats.record_relay_attempt(
-                    name,
-                    false,
-                    saw_timeout,
-                    attempts.saturating_sub(1),
-                );
-                self.stats
-                    .record_relay_bundle_status(name, "post_error", replacement_uuid, None);
-                return Err(e);
-            }
-        };
-
-        if status.is_success() {
-            let bundle_id = Self::extract_bundle_id(&body_text);
-            tracing::info!(target: "executor", relay=%url, name=%name, block=target_block, txs=txs, body=%body_text, "Bundle submitted (best-effort)");
-            self.stats
-                .record_relay_attempt(name, true, false, attempts.saturating_sub(1));
-            self.stats.record_relay_bundle_status(
-                name,
-                "accepted",
-                replacement_uuid,
-                bundle_id.as_deref(),
-            );
-            return Ok(());
-        }
-
-        self.stats
-            .record_relay_attempt(name, false, saw_timeout, attempts.saturating_sub(1));
-        self.stats
-            .record_relay_bundle_status(name, "rejected", replacement_uuid, None);
-        Err(AppError::Connection(format!(
-            "Relay {} rejected bundle: {} body={}",
-            name, status, body_text
-        )))
+        self.post_bundle_request(
+            url,
+            body_bytes,
+            None,
+            name,
+            target_block,
+            txs,
+            replacement_uuid,
+            "eth_sendBundle_best_effort",
+            "Bundle submitted (best-effort)",
+        )
+        .await
     }
 
     async fn cancel_bundle_with_sig(

@@ -905,8 +905,10 @@ impl GlobalSettings {
     }
 
     pub fn load_with_report(path: Option<&str>) -> Result<LoadedSettings, AppError> {
-        // Load .env file if it exists
-        dotenvy::dotenv().ok();
+        // Unit tests should not implicitly pull local .env values unless explicitly requested.
+        if should_load_dotenv() {
+            dotenvy::dotenv().ok();
+        }
 
         let selected_config = resolve_config_path(path);
         let env_resolution = resolve_env_contract();
@@ -1724,6 +1726,13 @@ impl GlobalSettings {
             etherscan: self.etherscan_api_key.clone(),
         }
     }
+}
+
+fn should_load_dotenv() -> bool {
+    if let Some(explicit) = env_bool("OXIDITY_LOAD_DOTENV") {
+        return explicit;
+    }
+    !cfg!(test)
 }
 
 impl LoadedSettings {
@@ -2680,8 +2689,10 @@ mod tests {
         ));
         std::fs::write(&tmp, "").expect("write temp config");
 
-        let err = GlobalSettings::load_with_path(Some(tmp.to_str().expect("utf8 path")))
-            .expect_err("required canonical env values must be present");
+        let err = match GlobalSettings::load_with_path(Some(tmp.to_str().expect("utf8 path"))) {
+            Ok(_) => panic!("required canonical env values must be present"),
+            Err(err) => err,
+        };
         assert!(
             matches!(err, AppError::Config(msg) if msg.contains("Missing required canonical env values"))
         );

@@ -12,8 +12,8 @@ use crate::network::mev_share::MevShareHint;
 use crate::network::price_feed::PriceQuote;
 use crate::services::strategy::bundles::BundlePlan;
 use crate::services::strategy::decode::{
-    ObservedSwap, RouterKind, SwapDirection, decode_swap, decode_swap_input, direction,
-    extract_swap_deadline, target_token,
+    ObservedSwap, RouterKind, SwapDirection, decode_swap_input, direction, extract_swap_deadline,
+    target_token,
 };
 use crate::services::strategy::planning::bundles::NonceLease;
 use crate::services::strategy::planning::{
@@ -31,6 +31,13 @@ use alloy::primitives::{Address, B256, I256, U256, keccak256};
 use alloy::rpc::types::eth::state::StateOverridesBuilder;
 use alloy::rpc::types::eth::{Transaction, TransactionInput, TransactionRequest};
 use alloy_sol_types::SolCall;
+
+enum SwapDecodeOutcome {
+    Observed(ObservedSwap),
+    Skip,
+    UnknownRouter,
+    DecodeFailed,
+}
 
 impl StrategyExecutor {
     fn deadline_min_seconds_ahead(&self) -> u64 {
@@ -64,6 +71,83 @@ impl StrategyExecutor {
         input
             .get(..4)
             .and_then(|slice| <[u8; 4]>::try_from(slice).ok())
+    }
+
+    fn decode_observed_swap_for_router_call(
+        &self,
+        router: Address,
+        input: &[u8],
+        tx_value: U256,
+        decoded_source: &'static str,
+        unknown_source: &'static str,
+        treat_common_token_calls_as_noise: bool,
+    ) -> SwapDecodeOutcome {
+        let mut predecoded_unknown_router: Option<ObservedSwap> = None;
+        let mut decode_recorded = false;
+        let category = self.allowlist_category_for(router);
+        match category {
+            Some(AllowlistCategory::Wrappers) => {
+                let _ =
+                    self.handle_wrapper_or_infra_noise(router, input, AllowlistCategory::Wrappers);
+                return SwapDecodeOutcome::Skip;
+            }
+            Some(AllowlistCategory::Infra) => {
+                let _ = self.handle_wrapper_or_infra_noise(router, input, AllowlistCategory::Infra);
+                return SwapDecodeOutcome::Skip;
+            }
+            Some(AllowlistCategory::Routers) => {}
+            None => {
+                if treat_common_token_calls_as_noise && Self::is_common_token_call(input) {
+                    self.log_skip(SkipReason::TokenCall, "erc20_transfer_or_approve_noise");
+                    return SwapDecodeOutcome::Skip;
+                }
+                if self.allow_unknown_router_decode() {
+                    let decoded = decode_swap_input(router, input, tx_value);
+                    self.stats
+                        .record_decode_attempt(AllowlistCategory::Routers, decoded.is_some());
+                    decode_recorded = true;
+                    if let Some(mut observed) = decoded
+                        && let Some(exec_router) =
+                            self.canonical_exec_router_for_kind(observed.router_kind)
+                    {
+                        if let Some(discovery) = &self.router_discovery {
+                            discovery.record_unknown_router(router, decoded_source);
+                        }
+                        tracing::debug!(
+                            target: "strategy",
+                            unknown_router = %format!("{router:#x}"),
+                            exec_router = %format!("{exec_router:#x}"),
+                            kind = ?observed.router_kind,
+                            "Decoded unknown router swap; routing execution through canonical router"
+                        );
+                        observed.router = exec_router;
+                        predecoded_unknown_router = Some(observed);
+                    }
+                }
+                if predecoded_unknown_router.is_none() {
+                    if let Some(discovery) = &self.router_discovery {
+                        discovery.record_unknown_router(router, unknown_source);
+                    }
+                    self.log_skip(SkipReason::UnknownRouter, &format!("to={router:#x}"));
+                    return SwapDecodeOutcome::UnknownRouter;
+                }
+            }
+        }
+
+        let observed_swap =
+            predecoded_unknown_router.or_else(|| decode_swap_input(router, input, tx_value));
+        if !decode_recorded {
+            self.stats
+                .record_decode_attempt(AllowlistCategory::Routers, observed_swap.is_some());
+        }
+
+        match observed_swap {
+            Some(observed) => SwapDecodeOutcome::Observed(observed),
+            None => {
+                self.log_skip(SkipReason::DecodeFailed, "unable to decode swap input");
+                SwapDecodeOutcome::DecodeFailed
+            }
+        }
     }
 
     fn sig_selector(signature: &str) -> [u8; 4] {
@@ -1037,90 +1121,34 @@ impl StrategyExecutor {
         {
             return Ok(Some(submitted));
         }
-        let mut predecoded_unknown_router: Option<ObservedSwap> = None;
-        let mut decode_recorded = false;
-        let category = self.allowlist_category_for(to_addr);
-        match category {
-            Some(AllowlistCategory::Wrappers) => {
-                let _ = self.handle_wrapper_or_infra_noise(
-                    to_addr,
-                    tx.input(),
-                    AllowlistCategory::Wrappers,
-                );
+        let observed_swap = match self.decode_observed_swap_for_router_call(
+            to_addr,
+            tx.input(),
+            tx.value(),
+            "mempool_decoded",
+            "mempool",
+            true,
+        ) {
+            SwapDecodeOutcome::Observed(observed) => observed,
+            SwapDecodeOutcome::UnknownRouter => {
+                if let Some(submitted) = self
+                    .try_signal_driven_arb(tx, to_addr, received_at, "unknown_router")
+                    .await?
+                {
+                    return Ok(Some(submitted));
+                }
                 return Ok(None);
             }
-            Some(AllowlistCategory::Infra) => {
-                let _ = self.handle_wrapper_or_infra_noise(
-                    to_addr,
-                    tx.input(),
-                    AllowlistCategory::Infra,
-                );
+            SwapDecodeOutcome::DecodeFailed => {
+                if let Some(submitted) = self
+                    .try_signal_driven_arb(tx, to_addr, received_at, "decode_failed")
+                    .await?
+                {
+                    return Ok(Some(submitted));
+                }
                 return Ok(None);
             }
-            Some(AllowlistCategory::Routers) => {}
-            None => {
-                if Self::is_common_token_call(tx.input()) {
-                    // Plain ERC20 transfer/approve noise is not a strategy candidate.
-                    self.log_skip(SkipReason::TokenCall, "erc20_transfer_or_approve_noise");
-                    return Ok(None);
-                }
-                if self.allow_unknown_router_decode() {
-                    let decoded = decode_swap(tx);
-                    self.stats
-                        .record_decode_attempt(AllowlistCategory::Routers, decoded.is_some());
-                    decode_recorded = true;
-                    if let Some(mut observed) = decoded
-                        && let Some(exec_router) =
-                            self.canonical_exec_router_for_kind(observed.router_kind)
-                    {
-                        if let Some(discovery) = &self.router_discovery {
-                            discovery.record_unknown_router(to_addr, "mempool_decoded");
-                        }
-                        tracing::debug!(
-                            target: "strategy",
-                            unknown_router = %format!("{to_addr:#x}"),
-                            exec_router = %format!("{exec_router:#x}"),
-                            kind = ?observed.router_kind,
-                            "Decoded unknown router swap; routing execution through canonical router"
-                        );
-                        observed.router = exec_router;
-                        predecoded_unknown_router = Some(observed);
-                    }
-                }
-                if predecoded_unknown_router.is_none() {
-                    if let Some(discovery) = &self.router_discovery {
-                        discovery.record_unknown_router(to_addr, "mempool");
-                    }
-                    self.log_skip(SkipReason::UnknownRouter, &format!("to={to_addr:#x}"));
-                    if let Some(submitted) = self
-                        .try_signal_driven_arb(tx, to_addr, received_at, "unknown_router")
-                        .await?
-                    {
-                        return Ok(Some(submitted));
-                    }
-                    return Ok(None);
-                }
-            }
-        }
-
-        let observed_swap = if let Some(observed) = predecoded_unknown_router {
-            Some(observed)
-        } else {
-            decode_swap(tx)
-        };
-        if !decode_recorded {
-            self.stats
-                .record_decode_attempt(AllowlistCategory::Routers, observed_swap.is_some());
-        }
-        let Some(observed_swap) = observed_swap else {
-            self.log_skip(SkipReason::DecodeFailed, "unable to decode swap input");
-            if let Some(submitted) = self
-                .try_signal_driven_arb(tx, to_addr, received_at, "decode_failed")
-                .await?
-            {
-                return Ok(Some(submitted));
-            }
-            return Ok(None);
+            SwapDecodeOutcome::Skip => return Ok(None),
         };
         let (direction, target_token) = match self.validate_swap(to_addr, &observed_swap) {
             Some(v) => v,
@@ -1276,7 +1304,7 @@ impl StrategyExecutor {
             .await?;
         let submitted_hash = plan_hashes.main;
         let recorded_to = main_request.to.or(Some(TxKind::Call(backrun.to)));
-        let recorded_value = main_request.value.unwrap_or(backrun.value);
+        let recorded_value = main_request.value.unwrap_or(U256::ZERO);
         self.db
             .save_transaction(
                 &format!("{:#x}", submitted_hash),
@@ -1399,73 +1427,18 @@ impl StrategyExecutor {
                 return Ok(None);
             }
         }
-        let mut predecoded_unknown_router: Option<ObservedSwap> = None;
-        let mut decode_recorded = false;
-        let category = self.allowlist_category_for(hint.router);
-        match category {
-            Some(AllowlistCategory::Wrappers) => {
-                let _ = self.handle_wrapper_or_infra_noise(
-                    hint.router,
-                    &hint.call_data,
-                    AllowlistCategory::Wrappers,
-                );
-                return Ok(None);
-            }
-            Some(AllowlistCategory::Infra) => {
-                let _ = self.handle_wrapper_or_infra_noise(
-                    hint.router,
-                    &hint.call_data,
-                    AllowlistCategory::Infra,
-                );
-                return Ok(None);
-            }
-            Some(AllowlistCategory::Routers) => {}
-            None => {
-                if self.allow_unknown_router_decode() {
-                    let decoded = decode_swap_input(hint.router, &hint.call_data, hint.value);
-                    self.stats
-                        .record_decode_attempt(AllowlistCategory::Routers, decoded.is_some());
-                    decode_recorded = true;
-                    if let Some(mut observed) = decoded
-                        && let Some(exec_router) =
-                            self.canonical_exec_router_for_kind(observed.router_kind)
-                    {
-                        if let Some(discovery) = &self.router_discovery {
-                            discovery.record_unknown_router(hint.router, "mev_share_decoded");
-                        }
-                        tracing::debug!(
-                            target: "strategy",
-                            unknown_router = %format!("{:#x}", hint.router),
-                            exec_router = %format!("{exec_router:#x}"),
-                            kind = ?observed.router_kind,
-                            "Decoded unknown MEV-Share router; routing execution through canonical router"
-                        );
-                        observed.router = exec_router;
-                        predecoded_unknown_router = Some(observed);
-                    }
-                }
-                if predecoded_unknown_router.is_none() {
-                    if let Some(discovery) = &self.router_discovery {
-                        discovery.record_unknown_router(hint.router, "mev_share");
-                    }
-                    self.log_skip(SkipReason::UnknownRouter, &format!("to={:#x}", hint.router));
-                    return Ok(None);
-                }
-            }
-        }
-
-        let observed_swap = if let Some(observed) = predecoded_unknown_router {
-            Some(observed)
-        } else {
-            decode_swap_input(hint.router, &hint.call_data, hint.value)
-        };
-        if !decode_recorded {
-            self.stats
-                .record_decode_attempt(AllowlistCategory::Routers, observed_swap.is_some());
-        }
-        let Some(observed_swap) = observed_swap else {
-            self.log_skip(SkipReason::DecodeFailed, "unable to decode swap input");
-            return Ok(None);
+        let observed_swap = match self.decode_observed_swap_for_router_call(
+            hint.router,
+            &hint.call_data,
+            hint.value,
+            "mev_share_decoded",
+            "mev_share",
+            false,
+        ) {
+            SwapDecodeOutcome::Observed(observed) => observed,
+            SwapDecodeOutcome::UnknownRouter
+            | SwapDecodeOutcome::DecodeFailed
+            | SwapDecodeOutcome::Skip => return Ok(None),
         };
         let (direction, target_token) = match self.validate_swap(hint.router, &observed_swap) {
             Some(v) => v,
@@ -1676,7 +1649,7 @@ impl StrategyExecutor {
                     .as_deref(),
                 main_request
                     .value
-                    .unwrap_or(backrun.value)
+                    .unwrap_or(U256::ZERO)
                     .to_string()
                     .as_str(),
                 Some("strategy_backrun"),
@@ -2283,9 +2256,10 @@ impl StrategyExecutor {
         };
 
         let bribe_wei = if let Some((_, req, _)) = executor_request.as_ref() {
+            let backrun_native_value = backrun.request.value.unwrap_or(U256::ZERO);
             req.value
                 .unwrap_or(U256::ZERO)
-                .saturating_sub(backrun.value)
+                .saturating_sub(backrun_native_value)
         } else if Some(backrun.to) == self.executor {
             backrun
                 .request
@@ -2626,12 +2600,8 @@ impl StrategyExecutor {
             .unwrap_or_else(|| gas_fees.base_fee_per_gas.saturating_add(paid_tip));
         let gas_cost_wei = U256::from(gas_used_total).saturating_mul(U256::from(paid_fee));
 
-        // Include any wrapper‑level bribe/value delta even if backrun.value itself is zero.
-        let backrun_value = backrun
-            .request
-            .value
-            .unwrap_or(backrun.value)
-            .max(backrun.value);
+        // Principal for upfront-balance checks is native value actually transferred by the tx.
+        let backrun_value = backrun.request.value.unwrap_or(U256::ZERO);
         let principal_wei = backrun_value.saturating_add(attack_value_eth);
         let upfront_need = Self::required_wallet_upfront_wei(
             backrun.uses_flashloan,

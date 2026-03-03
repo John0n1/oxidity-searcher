@@ -1,6 +1,8 @@
+use alloy_rpc_types_engine::{Claims, JwtSecret};
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::path::Path;
 use std::time::Duration;
 
 #[derive(Debug, Deserialize)]
@@ -21,19 +23,45 @@ fn nethermind_http_provider() -> Option<String> {
         .filter(|v| !v.trim().is_empty())
 }
 
-async fn rpc_call(client: &Client, url: &str, method: &str, params: Value) -> RpcResponse {
+fn nethermind_jwt_secret_path() -> Option<String> {
+    std::env::var("NETHERMIND_JWT_SECRET_PATH")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            std::env::var("PROVIDER_JWT_SECRET_PATH")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+}
+
+fn nethermind_auth_header() -> Option<String> {
+    let path = nethermind_jwt_secret_path()?;
+    let secret = JwtSecret::from_file(Path::new(&path))
+        .unwrap_or_else(|e| panic!("failed to load JWT secret from {path}: {e}"));
+    let token = secret
+        .encode(&Claims::default())
+        .unwrap_or_else(|e| panic!("failed to encode JWT from {path}: {e}"));
+    Some(format!("Bearer {token}"))
+}
+
+async fn rpc_call(
+    client: &Client,
+    url: &str,
+    auth_header: Option<&str>,
+    method: &str,
+    params: Value,
+) -> RpcResponse {
     let payload = json!({
         "jsonrpc": "2.0",
         "id": 1u64,
         "method": method,
         "params": params,
     });
-    let resp = client
-        .post(url)
-        .json(&payload)
-        .send()
-        .await
-        .expect("rpc request");
+    let mut req = client.post(url).json(&payload);
+    if let Some(value) = auth_header {
+        req = req.header("Authorization", value);
+    }
+    let resp = req.send().await.expect("rpc request");
     assert!(
         resp.status().is_success(),
         "non-success HTTP status for {method}"
@@ -83,8 +111,16 @@ async fn eth_simulate_v1_shape_matches_nethermind_expectations() {
         .timeout(Duration::from_secs(20))
         .build()
         .expect("client");
+    let auth_header = nethermind_auth_header();
 
-    let chain = rpc_call(&client, &url, "eth_chainId", json!([])).await;
+    let chain = rpc_call(
+        &client,
+        &url,
+        auth_header.as_deref(),
+        "eth_chainId",
+        json!([]),
+    )
+    .await;
     let chain_id = chain.result.and_then(|v| v.as_str().map(str::to_string));
     assert_eq!(
         chain_id.as_deref(),
@@ -112,7 +148,14 @@ async fn eth_simulate_v1_shape_matches_nethermind_expectations() {
         "latest"
     ]);
 
-    let resp = rpc_call(&client, &url, "eth_simulateV1", params).await;
+    let resp = rpc_call(
+        &client,
+        &url,
+        auth_header.as_deref(),
+        "eth_simulateV1",
+        params,
+    )
+    .await;
     assert_shape_conformant("eth_simulateV1", &resp);
 }
 
@@ -128,8 +171,16 @@ async fn debug_trace_call_many_shape_matches_nethermind_expectations() {
         .timeout(Duration::from_secs(20))
         .build()
         .expect("client");
+    let auth_header = nethermind_auth_header();
 
-    let chain = rpc_call(&client, &url, "eth_chainId", json!([])).await;
+    let chain = rpc_call(
+        &client,
+        &url,
+        auth_header.as_deref(),
+        "eth_chainId",
+        json!([]),
+    )
+    .await;
     let chain_id = chain.result.and_then(|v| v.as_str().map(str::to_string));
     assert_eq!(
         chain_id.as_deref(),
@@ -153,6 +204,13 @@ async fn debug_trace_call_many_shape_matches_nethermind_expectations() {
         {}
     ]);
 
-    let resp = rpc_call(&client, &url, "debug_traceCallMany", params).await;
+    let resp = rpc_call(
+        &client,
+        &url,
+        auth_header.as_deref(),
+        "debug_traceCallMany",
+        params,
+    )
+    .await;
     assert_shape_conformant("debug_traceCallMany", &resp);
 }

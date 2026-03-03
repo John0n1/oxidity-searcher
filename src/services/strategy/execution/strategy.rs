@@ -1735,13 +1735,18 @@ impl StrategyExecutor {
                 Ok(Some(rcpt)) => {
                     let block_num = rcpt.block_number;
                     let status = rcpt.status();
+                    let block_number_i64 = block_num.and_then(|b| i64::try_from(b).ok());
+                    if block_num.is_some() && block_number_i64.is_none() {
+                        tracing::warn!(
+                            target: "strategy",
+                            hash = %format!("{:#x}", hash),
+                            block_num = ?block_num,
+                            "Block number exceeds i64; skipping DB block_number update"
+                        );
+                    }
                     if let Err(e) = self
                         .db
-                        .update_status(
-                            &format!("{:#x}", hash),
-                            block_num.map(|b| b as i64),
-                            Some(status),
-                        )
+                        .update_status(&format!("{:#x}", hash), block_number_i64, Some(status))
                         .await
                     {
                         tracing::warn!(target: "strategy", error = %e, "Failed to persist tx status");

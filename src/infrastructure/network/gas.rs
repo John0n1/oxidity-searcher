@@ -232,23 +232,35 @@ impl GasOracle {
         let base_gwei: f64 = result.suggest_base_fee.parse().map_err(|_| {
             AppError::Initialization("Invalid suggestBaseFee from Etherscan".into())
         })?;
-        let tip_gwei: f64 = result.propose_gas_price.parse().map_err(|_| {
+        let propose_gwei: f64 = result.propose_gas_price.parse().map_err(|_| {
             AppError::Initialization("Invalid ProposeGasPrice from Etherscan".into())
         })?;
+        if !base_gwei.is_finite()
+            || !propose_gwei.is_finite()
+            || base_gwei < 0.0
+            || propose_gwei < 0.0
+        {
+            return Err(AppError::Initialization(
+                "Invalid gas oracle values from Etherscan".into(),
+            ));
+        }
 
         let base = (base_gwei * 1e9_f64) as u128;
         let next_base = base;
-        let priority = (tip_gwei * 1e9_f64) as u128;
+        let propose = (propose_gwei * 1e9_f64) as u128;
+        // ProposeGasPrice is a total gas price quote; derive effective tip as max(propose-base, 0).
+        let priority = propose.saturating_sub(base);
+        let max_fee = propose.max(next_base.saturating_add(priority));
 
         Ok(GasFees {
-            max_fee_per_gas: next_base + priority,
+            max_fee_per_gas: max_fee,
             max_priority_fee_per_gas: priority,
             next_base_fee_per_gas: next_base,
             base_fee_per_gas: base,
             p50_priority_fee_per_gas: None,
             p90_priority_fee_per_gas: None,
             gas_used_ratio: None,
-            suggested_max_fee_per_gas: None,
+            suggested_max_fee_per_gas: Some(propose),
         })
     }
 }

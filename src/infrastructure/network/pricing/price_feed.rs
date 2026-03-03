@@ -851,6 +851,9 @@ impl PriceFeed {
             .answer
             .try_into()
             .map_err(|e| AppError::Connection(format!("Chainlink answer convert failed: {}", e)))?;
+        if raw <= 0 {
+            return Ok(None);
+        }
         let price = (raw as f64) / 10f64.powi(decimals);
         if critical_stale {
             return Ok(None);

@@ -10,6 +10,14 @@ use sqlx::{
 };
 use std::str::FromStr;
 
+fn to_i64(value: u64, label: &str) -> Result<i64, AppError> {
+    i64::try_from(value).map_err(|e| {
+        AppError::Initialization(format!(
+            "{label} conversion to i64 failed: {e} (value={value})"
+        ))
+    })
+}
+
 #[derive(Clone)]
 pub struct Database {
     pool: Pool<Sqlite>,
@@ -44,7 +52,7 @@ impl Database {
         value: &str,
         strategy: Option<&str>,
     ) -> Result<i64, AppError> {
-        let chain_id_i64 = chain_id as i64;
+        let chain_id_i64 = to_i64(chain_id, "transactions.chain_id")?;
 
         let row = sqlx::query(
             r#"
@@ -111,7 +119,7 @@ impl Database {
         &self,
         chain_id: u64,
     ) -> Result<Option<(u64, u64, String)>, AppError> {
-        let chain_id_i64 = chain_id as i64;
+        let chain_id_i64 = to_i64(chain_id, "nonce_state.chain_id")?;
         let row = sqlx::query(
             "SELECT block_number, next_nonce, touched_pools FROM nonce_state WHERE chain_id = ?",
         )
@@ -167,7 +175,7 @@ impl Database {
         flashloan_premium_wei: &str,
         effective_cost_wei: &str,
     ) -> Result<i64, AppError> {
-        let chain_id_i64 = chain_id as i64;
+        let chain_id_i64 = to_i64(chain_id, "profit_records.chain_id")?;
         let row = sqlx::query(
             r#"
             INSERT INTO profit_records (
@@ -239,7 +247,7 @@ impl Database {
         price_usd: f64,
         source: &str,
     ) -> Result<i64, AppError> {
-        let chain_id_i64 = chain_id as i64;
+        let chain_id_i64 = to_i64(chain_id, "market_prices.chain_id")?;
         let row = sqlx::query(
             r#"
             INSERT INTO market_prices (chain_id, symbol, price_usd, source)
@@ -267,8 +275,8 @@ impl Database {
         reason: &str,
         increment: u64,
     ) -> Result<(), AppError> {
-        let chain_id_i64 = chain_id as i64;
-        let inc_i64 = increment as i64;
+        let chain_id_i64 = to_i64(chain_id, "router_discovery.chain_id")?;
+        let inc_i64 = to_i64(increment, "router_discovery.seen_count_increment")?;
         sqlx::query(
             r#"
             INSERT INTO router_discovery (chain_id, address, seen_count, last_source, last_reason)
@@ -299,7 +307,7 @@ impl Database {
         router_kind: Option<&str>,
         notes: Option<&str>,
     ) -> Result<(), AppError> {
-        let chain_id_i64 = chain_id as i64;
+        let chain_id_i64 = to_i64(chain_id, "router_discovery.chain_id")?;
         sqlx::query(
             r#"
             INSERT INTO router_discovery (chain_id, address, seen_count, status, router_kind, notes)
@@ -323,7 +331,7 @@ impl Database {
     }
 
     pub async fn approved_routers(&self, chain_id: u64) -> Result<Vec<Address>, AppError> {
-        let chain_id_i64 = chain_id as i64;
+        let chain_id_i64 = to_i64(chain_id, "router_discovery.chain_id")?;
         let rows = sqlx::query(
             "SELECT address FROM router_discovery WHERE chain_id = ? AND status = 'approved'",
         )
@@ -353,8 +361,8 @@ impl Database {
         chain_id: u64,
         limit: u64,
     ) -> Result<Vec<(Address, u64)>, AppError> {
-        let chain_id_i64 = chain_id as i64;
-        let limit_i64 = (limit as i64).max(1);
+        let chain_id_i64 = to_i64(chain_id, "router_discovery.chain_id")?;
+        let limit_i64 = to_i64(limit.max(1), "router_discovery.limit")?;
         let rows = sqlx::query(
             r#"
             SELECT address, seen_count
@@ -378,7 +386,16 @@ impl Database {
             let addr_str: String = row.get("address");
             let seen_i64: i64 = row.get("seen_count");
             if let Ok(addr) = Address::from_str(&addr_str) {
-                out.push((addr, seen_i64.max(0) as u64));
+                let seen_u64 = if seen_i64 < 0 {
+                    0
+                } else {
+                    u64::try_from(seen_i64).map_err(|e| {
+                        AppError::Initialization(format!(
+                            "Router discovery seen_count conversion failed: {e} (value={seen_i64})"
+                        ))
+                    })?
+                };
+                out.push((addr, seen_u64));
             } else {
                 tracing::warn!(
                     target: "router_discovery",

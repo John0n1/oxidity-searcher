@@ -235,7 +235,7 @@ impl Simulator {
             .await;
         match result {
             Ok(value) => value.is_array(),
-            Err(e) => !rpc_method_unavailable(&e),
+            Err(e) => !rpc_method_unavailable(&e) && !rpc_invalid_params(&e),
         }
     }
 
@@ -299,7 +299,7 @@ impl Simulator {
             .await;
         match result {
             Ok(value) => value.is_array(),
-            Err(e) => !rpc_method_unavailable(&e),
+            Err(e) => !rpc_method_unavailable(&e) && !rpc_invalid_params(&e),
         }
     }
 
@@ -858,10 +858,26 @@ fn rpc_insufficient_sender_balance(err: &TransportError) -> bool {
     rpc_insufficient_sender_balance_message(&info.message)
 }
 
+fn rpc_invalid_params(err: &TransportError) -> bool {
+    let info = rpc_error_info(err);
+    if matches!(info.code, Some(-32602)) {
+        return true;
+    }
+    rpc_invalid_params_message(&info.message)
+}
+
 fn rpc_method_unavailable_message(msg: &str) -> bool {
     let msg = msg.to_lowercase();
     (msg.contains("method") && msg.contains("not found"))
         || (msg.contains("namespace") && msg.contains("disabled"))
+}
+
+fn rpc_invalid_params_message(msg: &str) -> bool {
+    let msg = msg.to_lowercase();
+    msg.contains("invalid params")
+        || msg.contains("missing value for required argument")
+        || msg.contains("cannot unmarshal")
+        || msg.contains("invalid argument")
 }
 
 fn rpc_insufficient_sender_balance_message(msg: &str) -> bool {
@@ -1204,6 +1220,19 @@ mod tests {
             "RPC error -32600: Namespace debug is disabled"
         ));
         assert!(!rpc_method_unavailable_message(
+            "execution reverted: custom error"
+        ));
+    }
+
+    #[test]
+    fn rpc_invalid_params_detection_matches_nethermind_patterns() {
+        assert!(rpc_invalid_params_message(
+            "RPC error -32602: invalid params: missing value for required argument"
+        ));
+        assert!(rpc_invalid_params_message(
+            "cannot unmarshal hex string into Go value of type common.Hash"
+        ));
+        assert!(!rpc_invalid_params_message(
             "execution reverted: custom error"
         ));
     }
