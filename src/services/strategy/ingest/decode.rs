@@ -944,6 +944,22 @@ fn decode_relay_calls(
         if let Some(observed) =
             decode_swap_input_inner(call.target, call.callData.as_ref(), call.value, depth + 1)
         {
+            // Some relay wrappers drop per-call value even when the outer tx carries ETH.
+            // If we decoded a zero-input ETH route from a zero-value nested leg, retry once
+            // with the outer value to avoid silently classifying the swap as amount_in=0.
+            if observed.amount_in.is_zero()
+                && call.value.is_zero()
+                && !eth_value.is_zero()
+                && let Some(fallback) = decode_swap_input_inner(
+                    call.target,
+                    call.callData.as_ref(),
+                    eth_value,
+                    depth + 1,
+                )
+                && !fallback.amount_in.is_zero()
+            {
+                return Some(fallback);
+            }
             return Some(observed);
         }
     }
@@ -1655,7 +1671,43 @@ mod tests {
             .expect("decode relay nested eth swap");
         assert_eq!(observed.router, nested_router);
         assert_eq!(observed.path, vec![weth, token_out]);
-        assert_eq!(observed.amount_in, U256::ZERO);
+        assert_eq!(observed.amount_in, outer_eth_value);
+    }
+
+    #[test]
+    fn relay_multicall_prefers_per_call_value_when_present() {
+        let relay = Address::from([0xb1; 20]);
+        let nested_router = Address::from([0xb2; 20]);
+        let weth = crate::common::constants::wrapped_native_for_chain(
+            crate::common::constants::CHAIN_ETHEREUM,
+        );
+        let token_out = Address::from([0xb3; 20]);
+        let per_call_value = U256::from(777_000_000_000_000u64);
+        let outer_eth_value = U256::from(2_000_000_000_000_000u64);
+
+        let nested_call = UniV2Router::swapExactETHForTokensCall {
+            amountOutMin: U256::from(1u64),
+            path: vec![weth, token_out],
+            to: Address::from([0xb4; 20]),
+            deadline: U256::from(123u64),
+        };
+        let relay_call = RelayRouterV3::multicallCall {
+            calls: vec![RelayRouterV3::RelayCall {
+                target: nested_router,
+                allowFailure: false,
+                value: per_call_value,
+                callData: Bytes::from(nested_call.abi_encode()),
+            }],
+            refundTo: Address::from([0xb5; 20]),
+            nftRecipient: Address::from([0xb6; 20]),
+            metadata: Bytes::new(),
+        };
+
+        let observed = decode_swap_input(relay, &relay_call.abi_encode(), outer_eth_value)
+            .expect("decode relay nested eth swap with per-call value");
+        assert_eq!(observed.router, nested_router);
+        assert_eq!(observed.path, vec![weth, token_out]);
+        assert_eq!(observed.amount_in, per_call_value);
     }
 
     #[test]

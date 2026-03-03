@@ -12,6 +12,8 @@ use tokio::net::TcpListener;
 use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 
+const METRICS_MAX_REQUEST_BYTES: usize = 8 * 1024;
+
 pub async fn spawn_metrics_server(
     port: u16,
     chain_id: u64,
@@ -82,10 +84,24 @@ pub async fn spawn_metrics_server(
 
             match accept_result {
                 Ok((mut socket, _)) => {
-                    const MAX_READ: usize = 2048;
-                    let mut buf = vec![0u8; MAX_READ];
-                    let n = socket.read(&mut buf).await.unwrap_or(0);
-                    if n == MAX_READ {
+                    let mut buf: Vec<u8> = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    let mut too_large = false;
+                    loop {
+                        let n = socket.read(&mut chunk).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        if buf.len().saturating_add(n) > METRICS_MAX_REQUEST_BYTES {
+                            too_large = true;
+                            break;
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        if header_end_offset(&buf).is_some() {
+                            break;
+                        }
+                    }
+                    if too_large {
                         let body = r#"{"status":"error","error":"request too large"}"#;
                         let response = format!(
                             "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
@@ -95,8 +111,20 @@ pub async fn spawn_metrics_server(
                         let _ = socket.write_all(response.as_bytes()).await;
                         continue;
                     }
+                    let Some(header_end) = header_end_offset(&buf) else {
+                        if !buf.is_empty() {
+                            let body = r#"{"status":"error","error":"malformed request"}"#;
+                            let response = format!(
+                                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                                body.len(),
+                                body
+                            );
+                            let _ = socket.write_all(response.as_bytes()).await;
+                        }
+                        continue;
+                    };
 
-                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let req = String::from_utf8_lossy(&buf[..header_end]).to_string();
                     let mut lines = req.lines();
                     let request_line = lines.next().unwrap_or_default();
                     {
@@ -208,6 +236,13 @@ pub async fn spawn_metrics_server(
     });
 
     local
+}
+
+fn header_end_offset(buf: &[u8]) -> Option<usize> {
+    buf.windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|idx| idx + 4)
+        .or_else(|| buf.windows(2).position(|w| w == b"\n\n").map(|idx| idx + 2))
 }
 
 fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>) -> String {
@@ -614,6 +649,7 @@ mod tests {
     use crate::core::strategy::StrategyStats;
     use crate::network::provider::HttpProvider;
     use alloy::primitives::Address;
+    use tokio::net::TcpStream;
     use url::Url;
 
     #[tokio::test]
@@ -752,5 +788,57 @@ mod tests {
         )
         .await;
         assert!(addr.is_none());
+    }
+
+    #[test]
+    fn header_end_offset_detects_crlf_and_lf_delimiters() {
+        let crlf = b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        let lf = b"GET / HTTP/1.1\nHost: localhost\n\n";
+        assert_eq!(header_end_offset(crlf), Some(crlf.len()));
+        assert_eq!(header_end_offset(lf), Some(lf.len()));
+        assert_eq!(header_end_offset(b"GET / HTTP/1.1\r\nHost: x"), None);
+    }
+
+    #[tokio::test]
+    async fn split_header_reads_are_parsed_correctly() {
+        let provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
+        let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
+        let stats = Arc::new(StrategyStats::default());
+        let shutdown = CancellationToken::new();
+
+        let addr = spawn_metrics_server(
+            0,
+            1,
+            shutdown,
+            stats,
+            portfolio,
+            Some("127.0.0.1".to_string()),
+            Some("testtoken".to_string()),
+            false,
+        )
+        .await
+        .expect("bind metrics");
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        stream
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer ")
+            .await
+            .expect("write first segment");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        stream
+            .write_all(b"testtoken\r\n\r\n")
+            .await
+            .expect("write second segment");
+
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read response");
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 200 OK"));
+        assert!(text.contains("\"chainId\":1"));
     }
 }

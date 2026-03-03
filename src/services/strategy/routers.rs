@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
+use crate::common::constants::default_routers_for_chain;
+use alloy::primitives::Address;
 use alloy::sol;
+use std::collections::HashSet;
 
 sol! {
     #[derive(Debug, PartialEq, Eq)]
@@ -592,7 +595,93 @@ sol! {
     #[sol(rpc)]
     contract AavePool {
         function FLASHLOAN_PREMIUM_TOTAL() external view returns (uint128);
+
+        struct AaveReserveConfigurationMap {
+            uint256 data;
+        }
+
+        struct AaveReserveData {
+            AaveReserveConfigurationMap configuration;
+            uint128 liquidityIndex;
+            uint128 currentLiquidityRate;
+            uint128 variableBorrowIndex;
+            uint128 currentVariableBorrowRate;
+            uint128 currentStableBorrowRate;
+            uint40 lastUpdateTimestamp;
+            uint16 id;
+            address aTokenAddress;
+            address stableDebtTokenAddress;
+            address variableDebtTokenAddress;
+            address interestRateStrategyAddress;
+            uint128 accruedToTreasury;
+            uint128 unbacked;
+            uint128 isolationModeTotalDebt;
+        }
+
+        function getReserveData(address asset) external view returns (AaveReserveData memory);
     }
+}
+
+fn v2_router_priority(name: &str) -> Option<u8> {
+    match name {
+        "uniswap_v2_router02" | "uniswap_v2_router" => Some(0),
+        "sushiswap_router" => Some(1),
+        "pancakeswap_v2_router" => Some(2),
+        _ => {
+            let generic_v2 = (name.contains("v2_router") || name.contains("router_v2"))
+                && !name.contains("universal");
+            if generic_v2 { Some(10) } else { None }
+        }
+    }
+}
+
+fn is_non_v2_surface(name: &str) -> bool {
+    name.contains("universal")
+        || name.contains("aggregation")
+        || name.contains("aggregator")
+        || name.contains("proxy")
+        || name.contains("permit")
+        || name.contains("quoter")
+        || name.contains("vault")
+        || name.contains("relay")
+}
+
+fn registry_v2_router_candidates_from_registry(
+    routers: &std::collections::HashMap<String, Address>,
+) -> Vec<(String, Address)> {
+    let mut candidates: Vec<(u8, String, Address)> = routers
+        .iter()
+        .filter_map(|(name, addr)| {
+            let lowered = name.to_ascii_lowercase();
+            if is_non_v2_surface(&lowered) {
+                return None;
+            }
+            let priority = v2_router_priority(&lowered)?;
+            Some((priority, lowered, *addr))
+        })
+        .collect();
+    candidates.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for (_, name, addr) in candidates {
+        if seen.insert(addr) {
+            out.push((name, addr));
+        }
+    }
+    out
+}
+
+pub fn registry_v2_router_candidates(chain_id: u64) -> Vec<(String, Address)> {
+    let routers = default_routers_for_chain(chain_id);
+    registry_v2_router_candidates_from_registry(&routers)
+}
+
+pub fn registry_v2_router_addresses(chain_id: u64) -> Vec<Address> {
+    registry_v2_router_candidates(chain_id)
+        .into_iter()
+        .map(|(_, address)| address)
+        .collect()
 }
 
 #[cfg(test)]
@@ -600,7 +689,7 @@ mod tests {
     use super::*;
     use alloy::primitives::{Address, Bytes, U256};
     use alloy::sol_types::SolCall;
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn decode_critical_selectors_are_unique() {
@@ -697,5 +786,51 @@ mod tests {
         assert_eq!(decoded.exactInput.path.len(), 3);
         assert_eq!(decoded.exactInput.channel, "unit-test".to_string());
         assert_eq!(decoded.deadline, U256::from(123u64));
+    }
+
+    #[test]
+    fn registry_v2_candidates_are_sorted_filtered_and_deduped() {
+        let shared_univ2 = Address::from([0x11; 20]);
+        let sushi = Address::from([0x12; 20]);
+        let pancake = Address::from([0x13; 20]);
+        let generic = Address::from([0x14; 20]);
+        let mut routers = HashMap::new();
+        routers.insert("UNISWAP_V2_ROUTER02".to_string(), shared_univ2);
+        routers.insert("UNISWAP_V2_ROUTER".to_string(), shared_univ2);
+        routers.insert("SUSHISWAP_ROUTER".to_string(), sushi);
+        routers.insert("PANCAKESWAP_V2_ROUTER".to_string(), pancake);
+        routers.insert("CUSTOM_V2_ROUTER".to_string(), generic);
+        routers.insert(
+            "UNISWAP_UNIVERSAL_ROUTER".to_string(),
+            Address::from([0x31; 20]),
+        );
+        routers.insert(
+            "ONEINCH_AGGREGATION_ROUTER_V6".to_string(),
+            Address::from([0x32; 20]),
+        );
+
+        let out = registry_v2_router_candidates_from_registry(&routers);
+        assert_eq!(
+            out,
+            vec![
+                ("uniswap_v2_router".to_string(), shared_univ2),
+                ("sushiswap_router".to_string(), sushi),
+                ("pancakeswap_v2_router".to_string(), pancake),
+                ("custom_v2_router".to_string(), generic),
+            ]
+        );
+    }
+
+    #[test]
+    fn registry_v2_address_projection_preserves_candidate_order() {
+        let mut routers = HashMap::new();
+        let first = Address::from([0x41; 20]);
+        let second = Address::from([0x42; 20]);
+        routers.insert("UNISWAP_V2_ROUTER02".to_string(), first);
+        routers.insert("SUSHISWAP_ROUTER".to_string(), second);
+
+        let candidates = registry_v2_router_candidates_from_registry(&routers);
+        let addresses: Vec<Address> = candidates.into_iter().map(|(_, address)| address).collect();
+        assert_eq!(addresses, vec![first, second]);
     }
 }

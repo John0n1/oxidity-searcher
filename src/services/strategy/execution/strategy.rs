@@ -457,13 +457,13 @@ impl StrategyStats {
         let entry = guard.entry(relay_name.to_string()).or_default();
         entry.attempts = entry.attempts.saturating_add(1);
         entry.retries = entry.retries.saturating_add(retries);
+        if timeout {
+            entry.timeouts = entry.timeouts.saturating_add(1);
+        }
         if success {
             entry.successes = entry.successes.saturating_add(1);
         } else {
             entry.failures = entry.failures.saturating_add(1);
-            if timeout {
-                entry.timeouts = entry.timeouts.saturating_add(1);
-            }
         }
     }
 
@@ -2307,6 +2307,23 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         assert_eq!(guard.get("sim_low_confidence").copied(), Some(1));
         assert_eq!(guard.get("net_negative_after_buffers").copied(), Some(1));
+    }
+
+    #[test]
+    fn relay_timeout_is_counted_even_when_attempt_eventually_succeeds() {
+        let stats = StrategyStats::default();
+        stats.record_relay_attempt("flashbots", true, true, 1);
+
+        let guard = stats
+            .relay_outcomes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let outcome = guard.get("flashbots").expect("relay outcome");
+        assert_eq!(outcome.attempts, 1);
+        assert_eq!(outcome.successes, 1);
+        assert_eq!(outcome.failures, 0);
+        assert_eq!(outcome.timeouts, 1);
+        assert_eq!(outcome.retries, 1);
     }
 
     #[test]
