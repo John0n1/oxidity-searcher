@@ -1,13 +1,11 @@
 {
-  "version": 1,
+  "Oxidity Searcher Unified registry": "Last updated: 2026-05-03T18:08:40Z",
+  "version": "0.1.1-delta",
   "_notes": {
-    "_comment": "JSON does not support comments; use these notes as in-file documentation.",
     "address_registry": "Per-chain protocol/router/feed addresses used for allowlists and defaults.",
     "tokenlist": "Canonical merged token list (base tokenlist + MetaMask/Uniswap + ERC20 entries from contract-map), deduped by chain+address with first-entry wins.",
     "chainlink_feeds": "Raw Chainlink feed candidates; runtime resolves canonical feed per symbol/chain.",
-    "pairs": "Optional preloaded AMM pairs used to warm reserve cache.",
-    "executor_abi": "UnifiedHardenedExecutor contract ABI used by executor tooling.",
-    "token_tiers": "Tier policy: tier1=curated core set; tier2=promoted from tier3 when feed/tag/liquidity signal exists (Chainlink symbol match, stablecoin/wrapped tag, or >=2 pair appearances); tier3=default long-tail supplemental."
+    "executor_abi": "UnifiedHardenedExecutor contract ABI used by executor tooling."
   },
   "address_registry": {
     "chains": {
@@ -1555,19 +1553,6 @@
       }
     },
     {
-      "symbol": "KCS",
-      "name": "Kucoin Shares",
-      "decimals": 6,
-      "tags": [
-        "supplemental",
-        "metamask_uniswap",
-        "tier3"
-      ],
-      "addresses": {
-        "1": "0x039B5649A59967e3e936D7471f9c3700100Ee1ab"
-      }
-    },
-    {
       "symbol": "RAI",
       "name": "Rai Reflex Index",
       "decimals": 18,
@@ -1838,19 +1823,6 @@
       ],
       "addresses": {
         "1": "0x0Ae055097C6d159879521C384F1D2123D1f195e6"
-      }
-    },
-    {
-      "symbol": "USDD",
-      "name": "Decentralized USD",
-      "decimals": 18,
-      "tags": [
-        "supplemental",
-        "metamask_uniswap",
-        "tier3"
-      ],
-      "addresses": {
-        "1": "0x0C10bF8FcB7Bf5412187A595ab97a3609160b5c6"
       }
     },
     {
@@ -5624,19 +5596,6 @@
       }
     },
     {
-      "symbol": "TBTC",
-      "name": "tBTC",
-      "decimals": 18,
-      "tags": [
-        "supplemental",
-        "metamask_uniswap",
-        "tier2"
-      ],
-      "addresses": {
-        "1": "0x8dAEBADE922dF735c38C80C7eBD708Af50815fAa"
-      }
-    },
-    {
       "symbol": "TXL",
       "name": "Tixl",
       "decimals": 18,
@@ -5686,19 +5645,6 @@
       ],
       "addresses": {
         "1": "0x909E34d3f6124C324ac83DccA84b74398a6fa173"
-      }
-    },
-    {
-      "symbol": "PROS",
-      "name": "Prosper",
-      "decimals": 18,
-      "tags": [
-        "supplemental",
-        "metamask_uniswap",
-        "tier3"
-      ],
-      "addresses": {
-        "1": "0x915424Ac489433130d92B04096F3b96c82e92a9D"
       }
     },
     {
@@ -6248,19 +6194,6 @@
       }
     },
     {
-      "symbol": "USDS",
-      "name": "StableUSD",
-      "decimals": 6,
-      "tags": [
-        "supplemental",
-        "metamask_uniswap",
-        "tier2"
-      ],
-      "addresses": {
-        "1": "0xA4Bdb11dc0a2bEC88d24A3aa1E6Bb17201112eBe"
-      }
-    },
-    {
       "symbol": "RBC",
       "name": "Rubic",
       "decimals": 18,
@@ -6271,19 +6204,6 @@
       ],
       "addresses": {
         "1": "0xA4EED63db85311E22dF4473f87CcfC3DaDCFA3E3"
-      }
-    },
-    {
-      "symbol": "LOOM",
-      "name": "Loom Token",
-      "decimals": 18,
-      "tags": [
-        "supplemental",
-        "metamask_uniswap",
-        "tier3"
-      ],
-      "addresses": {
-        "1": "0xA4e8C3Ec456107eA67d3075bF9e3DF3A75823DB0"
       }
     },
     {
@@ -6599,19 +6519,6 @@
       }
     },
     {
-      "symbol": "USDe",
-      "name": "Monerium USD",
-      "decimals": 18,
-      "tags": [
-        "supplemental",
-        "metamask_uniswap",
-        "tier2"
-      ],
-      "addresses": {
-        "1": "0xBc5142e0CC5eB16b47c63B0f033d4c2480853a52"
-      }
-    },
-    {
       "symbol": "aUSDC",
       "name": "Aave USDC",
       "decimals": 6,
@@ -6804,19 +6711,6 @@
       ],
       "addresses": {
         "1": "0xCC8Fa225D80b9c7D42F96e9570156c65D6cAAa25"
-      }
-    },
-    {
-      "symbol": "PAN",
-      "name": "Peter Pan",
-      "decimals": 18,
-      "tags": [
-        "supplemental",
-        "metamask_uniswap",
-        "tier3"
-      ],
-      "addresses": {
-        "1": "0xCEBA2a8F6Ec221AEB5f3a7bcd15Cbc7e6a387bfb"
       }
     },
     {
@@ -7444,19 +7338,6 @@
       }
     },
     {
-      "symbol": "YLD",
-      "name": "Yield App",
-      "decimals": 18,
-      "tags": [
-        "supplemental",
-        "metamask_uniswap",
-        "tier3"
-      ],
-      "addresses": {
-        "1": "0xF94b5C5651c888d928439aB6514B93944eEE6F48"
-      }
-    },
-    {
       "symbol": "IOST",
       "name": "IOST",
       "decimals": 18,
@@ -7844,19 +7725,6 @@
       ],
       "addresses": {
         "1": "0xb1dC9124c395c1e97773ab855d66E879f053A289"
-      }
-    },
-    {
-      "symbol": "DATA",
-      "name": "Databot",
-      "decimals": 9,
-      "tags": [
-        "supplemental",
-        "metamask_uniswap",
-        "tier3"
-      ],
-      "addresses": {
-        "1": "0xb551b43AF192965F74e3dfAA476C890B403caD95"
       }
     },
     {
@@ -8520,19 +8388,6 @@
       ],
       "addresses": {
         "1": "0xe831F96A7a1DcE1aa2EB760b1e296c6A74CaA9d5"
-      }
-    },
-    {
-      "symbol": "VAL",
-      "name": "SORA Validator",
-      "decimals": 18,
-      "tags": [
-        "supplemental",
-        "metamask_uniswap",
-        "tier3"
-      ],
-      "addresses": {
-        "1": "0xe88f8313e61A97cEc1871EE37fBbe2a8bf3ed1E4"
       }
     },
     {
@@ -13221,6 +13076,21 @@
       "type": "error"
     },
     {
+      "inputs": [],
+      "name": "DydxCallbackNotReceived",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "DydxLoanContextMismatch",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "DydxLoanNotActive",
+      "type": "error"
+    },
+    {
       "inputs": [
         {
           "internalType": "uint256",
@@ -13269,6 +13139,21 @@
     },
     {
       "inputs": [],
+      "name": "InvalidFlashloanLender",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "InvalidFlashloanPair",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "InvalidFlashloanSolo",
+      "type": "error"
+    },
+    {
+      "inputs": [],
       "name": "InvalidPool",
       "type": "error"
     },
@@ -13289,12 +13174,47 @@
     },
     {
       "inputs": [],
+      "name": "MakerCallbackNotReceived",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "MakerLoanContextMismatch",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "MakerLoanNotActive",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "OnlyDydxSolo",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "OnlyMakerFlashLender",
+      "type": "error"
+    },
+    {
+      "inputs": [],
       "name": "OnlyOwner",
       "type": "error"
     },
     {
       "inputs": [],
       "name": "OnlyPool",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "OnlyUniswapV2Pair",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "OnlyUniswapV3Pool",
       "type": "error"
     },
     {
@@ -13309,8 +13229,62 @@
     },
     {
       "inputs": [],
+      "name": "UniswapV2CallbackNotReceived",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "UniswapV2LoanContextMismatch",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "UniswapV2LoanNotActive",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "UniswapV3CallbackNotReceived",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "UniswapV3LoanContextMismatch",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "UniswapV3LoanNotActive",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "UnsupportedPairAsset",
+      "type": "error"
+    },
+    {
+      "inputs": [],
       "name": "ZeroAssets",
       "type": "error"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "previousPool",
+          "type": "address"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "newPool",
+          "type": "address"
+        }
+      ],
+      "name": "AavePoolStateUpdated",
+      "type": "event"
     },
     {
       "anonymous": false,
@@ -13329,6 +13303,38 @@
         }
       ],
       "name": "ArbitrageExecuted",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "timestamp",
+          "type": "uint256"
+        }
+      ],
+      "name": "AutoSweepExecuted",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": false,
+          "internalType": "bool",
+          "name": "active",
+          "type": "bool"
+        },
+        {
+          "indexed": false,
+          "internalType": "bytes32",
+          "name": "contextHash",
+          "type": "bytes32"
+        }
+      ],
+      "name": "BalancerLoanSessionStateUpdated",
       "type": "event"
     },
     {
@@ -13388,6 +13394,57 @@
         {
           "indexed": true,
           "internalType": "address",
+          "name": "previousSolo",
+          "type": "address"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "newSolo",
+          "type": "address"
+        }
+      ],
+      "name": "DydxSoloStateUpdated",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "previousLender",
+          "type": "address"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "newLender",
+          "type": "address"
+        }
+      ],
+      "name": "MakerFlashLenderStateUpdated",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": false,
+          "internalType": "uint256",
+          "name": "timestamp",
+          "type": "uint256"
+        }
+      ],
+      "name": "ManualSweepExecuted",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "address",
           "name": "newReceiver",
           "type": "address"
         }
@@ -13409,6 +13466,57 @@
       "type": "event"
     },
     {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "previousPair",
+          "type": "address"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "newPair",
+          "type": "address"
+        }
+      ],
+      "name": "UniswapV2PairStateUpdated",
+      "type": "event"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "previousPool",
+          "type": "address"
+        },
+        {
+          "indexed": true,
+          "internalType": "address",
+          "name": "newPool",
+          "type": "address"
+        }
+      ],
+      "name": "UniswapV3PoolStateUpdated",
+      "type": "event"
+    },
+    {
+      "inputs": [],
+      "name": "AUTO_SWEEP_INTERVAL",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
       "inputs": [],
       "name": "WETH",
       "outputs": [
@@ -13419,6 +13527,54 @@
         }
       ],
       "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "autoSweepDue",
+      "outputs": [
+        {
+          "internalType": "bool",
+          "name": "",
+          "type": "bool"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "sender",
+          "type": "address"
+        },
+        {
+          "components": [
+            {
+              "internalType": "address",
+              "name": "owner",
+              "type": "address"
+            },
+            {
+              "internalType": "uint256",
+              "name": "number",
+              "type": "uint256"
+            }
+          ],
+          "internalType": "struct IDydxSoloMargin.AccountInfo",
+          "name": "accountInfo",
+          "type": "tuple"
+        },
+        {
+          "internalType": "bytes",
+          "name": "data",
+          "type": "bytes"
+        }
+      ],
+      "name": "callFunction",
+      "outputs": [],
+      "stateMutability": "nonpayable",
       "type": "function"
     },
     {
@@ -13495,6 +13651,34 @@
     {
       "inputs": [
         {
+          "internalType": "address",
+          "name": "soloMargin",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "asset",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "amount",
+          "type": "uint256"
+        },
+        {
+          "internalType": "bytes",
+          "name": "params",
+          "type": "bytes"
+        }
+      ],
+      "name": "executeDydxFlashLoan",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
           "internalType": "contract IERC20[]",
           "name": "assets",
           "type": "address[]"
@@ -13511,6 +13695,34 @@
         }
       ],
       "name": "executeFlashLoan",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "lender",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "asset",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "amount",
+          "type": "uint256"
+        },
+        {
+          "internalType": "bytes",
+          "name": "params",
+          "type": "bytes"
+        }
+      ],
+      "name": "executeMakerFlashLoan",
       "outputs": [],
       "stateMutability": "nonpayable",
       "type": "function"
@@ -13549,6 +13761,114 @@
           "internalType": "bool",
           "name": "",
           "type": "bool"
+        }
+      ],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "pair",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "asset",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "amount",
+          "type": "uint256"
+        },
+        {
+          "internalType": "bytes",
+          "name": "params",
+          "type": "bytes"
+        }
+      ],
+      "name": "executeUniswapV2FlashLoan",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "pool",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "asset",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "amount",
+          "type": "uint256"
+        },
+        {
+          "internalType": "bytes",
+          "name": "params",
+          "type": "bytes"
+        }
+      ],
+      "name": "executeUniswapV3FlashLoan",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [],
+      "name": "lastSweepAt",
+      "outputs": [
+        {
+          "internalType": "uint256",
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "initiator",
+          "type": "address"
+        },
+        {
+          "internalType": "address",
+          "name": "token",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "amount",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "fee",
+          "type": "uint256"
+        },
+        {
+          "internalType": "bytes",
+          "name": "data",
+          "type": "bytes"
+        }
+      ],
+      "name": "onFlashLoan",
+      "outputs": [
+        {
+          "internalType": "bytes32",
+          "name": "",
+          "type": "bytes32"
         }
       ],
       "stateMutability": "nonpayable",
@@ -13686,6 +14006,57 @@
         }
       ],
       "name": "sweepToken",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "sender",
+          "type": "address"
+        },
+        {
+          "internalType": "uint256",
+          "name": "amount0",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "amount1",
+          "type": "uint256"
+        },
+        {
+          "internalType": "bytes",
+          "name": "data",
+          "type": "bytes"
+        }
+      ],
+      "name": "uniswapV2Call",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "fee0",
+          "type": "uint256"
+        },
+        {
+          "internalType": "uint256",
+          "name": "fee1",
+          "type": "uint256"
+        },
+        {
+          "internalType": "bytes",
+          "name": "data",
+          "type": "bytes"
+        }
+      ],
+      "name": "uniswapV3FlashCallback",
       "outputs": [],
       "stateMutability": "nonpayable",
       "type": "function"

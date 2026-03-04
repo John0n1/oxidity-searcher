@@ -315,6 +315,12 @@ impl PriceFeed {
     /// Get price from Binance (e.g., symbol = "ETHUSDT")
     pub async fn get_price(&self, symbol: &str) -> Result<PriceQuote, AppError> {
         let normalized = normalize_symbol(symbol);
+        if normalized.chainlink_symbol.is_empty() {
+            return Err(AppError::Config(format!(
+                "Invalid price symbol '{}': normalized symbol is empty",
+                symbol
+            )));
+        }
 
         // 1. Check fresh cache
         if let Some(quote) = self.cached_if_fresh(&normalized.cache_key).await {
@@ -322,7 +328,16 @@ impl PriceFeed {
         }
 
         // 2. Try Chainlink on-chain feed
-        if let Some(price) = self.try_chainlink(&normalized.chainlink_symbol).await? {
+        let chainlink_started = Instant::now();
+        let chainlink_quote = self.try_chainlink(&normalized.chainlink_symbol).await?;
+        self.record_provider_outcome(
+            "chainlink",
+            chainlink_quote.is_some(),
+            false,
+            chainlink_started.elapsed(),
+            None,
+        );
+        if let Some(price) = chainlink_quote {
             self.store_cache(&normalized.cache_key, price.clone()).await;
             return Ok(price);
         }
@@ -334,47 +349,110 @@ impl PriceFeed {
         }
 
         // 3. Binance (with API key if provided; then anonymous)
-        if let Some(q) = self.try_binance(&normalized).await? {
+        let binance_started = Instant::now();
+        let binance_quote = self.try_binance(&normalized).await?;
+        self.record_provider_outcome(
+            "binance",
+            binance_quote.is_some(),
+            false,
+            binance_started.elapsed(),
+            None,
+        );
+        if let Some(q) = binance_quote {
             self.store_cache(&normalized.cache_key, q.clone()).await;
             return Ok(q);
         }
 
         // 3b. OKX public ticker
-        if let Some(q) = self.try_okx(&normalized).await? {
+        let okx_started = Instant::now();
+        let okx_quote = self.try_okx(&normalized).await?;
+        self.record_provider_outcome(
+            "okx",
+            okx_quote.is_some(),
+            false,
+            okx_started.elapsed(),
+            None,
+        );
+        if let Some(q) = okx_quote {
             self.store_cache(&normalized.cache_key, q.clone()).await;
             return Ok(q);
         }
 
         // 4. CoinMarketCap (API key)
-        if let Some(q) = self.try_coinmarketcap(&normalized).await? {
+        let cmc_started = Instant::now();
+        let cmc_quote = self.try_coinmarketcap(&normalized).await?;
+        self.record_provider_outcome(
+            "coinmarketcap",
+            cmc_quote.is_some(),
+            false,
+            cmc_started.elapsed(),
+            None,
+        );
+        if let Some(q) = cmc_quote {
             self.store_cache(&normalized.cache_key, q.clone()).await;
             return Ok(q);
         }
 
         // 5. CoinGecko (API key or keyless)
-        if let Some(q) = self.try_coingecko(&normalized).await? {
+        let gecko_started = Instant::now();
+        let gecko_quote = self.try_coingecko(&normalized).await?;
+        self.record_provider_outcome(
+            "coingecko",
+            gecko_quote.is_some(),
+            false,
+            gecko_started.elapsed(),
+            None,
+        );
+        if let Some(q) = gecko_quote {
             self.store_cache(&normalized.cache_key, q.clone()).await;
             return Ok(q);
         }
 
         // 6. CryptoCompare (API key)
-        if let Some(q) = self.try_cryptocompare(&normalized).await? {
+        let cc_started = Instant::now();
+        let cc_quote = self.try_cryptocompare(&normalized).await?;
+        self.record_provider_outcome(
+            SOURCE_CRYPTOCOMPARE,
+            cc_quote.is_some(),
+            false,
+            cc_started.elapsed(),
+            None,
+        );
+        if let Some(q) = cc_quote {
             self.store_cache(&normalized.cache_key, q.clone()).await;
             return Ok(q);
         }
 
         // 7. CoinPaprika (keyless)
-        if let Some(q) = self.try_coinpaprika(&normalized).await? {
+        let paprika_started = Instant::now();
+        let paprika_quote = self.try_coinpaprika(&normalized).await?;
+        self.record_provider_outcome(
+            "coinpaprika",
+            paprika_quote.is_some(),
+            false,
+            paprika_started.elapsed(),
+            None,
+        );
+        if let Some(q) = paprika_quote {
             self.store_cache(&normalized.cache_key, q.clone()).await;
             return Ok(q);
         }
 
         // 8. CryptoCompare public BTC fallback
-        if normalized.chainlink_symbol == "BTC"
-            && let Some(q) = self.try_cryptocompare_btc_public().await?
-        {
-            self.store_cache(&normalized.cache_key, q.clone()).await;
-            return Ok(q);
+        if normalized.chainlink_symbol == "BTC" {
+            let cc_public_started = Instant::now();
+            let cc_public_quote = self.try_cryptocompare_btc_public().await?;
+            self.record_provider_outcome(
+                SOURCE_CRYPTOCOMPARE_PUBLIC_BTC,
+                cc_public_quote.is_some(),
+                false,
+                cc_public_started.elapsed(),
+                None,
+            );
+            if let Some(q) = cc_public_quote {
+                self.store_cache(&normalized.cache_key, q.clone()).await;
+                return Ok(q);
+            }
         }
 
         // 9. Soft-fail: serve stale cache if available instead of hard error
@@ -1128,6 +1206,13 @@ mod tests {
         assert_eq!(normalized.chainlink_symbol, "ETH");
         assert!(normalized.binance_symbols.contains(&"ETHUSDC".to_string()));
         assert!(normalized.binance_symbols.contains(&"ETHUSDT".to_string()));
+    }
+
+    #[test]
+    fn normalizes_empty_symbol_to_empty_key() {
+        let normalized = normalize_symbol("$$$");
+        assert_eq!(normalized.chainlink_symbol, "");
+        assert_eq!(normalized.cache_key, "");
     }
 
     #[test]

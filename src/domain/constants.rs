@@ -2,11 +2,11 @@
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use crate::common::data_path::resolve_default_data_file;
+use crate::common::global_data::parse_global_data_file;
 use alloy::primitives::{Address, U256};
 use lazy_static::lazy_static;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::fs;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -126,16 +126,13 @@ fn parse_address(raw: &str) -> Option<Address> {
 }
 
 fn load_global_data_defaults(path: &Path) -> GlobalDataFileRaw {
-    let p = path;
-    if !p.exists() {
-        return GlobalDataFileRaw::default();
-    }
-
-    let raw = match fs::read_to_string(p) {
-        Ok(v) => v,
-        Err(_) => return GlobalDataFileRaw::default(),
-    };
-    serde_json::from_str(&raw).unwrap_or_default()
+    parse_global_data_file(path, "global_data defaults").unwrap_or_else(|e| {
+        panic!(
+            "Failed to load required global_data defaults from {}: {}",
+            path.display(),
+            e
+        )
+    })
 }
 
 fn load_address_registry_defaults(parsed: &AddressRegistryFileRaw) -> AddressRegistryDefaults {

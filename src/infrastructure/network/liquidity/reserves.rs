@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use crate::common::error::AppError;
+use crate::common::global_data::parse_global_data_file;
 use crate::network::provider::{HttpProvider, WsProvider};
 use crate::services::strategy::routers::{
     BalancerPoolId, BalancerStablePool, BalancerVault, BalancerWeightedPool, CurvePoolLike,
@@ -18,12 +19,14 @@ use futures::StreamExt;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::convert::TryFrom;
-use std::fs;
+use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, sleep, timeout};
 use tokio_util::sync::CancellationToken;
+
+const DEFAULT_V2_FEE_BPS: u32 = 30; // 0.30%
 
 sol! {
     #[derive(Debug, PartialEq, Eq)]
@@ -48,6 +51,7 @@ pub struct ReserveCache {
     http_provider: HttpProvider,
     v2_reserves: DashMap<Address, V2Reserves>,
     v2_pairs_by_tokens: DashMap<(Address, Address), Vec<Address>>,
+    v2_pair_fee_bps: DashMap<Address, u32>,
     inflight_pairs: DashSet<Address>,
     lookup_permits: std::sync::Arc<tokio::sync::Semaphore>,
     curve_registry: DashSet<Address>,
@@ -76,6 +80,7 @@ struct PairMetadata {
     factory: Option<Address>,
     pool_address: Option<Address>,
     fee: Option<u32>,
+    fee_bps: Option<u32>,
     chain_id: Option<u64>,
 }
 
@@ -85,6 +90,7 @@ impl PairMetadata {
             && self.factory.is_none()
             && self.pool_address.is_none()
             && self.fee.is_none()
+            && self.fee_bps.is_none()
             && self.chain_id.is_none()
     }
 }
@@ -111,6 +117,8 @@ struct PairEntryRaw {
     #[serde(default)]
     fee: Option<u32>,
     #[serde(default)]
+    fee_bps: Option<u32>,
+    #[serde(default)]
     chain_id: Option<u64>,
 }
 
@@ -121,11 +129,23 @@ struct GlobalDataPairs {
 }
 
 impl ReserveCache {
+    fn normalize_v2_fee_bps(fee_bps: Option<u32>, legacy_fee: Option<u32>) -> Option<u32> {
+        if let Some(explicit_bps) = fee_bps {
+            return (explicit_bps < 10_000).then_some(explicit_bps);
+        }
+        let fee = legacy_fee?;
+        // Legacy global_data used a generic `fee` field that often carried Uniswap-v3 style
+        // hundredths-of-bps values (e.g. 500, 3000). Convert those to bps for V2 math.
+        let inferred_bps = if fee > 100 { fee / 100 } else { fee };
+        (inferred_bps < 10_000).then_some(inferred_bps)
+    }
+
     pub fn new(http_provider: HttpProvider) -> Self {
         Self {
             http_provider,
             v2_reserves: DashMap::new(),
             v2_pairs_by_tokens: DashMap::new(),
+            v2_pair_fee_bps: DashMap::new(),
             inflight_pairs: DashSet::new(),
             lookup_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
             curve_registry: DashSet::new(),
@@ -366,15 +386,6 @@ impl ReserveCache {
         Self::parse_pairs_entries_from_vec(entries, chain_id)
     }
 
-    fn parse_pairs_entries_from_global_data(
-        raw: &str,
-        chain_id: u64,
-    ) -> Result<Vec<PairEntryResolved>, AppError> {
-        let file: GlobalDataPairs = serde_json::from_str(raw)
-            .map_err(|e| AppError::Config(format!("global_data pairs parse failed: {}", e)))?;
-        Self::parse_pairs_entries_from_vec(file.pairs, chain_id)
-    }
-
     fn parse_pairs_entries_from_vec(
         entries: Vec<PairEntryRaw>,
         chain_id: u64,
@@ -382,10 +393,18 @@ impl ReserveCache {
         let mut out = Vec::new();
         let mut seen_by_key: HashMap<(Address, Address), Vec<PairMetadata>> = HashMap::new();
         for (idx, entry) in entries.into_iter().enumerate() {
-            if let Some(entry_chain) = entry.chain_id
-                && entry_chain != chain_id
-            {
-                continue;
+            match entry.chain_id {
+                Some(entry_chain) if entry_chain != chain_id => continue,
+                None if chain_id != crate::common::constants::CHAIN_ETHEREUM => {
+                    tracing::debug!(
+                        target: "reserves",
+                        entry_index = idx,
+                        requested_chain = chain_id,
+                        "Skipping unscoped global_data.pairs entry on non-mainnet chain"
+                    );
+                    continue;
+                }
+                _ => {}
             }
 
             let pair = Address::from_str(&entry.pair).map_err(|_| {
@@ -434,6 +453,7 @@ impl ReserveCache {
                         ))
                     })?,
                 fee: entry.fee,
+                fee_bps: Self::normalize_v2_fee_bps(entry.fee_bps, entry.fee),
                 chain_id: entry.chain_id,
             };
 
@@ -473,16 +493,19 @@ impl ReserveCache {
 
     /// Optional preload from global_data.pairs section.
     pub fn load_pairs_from_file(&self, path: &str, chain_id: u64) -> Result<(), AppError> {
-        let raw = fs::read_to_string(path)
-            .map_err(|e| AppError::Config(format!("global_data read failed: {}", e)))?;
-        let entries = Self::parse_pairs_entries_from_global_data(&raw, chain_id)?;
+        let file: GlobalDataPairs = parse_global_data_file(Path::new(path), "pairs")?;
+        let entries = Self::parse_pairs_entries_from_vec(file.pairs, chain_id)?;
 
         for entry in entries {
             let pair = entry.pair;
             let token0 = entry.token0;
             let token1 = entry.token1;
+            let metadata = entry.metadata;
             let key = Self::token_pair_key(token0, token1);
             self.register_v2_pair_for_tokens(key, pair);
+            if let Some(fee_bps) = metadata.fee_bps {
+                self.v2_pair_fee_bps.insert(pair, fee_bps);
+            }
             self.v2_reserves.insert(
                 pair,
                 V2Reserves {
@@ -503,9 +526,8 @@ impl ReserveCache {
         provider: &HttpProvider,
         chain_id: u64,
     ) -> Result<(), AppError> {
-        let raw = fs::read_to_string(path)
-            .map_err(|e| AppError::Config(format!("global_data read failed: {}", e)))?;
-        let entries = Self::parse_pairs_entries_from_global_data(&raw, chain_id)?;
+        let file: GlobalDataPairs = parse_global_data_file(Path::new(path), "pairs")?;
+        let entries = Self::parse_pairs_entries_from_vec(file.pairs, chain_id)?;
 
         let mut kept = 0usize;
         let mut metadata_kept = 0usize;
@@ -534,6 +556,9 @@ impl ReserveCache {
 
             let key = Self::token_pair_key(token0, token1);
             self.register_v2_pair_for_tokens(key, pair);
+            if let Some(fee_bps) = metadata.fee_bps {
+                self.v2_pair_fee_bps.insert(pair, fee_bps);
+            }
             self.v2_reserves.insert(
                 pair,
                 V2Reserves {
@@ -730,10 +755,20 @@ impl ReserveCache {
             if reserve_in.is_zero() || reserve_out.is_zero() {
                 continue;
             }
-            let amount_in_with_fee = amount_in.saturating_mul(U256::from(997u64));
+            let fee_bps = self
+                .v2_pair_fee_bps
+                .get(&pair)
+                .map(|v| *v)
+                .unwrap_or(DEFAULT_V2_FEE_BPS);
+            if fee_bps >= 10_000 {
+                continue;
+            }
+            let fee_denominator = U256::from(10_000u64);
+            let fee_numerator = U256::from((10_000u32 - fee_bps) as u64);
+            let amount_in_with_fee = amount_in.saturating_mul(fee_numerator);
             let numerator = amount_in_with_fee.saturating_mul(reserve_out);
             let denominator = reserve_in
-                .saturating_mul(U256::from(1000u64))
+                .saturating_mul(fee_denominator)
                 .saturating_add(amount_in_with_fee);
             if denominator.is_zero() {
                 continue;
@@ -1137,6 +1172,56 @@ mod tests {
 "#;
         let parsed = ReserveCache::parse_pairs_entries(raw, 1).expect("parse");
         assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn pairs_loader_skips_unscoped_entries_on_non_mainnet() {
+        let raw = r#"
+[
+  {"pair":"0x1111111111111111111111111111111111111111","token0":"0x2222222222222222222222222222222222222222","token1":"0x3333333333333333333333333333333333333333"},
+  {"pair":"0x4444444444444444444444444444444444444444","token0":"0x2222222222222222222222222222222222222222","token1":"0x3333333333333333333333333333333333333333","chain_id":137}
+]
+"#;
+        let parsed = ReserveCache::parse_pairs_entries(raw, 137).expect("parse");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0].pair,
+            Address::from_str("0x4444444444444444444444444444444444444444").expect("addr")
+        );
+    }
+
+    #[test]
+    fn quote_v2_path_respects_pair_fee_bps_override() {
+        let http = HttpProvider::new_http(
+            Url::parse("http://127.0.0.1:8545").expect("valid local rpc url"),
+        );
+        let cache = ReserveCache::new(http);
+        let token0 = Address::from_str("0x00000000000000000000000000000000000000aa").expect("addr");
+        let token1 = Address::from_str("0x00000000000000000000000000000000000000bb").expect("addr");
+        let pair = Address::from_str("0x00000000000000000000000000000000000000cc").expect("addr");
+        let key = ReserveCache::token_pair_key(token0, token1);
+        cache.register_v2_pair_for_tokens(key, pair);
+        cache.v2_reserves.insert(
+            pair,
+            V2Reserves {
+                token0,
+                token1,
+                reserve0: U256::from(10_000u64),
+                reserve1: U256::from(10_000u64),
+            },
+        );
+
+        let base = cache
+            .quote_v2_path(&[token0, token1], U256::from(1_000u64))
+            .expect("base quote");
+        cache.v2_pair_fee_bps.insert(pair, 100u32); // 1%
+        let higher_fee = cache
+            .quote_v2_path(&[token0, token1], U256::from(1_000u64))
+            .expect("higher fee quote");
+        assert!(
+            higher_fee < base,
+            "higher fee should reduce expected output"
+        );
     }
 }
 

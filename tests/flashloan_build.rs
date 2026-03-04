@@ -5,29 +5,17 @@
 
 use alloy::primitives::{Address, Bytes, TxKind, U256};
 use alloy::providers::Provider;
-use alloy::signers::local::PrivateKeySigner;
 use alloy_sol_types::SolCall;
-use dashmap::DashSet;
 use oxidity_searcher::common::constants::{CHAIN_ETHEREUM, wrapped_native_for_chain};
 use oxidity_searcher::common::error::AppError;
-use oxidity_searcher::core::executor::BundleSender;
-use oxidity_searcher::core::portfolio::PortfolioManager;
-use oxidity_searcher::core::safety::SafetyGuard;
-use oxidity_searcher::core::simulation::{SimulationBackend, Simulator};
-use oxidity_searcher::core::strategy::{
-    FlashloanProvider, StrategyConfig, StrategyExecutor, StrategyStats,
-};
-use oxidity_searcher::data::db::Database;
+use oxidity_searcher::core::strategy::{FlashloanProvider, StrategyExecutor};
 use oxidity_searcher::data::executor::{FlashCallbackData, UnifiedHardenedExecutor};
 use oxidity_searcher::network::gas::GasFees;
-use oxidity_searcher::network::nonce::NonceManager;
-use oxidity_searcher::network::price_feed::PriceFeed;
 use oxidity_searcher::network::provider::HttpProvider;
-use oxidity_searcher::network::reserves::ReserveCache;
-use oxidity_searcher::services::strategy::execution::work_queue::WorkQueue;
-use std::sync::Arc;
-use tokio::sync::broadcast;
 use url::Url;
+
+mod support;
+use support::{ExecutorHarnessOptions, build_strategy_executor};
 
 fn rpc_access_list_unsupported(msg: &str) -> bool {
     let normalized = msg.to_ascii_lowercase();
@@ -36,106 +24,30 @@ fn rpc_access_list_unsupported(msg: &str) -> bool {
         || normalized.contains("eip2930")
 }
 
+async fn build_flashloan_executor(
+    executor_addr: Address,
+    flashloan_providers: Vec<FlashloanProvider>,
+    aave_pool: Option<Address>,
+) -> StrategyExecutor {
+    let (exec, _harness) = build_strategy_executor(ExecutorHarnessOptions {
+        executor: Some(executor_addr),
+        flashloan_enabled: true,
+        flashloan_providers,
+        aave_pool,
+        ..ExecutorHarnessOptions::default()
+    })
+    .await;
+    exec
+}
+
 /// Build a flash-loan transaction and assert the encoded callbacks round-trip.
 #[tokio::test]
 async fn flashloan_builder_encodes_callbacks() {
     // Minimal wiring; no real RPC is required because build_flashloan_transaction
     // doesn't hit the network on failure to create access lists.
-    let http = HttpProvider::new_http(Url::parse("http://127.0.0.1:8545").unwrap());
-    let safety_guard = Arc::new(SafetyGuard::new());
-    let bundle_signer = PrivateKeySigner::random();
-    let stats = Arc::new(StrategyStats::default());
-    let bundle_sender = Arc::new(BundleSender::new(
-        http.clone(),
-        reqwest::Client::new(),
-        true,
-        "https://relay.flashbots.net".to_string(),
-        "https://mev-share.flashbots.net".to_string(),
-        vec![
-            "flashbots".to_string(),
-            "beaverbuild.org".to_string(),
-            "rsync".to_string(),
-            "Titan".to_string(),
-        ],
-        bundle_signer.clone(),
-        stats.clone(),
-        true,
-        false,
-        1,
-    ));
-    let db = Database::new("sqlite::memory:").await.expect("db");
-    let portfolio = Arc::new(PortfolioManager::new(http.clone(), bundle_signer.address()));
-    let gas_oracle = oxidity_searcher::network::gas::GasOracle::new(http.clone(), 1);
-    let price_feed = PriceFeed::new(
-        http.clone(),
-        1,
-        std::collections::HashMap::new(),
-        oxidity_searcher::network::price_feed::PriceApiKeys::default(),
-    )
-    .expect("price feed");
-    let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
-    let token_manager =
-        Arc::new(oxidity_searcher::infrastructure::data::token_manager::TokenManager::default());
-    let nonce_manager = NonceManager::new(http.clone(), bundle_signer.address());
-    let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
-    let router_allowlist = Arc::new(DashSet::<Address>::new());
-    let wrapper_allowlist = Arc::new(DashSet::<Address>::new());
-    let infra_allowlist = Arc::new(DashSet::<Address>::new());
-
-    let work_queue = Arc::new(WorkQueue::new(4));
-    let (_block_tx, block_rx) = broadcast::channel(4);
-
     let executor_addr = Address::from([0x11; 20]);
-
-    let exec = StrategyExecutor::from_config(StrategyConfig {
-        work_queue: work_queue.clone(),
-        block_rx,
-        safety_guard,
-        bundle_sender,
-        db,
-        portfolio,
-        gas_oracle,
-        price_feed,
-        chain_id: 1,
-        max_gas_price_gwei: 200,
-        gas_cap_multiplier_bps: 12_000,
-        simulator,
-        token_manager,
-        stats,
-        signer: bundle_signer.clone(),
-        nonce_manager,
-        slippage_bps: 50,
-        profit_guard_base_floor_multiplier_bps: 10_000,
-        profit_guard_cost_multiplier_bps: 10_000,
-        profit_guard_min_margin_bps: 1_200,
-        liquidity_ratio_floor_ppm: 1_000,
-        sell_min_native_out_wei: 5_000_000_000_000,
-        http_provider: http.clone(),
-        dry_run: true,
-        router_allowlist: router_allowlist.clone(),
-        wrapper_allowlist: wrapper_allowlist.clone(),
-        infra_allowlist: infra_allowlist.clone(),
-        router_discovery: None,
-        skip_log_every: 500,
-        wrapped_native: wrapped_native_for_chain(CHAIN_ETHEREUM),
-        allow_non_wrapped_swaps: false,
-        executor: Some(executor_addr),
-        executor_bribe_bps: 0,
-        executor_bribe_recipient: None,
-        flashloan_enabled: true,
-        flashloan_providers: vec![FlashloanProvider::Balancer],
-        aave_pool: None,
-        reserve_cache,
-        sandwich_attacks_enabled: true,
-        simulation_backend: "revm".to_string(),
-        worker_limit: 4,
-        shutdown: tokio_util::sync::CancellationToken::new(),
-        receipt_poll_ms: 500,
-        receipt_timeout_ms: 60_000,
-        receipt_confirm_blocks: 4,
-        emergency_exit_on_unknown_receipt: false,
-        runtime: Default::default(),
-    });
+    let exec =
+        build_flashloan_executor(executor_addr, vec![FlashloanProvider::Balancer], None).await;
 
     // Two-step callback: approve + dummy swap payload; include reset approvals.
     let callbacks = vec![
@@ -206,102 +118,14 @@ async fn flashloan_builder_encodes_callbacks() {
 /// Ensure Aave flashloan selector is used when provider is set to AaveV3.
 #[tokio::test]
 async fn flashloan_builder_uses_aave_selector() {
-    let http = HttpProvider::new_http(Url::parse("http://127.0.0.1:8545").unwrap());
-    let safety_guard = Arc::new(SafetyGuard::new());
-    let bundle_signer = PrivateKeySigner::random();
-    let stats = Arc::new(StrategyStats::default());
-    let bundle_sender = Arc::new(BundleSender::new(
-        http.clone(),
-        reqwest::Client::new(),
-        true,
-        "https://relay.flashbots.net".to_string(),
-        "https://mev-share.flashbots.net".to_string(),
-        vec![
-            "flashbots".to_string(),
-            "beaverbuild.org".to_string(),
-            "rsync".to_string(),
-            "Titan".to_string(),
-        ],
-        bundle_signer.clone(),
-        stats.clone(),
-        true,
-        false,
-        1,
-    ));
-    let db = Database::new("sqlite::memory:").await.expect("db");
-    let portfolio = Arc::new(PortfolioManager::new(http.clone(), bundle_signer.address()));
-    let gas_oracle = oxidity_searcher::network::gas::GasOracle::new(http.clone(), 1);
-    let price_feed = PriceFeed::new(
-        http.clone(),
-        1,
-        std::collections::HashMap::new(),
-        oxidity_searcher::network::price_feed::PriceApiKeys::default(),
-    )
-    .expect("price feed");
-    let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
-    let token_manager =
-        Arc::new(oxidity_searcher::infrastructure::data::token_manager::TokenManager::default());
-    let nonce_manager = NonceManager::new(http.clone(), bundle_signer.address());
-    let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
-    let router_allowlist = Arc::new(DashSet::<Address>::new());
-    let wrapper_allowlist = Arc::new(DashSet::<Address>::new());
-    let infra_allowlist = Arc::new(DashSet::<Address>::new());
-
-    let work_queue = Arc::new(WorkQueue::new(4));
-    let (_block_tx, block_rx) = broadcast::channel(4);
-
     let executor_addr = Address::from([0x33; 20]);
     let aave_pool = Address::from([0x44; 20]);
-
-    let exec = StrategyExecutor::from_config(StrategyConfig {
-        work_queue,
-        block_rx,
-        safety_guard,
-        bundle_sender,
-        db,
-        portfolio,
-        gas_oracle,
-        price_feed,
-        chain_id: 1,
-        max_gas_price_gwei: 200,
-        gas_cap_multiplier_bps: 12_000,
-        simulator,
-        token_manager,
-        stats,
-        signer: bundle_signer.clone(),
-        nonce_manager,
-        slippage_bps: 50,
-        profit_guard_base_floor_multiplier_bps: 10_000,
-        profit_guard_cost_multiplier_bps: 10_000,
-        profit_guard_min_margin_bps: 1_200,
-        liquidity_ratio_floor_ppm: 1_000,
-        sell_min_native_out_wei: 5_000_000_000_000,
-        http_provider: http.clone(),
-        dry_run: true,
-        router_allowlist: router_allowlist.clone(),
-        wrapper_allowlist: wrapper_allowlist.clone(),
-        infra_allowlist: infra_allowlist.clone(),
-        router_discovery: None,
-        skip_log_every: 500,
-        wrapped_native: wrapped_native_for_chain(CHAIN_ETHEREUM),
-        allow_non_wrapped_swaps: false,
-        executor: Some(executor_addr),
-        executor_bribe_bps: 0,
-        executor_bribe_recipient: None,
-        flashloan_enabled: true,
-        flashloan_providers: vec![FlashloanProvider::AaveV3],
-        aave_pool: Some(aave_pool),
-        reserve_cache,
-        sandwich_attacks_enabled: true,
-        simulation_backend: "revm".to_string(),
-        worker_limit: 4,
-        shutdown: tokio_util::sync::CancellationToken::new(),
-        receipt_poll_ms: 500,
-        receipt_timeout_ms: 60_000,
-        receipt_confirm_blocks: 4,
-        emergency_exit_on_unknown_receipt: false,
-        runtime: Default::default(),
-    });
+    let exec = build_flashloan_executor(
+        executor_addr,
+        vec![FlashloanProvider::AaveV3],
+        Some(aave_pool),
+    )
+    .await;
 
     let callbacks = vec![(
         wrapped_native_for_chain(CHAIN_ETHEREUM),
@@ -466,100 +290,8 @@ async fn live_executor_aave_smoke_mainnet() {
 
 #[tokio::test]
 async fn flashloan_builder_rejects_when_no_provider_available() {
-    let http = HttpProvider::new_http(Url::parse("http://127.0.0.1:8545").unwrap());
-    let safety_guard = Arc::new(SafetyGuard::new());
-    let bundle_signer = PrivateKeySigner::random();
-    let stats = Arc::new(StrategyStats::default());
-    let bundle_sender = Arc::new(BundleSender::new(
-        http.clone(),
-        reqwest::Client::new(),
-        true,
-        "https://relay.flashbots.net".to_string(),
-        "https://mev-share.flashbots.net".to_string(),
-        vec![
-            "flashbots".to_string(),
-            "beaverbuild.org".to_string(),
-            "rsync".to_string(),
-            "Titan".to_string(),
-        ],
-        bundle_signer.clone(),
-        stats.clone(),
-        true,
-        false,
-        1,
-    ));
-    let db = Database::new("sqlite::memory:").await.expect("db");
-    let portfolio = Arc::new(PortfolioManager::new(http.clone(), bundle_signer.address()));
-    let gas_oracle = oxidity_searcher::network::gas::GasOracle::new(http.clone(), 1);
-    let price_feed = PriceFeed::new(
-        http.clone(),
-        1,
-        std::collections::HashMap::new(),
-        oxidity_searcher::network::price_feed::PriceApiKeys::default(),
-    )
-    .expect("price feed");
-    let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
-    let token_manager =
-        Arc::new(oxidity_searcher::infrastructure::data::token_manager::TokenManager::default());
-    let nonce_manager = NonceManager::new(http.clone(), bundle_signer.address());
-    let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
-    let router_allowlist = Arc::new(DashSet::<Address>::new());
-    let wrapper_allowlist = Arc::new(DashSet::<Address>::new());
-    let infra_allowlist = Arc::new(DashSet::<Address>::new());
-
-    let work_queue = Arc::new(WorkQueue::new(4));
-    let (_block_tx, block_rx) = broadcast::channel(4);
     let executor_addr = Address::from([0x55; 20]);
-
-    let exec = StrategyExecutor::from_config(StrategyConfig {
-        work_queue,
-        block_rx,
-        safety_guard,
-        bundle_sender,
-        db,
-        portfolio,
-        gas_oracle,
-        price_feed,
-        chain_id: 1,
-        max_gas_price_gwei: 200,
-        gas_cap_multiplier_bps: 12_000,
-        simulator,
-        token_manager,
-        stats,
-        signer: bundle_signer.clone(),
-        nonce_manager,
-        slippage_bps: 50,
-        profit_guard_base_floor_multiplier_bps: 10_000,
-        profit_guard_cost_multiplier_bps: 10_000,
-        profit_guard_min_margin_bps: 1_200,
-        liquidity_ratio_floor_ppm: 1_000,
-        sell_min_native_out_wei: 5_000_000_000_000,
-        http_provider: http.clone(),
-        dry_run: true,
-        router_allowlist,
-        wrapper_allowlist,
-        infra_allowlist,
-        router_discovery: None,
-        skip_log_every: 500,
-        wrapped_native: wrapped_native_for_chain(CHAIN_ETHEREUM),
-        allow_non_wrapped_swaps: false,
-        executor: Some(executor_addr),
-        executor_bribe_bps: 0,
-        executor_bribe_recipient: None,
-        flashloan_enabled: true,
-        flashloan_providers: vec![],
-        aave_pool: None,
-        reserve_cache,
-        sandwich_attacks_enabled: true,
-        simulation_backend: "revm".to_string(),
-        worker_limit: 4,
-        shutdown: tokio_util::sync::CancellationToken::new(),
-        receipt_poll_ms: 500,
-        receipt_timeout_ms: 60_000,
-        receipt_confirm_blocks: 4,
-        emergency_exit_on_unknown_receipt: false,
-        runtime: Default::default(),
-    });
+    let exec = build_flashloan_executor(executor_addr, vec![], None).await;
 
     let callbacks = vec![(
         wrapped_native_for_chain(CHAIN_ETHEREUM),

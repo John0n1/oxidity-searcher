@@ -2,13 +2,12 @@
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use crate::common::error::AppError;
+use crate::common::global_data::parse_global_data_file;
 use crate::network::provider::HttpProvider;
 use alloy::primitives::Address;
 use alloy::providers::Provider;
 use serde::Deserialize;
-use serde_json;
 use std::collections::HashMap;
-use std::fs;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -110,20 +109,7 @@ pub struct AddressRegistry {
 impl AddressRegistry {
     pub fn load_from_file(path: &str) -> Result<Self, AppError> {
         let p = Path::new(path);
-        if !p.exists() {
-            return Err(AppError::Config(format!(
-                "Global data file not found: {}",
-                path
-            )));
-        }
-        let raw = fs::read_to_string(p)
-            .map_err(|e| AppError::Config(format!("Failed to read global_data {}: {e}", path)))?;
-        let file: GlobalDataAddressRegistry = serde_json::from_str(&raw).map_err(|e| {
-            AppError::Config(format!(
-                "Failed to parse address_registry from {}: {e}",
-                path
-            ))
-        })?;
+        let file: GlobalDataAddressRegistry = parse_global_data_file(p, "address_registry")?;
 
         let mut chains: HashMap<u64, ChainRegistry> = HashMap::new();
         for (chain_str, c) in file.address_registry.chains {

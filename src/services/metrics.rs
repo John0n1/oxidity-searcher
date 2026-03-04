@@ -165,7 +165,7 @@ pub async fn spawn_metrics_server(
                         }
                     });
                     let ok = auth_header
-                        .and_then(|v| v.strip_prefix("Bearer ").or(Some(v)))
+                        .and_then(|v| v.strip_prefix("Bearer "))
                         .map(|v| v.trim() == token)
                         .unwrap_or(false);
                     if !ok {
@@ -533,10 +533,10 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
         ));
     }
 
-    for (chain, token, profit) in portfolio.token_profit_all() {
+    for (chain, token, profit, decimals) in portfolio.token_profit_all() {
         body.push_str(&format!(
-            "# TYPE token_profit gauge\ntoken_profit{{chain=\"{}\",token=\"{:#x}\"}} {}\n",
-            chain, token, profit
+            "# TYPE token_profit gauge\ntoken_profit{{chain=\"{}\",token=\"{:#x}\",decimals=\"{}\"}} {}\n",
+            chain, token, decimals, profit
         ));
     }
 

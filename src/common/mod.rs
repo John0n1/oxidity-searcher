@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 pub mod data_path;
+pub mod global_data;
 pub mod parsing;
 pub mod retry;
 pub mod seen_cache;

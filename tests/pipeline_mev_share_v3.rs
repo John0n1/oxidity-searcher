@@ -4,29 +4,17 @@ use alloy::primitives::{Address, B256, Bytes, U160, U256, aliases::U24};
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolCall;
-use dashmap::DashSet;
 use oxidity_searcher::common::constants::{CHAIN_ETHEREUM, wrapped_native_for_chain};
-use oxidity_searcher::core::executor::BundleSender;
-use oxidity_searcher::core::portfolio::PortfolioManager;
-use oxidity_searcher::core::safety::SafetyGuard;
-use oxidity_searcher::core::simulation::{SimulationBackend, Simulator};
-use oxidity_searcher::core::strategy::{
-    FlashloanProvider, StrategyConfig, StrategyExecutor, StrategyStats, StrategyWork,
-};
-use oxidity_searcher::data::db::Database;
-use oxidity_searcher::infrastructure::data::token_manager::TokenManager;
-use oxidity_searcher::network::gas::GasOracle;
+use oxidity_searcher::core::strategy::StrategyWork;
 use oxidity_searcher::network::mev_share::MevShareHint;
-use oxidity_searcher::network::nonce::NonceManager;
-use oxidity_searcher::network::price_feed::{PriceApiKeys, PriceFeed};
 use oxidity_searcher::network::provider::HttpProvider;
-use oxidity_searcher::network::reserves::ReserveCache;
-use oxidity_searcher::services::strategy::execution::work_queue::WorkQueue;
 use oxidity_searcher::services::strategy::routers::UniV3Router;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::broadcast;
 use url::Url;
+
+mod support;
+use support::{ExecutorHarnessOptions, build_strategy_executor};
 
 #[tokio::test]
 async fn mev_share_v3_pipeline_manual() {
@@ -55,107 +43,24 @@ async fn mev_share_v3_pipeline_manual() {
     let signer = PrivateKeySigner::from_str(&wallet_key).expect("parse signer");
     // Discover chain id from the node so we don't assume mainnet.
     let chain_id = http.get_chain_id().await.unwrap_or(1u64);
-    let bundle_signer = PrivateKeySigner::random();
-    let safety_guard = Arc::new(SafetyGuard::new());
-    let stats = Arc::new(StrategyStats::default());
-    let bundle_sender = Arc::new(BundleSender::new(
-        http.clone(),
-        reqwest::Client::new(),
-        true,
-        "https://relay.flashbots.net".to_string(),
-        "https://mev-share.flashbots.net".to_string(),
-        vec![
-            "flashbots".to_string(),
-            "beaverbuild.org".to_string(),
-            "rsync".to_string(),
-            "Titan".to_string(),
-        ],
-        bundle_signer.clone(),
-        stats.clone(),
-        true,
-        false,
-        1,
-    ));
-    let db = Database::new("sqlite::memory:").await.expect("db");
-    let portfolio = Arc::new(PortfolioManager::new(http.clone(), signer.address()));
-    let gas_oracle = GasOracle::new(http.clone(), chain_id);
-    let price_feed = PriceFeed::new(
-        http.clone(),
+    let (exec, harness) = build_strategy_executor(ExecutorHarnessOptions {
+        rpc_url: rpc.clone(),
         chain_id,
-        std::collections::HashMap::new(),
-        PriceApiKeys::default(),
-    )
-    .expect("price feed");
-    let simulator = Simulator::new(http.clone(), SimulationBackend::new("revm"));
-    let token_manager = Arc::new(TokenManager::default());
-    let nonce_manager = NonceManager::new(http.clone(), signer.address());
-    let reserve_cache = Arc::new(ReserveCache::new(http.clone()));
-
-    let work_queue = Arc::new(WorkQueue::new(4));
-    let (_block_tx, block_rx) = broadcast::channel(4);
-    let router_allowlist = Arc::new(DashSet::new());
-    let wrapper_allowlist = Arc::new(DashSet::new());
-    let infra_allowlist = Arc::new(DashSet::new());
+        signer: Some(signer.clone()),
+        wrapped_native: wrapped_native_for_chain(CHAIN_ETHEREUM),
+        ..ExecutorHarnessOptions::default()
+    })
+    .await;
     let uni_v3_router =
         Address::from_str("E592427A0AEce92De3Edee1F18E0157C05861564").expect("router addr");
-    router_allowlist.insert(uni_v3_router);
-
-    let exec = StrategyExecutor::from_config(StrategyConfig {
-        work_queue,
-        block_rx,
-        safety_guard,
-        bundle_sender,
-        db,
-        portfolio,
-        gas_oracle,
-        price_feed,
-        chain_id,
-        max_gas_price_gwei: 200,
-        gas_cap_multiplier_bps: 12_000,
-        simulator,
-        token_manager,
-        stats: stats.clone(),
-        signer: signer.clone(),
-        nonce_manager,
-        slippage_bps: 50,
-        profit_guard_base_floor_multiplier_bps: 10_000,
-        profit_guard_cost_multiplier_bps: 10_000,
-        profit_guard_min_margin_bps: 1_200,
-        liquidity_ratio_floor_ppm: 1_000,
-        sell_min_native_out_wei: 5_000_000_000_000,
-        http_provider: http.clone(),
-        dry_run: true,
-        router_allowlist,
-        wrapper_allowlist,
-        infra_allowlist,
-        router_discovery: None,
-        skip_log_every: 500,
-        wrapped_native: wrapped_native_for_chain(CHAIN_ETHEREUM),
-        allow_non_wrapped_swaps: false,
-        executor: None,
-        executor_bribe_bps: 0,
-        executor_bribe_recipient: None,
-        flashloan_enabled: false,
-        flashloan_providers: vec![FlashloanProvider::Balancer],
-        aave_pool: None,
-        reserve_cache,
-        sandwich_attacks_enabled: true,
-        simulation_backend: "revm".to_string(),
-        worker_limit: 4,
-        shutdown: tokio_util::sync::CancellationToken::new(),
-        receipt_poll_ms: 500,
-        receipt_timeout_ms: 60_000,
-        receipt_confirm_blocks: 4,
-        emergency_exit_on_unknown_receipt: false,
-        runtime: Default::default(),
-    });
+    harness.router_allowlist.insert(uni_v3_router);
 
     // Build a simple V3 exactInputSingle payload swapping WETH -> WETH (no-op) for smoke test.
     let params = UniV3Router::ExactInputSingleParams {
         tokenIn: wrapped_native_for_chain(CHAIN_ETHEREUM),
         tokenOut: wrapped_native_for_chain(CHAIN_ETHEREUM),
         fee: U24::from(500u32),
-        recipient: signer.address(),
+        recipient: harness.signer.address(),
         deadline: U256::from(999_999_999u64),
         amountIn: U256::from(1_000_000_000_000_000u128),
         amountOutMinimum: U256::ZERO,
@@ -167,7 +72,7 @@ async fn mev_share_v3_pipeline_manual() {
     let hint = MevShareHint {
         tx_hash: B256::from_slice(&[9u8; 32]),
         router: uni_v3_router,
-        from: Some(signer.address()),
+        from: Some(harness.signer.address()),
         call_data: Bytes::from(call_data).to_vec(),
         value: U256::ZERO,
         gas_limit: Some(300_000),

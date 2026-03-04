@@ -2,13 +2,14 @@
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
 
 use std::collections::HashMap;
-use std::fs;
+use std::path::Path;
 
 use alloy::primitives::Address;
 use alloy::providers::Provider;
 use dashmap::DashSet;
 use serde::Deserialize;
 
+use crate::common::global_data::parse_global_data_file;
 use crate::domain::error::AppError;
 use crate::network::provider::HttpProvider;
 
@@ -50,10 +51,7 @@ impl TokenManager {
     }
 
     pub fn load_from_file(path: &str) -> Result<Self, AppError> {
-        let raw = fs::read_to_string(path)
-            .map_err(|e| AppError::Config(format!("Failed to read global_data {path}: {e}")))?;
-        let sources: GlobalDataTokenSources = serde_json::from_str(&raw)
-            .map_err(|e| AppError::Config(format!("Invalid global_data JSON {path}: {e}")))?;
+        let sources: GlobalDataTokenSources = parse_global_data_file(Path::new(path), "tokenlist")?;
         let entries = sources.tokenlist;
 
         let mut tokens_by_chain: HashMap<u64, HashMap<Address, TokenInfo>> = HashMap::new();

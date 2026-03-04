@@ -51,7 +51,6 @@ pub struct GlobalSettings {
     // Identity
     pub wallet_key: String,
     pub wallet_address: Address,
-    pub profit_receiver_address: Option<Address>,
 
     // Transaction
     #[serde(default = "default_max_gas")]
@@ -1240,10 +1239,6 @@ impl GlobalSettings {
         }
     }
 
-    pub fn profit_receiver_or_wallet(&self) -> Address {
-        self.profit_receiver_address.unwrap_or(self.wallet_address)
-    }
-
     pub fn tokenlist_path(&self) -> Result<String, AppError> {
         self.resolve_global_data_derived_path(
             "tokenlist",
@@ -2104,7 +2099,6 @@ mod tests {
             database_url: None,
             wallet_key: "0x0".to_string(),
             wallet_address: Address::ZERO,
-            profit_receiver_address: None,
             max_gas_price_gwei: default_max_gas(),
             simulation_backend: default_sim_backend(),
             flashloan_enabled: default_true(),

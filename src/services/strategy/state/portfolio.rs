@@ -23,6 +23,7 @@ pub struct PortfolioManager {
 
     // Token profit in signed integer amounts
     token_profit_wei: DashMap<(u64, Address), I256>,
+    token_profit_decimals: DashMap<(u64, Address), u8>,
 }
 
 impl PortfolioManager {
@@ -35,6 +36,7 @@ impl PortfolioManager {
             net_pnl_wei: DashMap::new(),
             total_gas_spent_wei: DashMap::new(),
             token_profit_wei: DashMap::new(),
+            token_profit_decimals: DashMap::new(),
         }
     }
 
@@ -150,11 +152,19 @@ impl PortfolioManager {
             .or_insert(gas_wei);
     }
 
-    pub fn record_token_profit(&self, chain_id: u64, token: Address, delta_wei: I256) {
+    pub fn record_token_profit(
+        &self,
+        chain_id: u64,
+        token: Address,
+        delta_raw: I256,
+        decimals: u8,
+    ) {
         self.token_profit_wei
             .entry((chain_id, token))
-            .and_modify(|v| *v = v.saturating_add(delta_wei))
-            .or_insert(delta_wei);
+            .and_modify(|v| *v = v.saturating_add(delta_raw))
+            .or_insert(delta_raw);
+        self.token_profit_decimals
+            .insert((chain_id, token), decimals);
     }
 
     /// Used by StrategyExecutor for logic checks (e.g. gas boost decisions)
@@ -182,13 +192,18 @@ impl PortfolioManager {
             .collect()
     }
 
-    pub fn token_profit_all(&self) -> Vec<(u64, Address, f64)> {
+    pub fn token_profit_all(&self) -> Vec<(u64, Address, f64, u8)> {
         self.token_profit_wei
             .iter()
             .map(|entry| {
                 let (chain, token) = *entry.key();
-                let wei = *entry.value();
-                (chain, token, i256_to_eth_f64(wei))
+                let raw = *entry.value();
+                let decimals = self
+                    .token_profit_decimals
+                    .get(&(chain, token))
+                    .map(|v| *v)
+                    .unwrap_or(18);
+                (chain, token, i256_to_unit_f64(raw, decimals), decimals)
             })
             .collect()
     }
@@ -196,11 +211,16 @@ impl PortfolioManager {
 
 // Helpers for Display only
 fn i256_to_eth_f64(val: I256) -> f64 {
+    i256_to_unit_f64(val, 18)
+}
+
+fn i256_to_unit_f64(val: I256, decimals: u8) -> f64 {
     let sign = if val.is_negative() { -1.0 } else { 1.0 };
-    // Convert abs value to string then parse to avoid u64 overflow on very large accumulators
+    // Convert abs value to string then parse to avoid u64 overflow on very large accumulators.
     let abs = val.abs().into_raw();
     let num = abs.to_string().parse::<f64>().unwrap_or(0.0);
-    sign * (num / 1e18)
+    let scale = 10f64.powi(i32::from(decimals));
+    sign * (num / scale)
 }
 
 fn u256_to_i256_saturating(value: U256) -> I256 {
@@ -295,5 +315,20 @@ mod tests {
                 .checked_neg()
                 .unwrap_or(I256::MIN)
         );
+    }
+
+    #[tokio::test]
+    async fn token_profit_all_uses_recorded_token_decimals() {
+        let dummy_provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
+        let pm = PortfolioManager::new(dummy_provider, Address::ZERO);
+        let token = Address::from([0x11; 20]);
+
+        // 2_500_000 with 6 decimals => 2.5 units.
+        pm.record_token_profit(1, token, I256::from_raw(U256::from(2_500_000u64)), 6);
+        let rows = pm.token_profit_all();
+        assert_eq!(rows.len(), 1);
+        let (_chain, _token, units, decimals) = rows[0];
+        assert_eq!(decimals, 6);
+        assert!((units - 2.5).abs() < 1e-12);
     }
 }

@@ -3,13 +3,12 @@ name = "oxidity-searcher"
 version = "0.1.1-delta"
 edition = "2024"
 authors = ["https://mitander.dev | John Hauger Mitander"]
-descriptrion = "Oxidity Searcher is a MEV-Searcher on The Ethereum Mainnet chain"
+description = "Oxidity Searcher is a MEV-Searcher on The Ethereum Mainnet chain"
 homepage = "https://searcher.mitander.dev/"
 repository = "https://github.com/John0n1/oxidity-searcher"
 readme = "README.md"
-license-file = "LICENSE"
 license = "MIT"
-catecories = "cryptography::cryptocurrencies"
+categories = ["cryptography::cryptocurrencies"]
 default-run = "oxidity-searcher"
 
 [dependencies]
@@ -35,14 +34,13 @@ sqlx = { version = "0.8.6", features = ["runtime-tokio-native-tls", "sqlite", "m
 chrono = { version = "0.4.44", features = ["serde"] }
 dashmap = "6.1.0" # Concurrent HashMap
 futures = "0.3.32" 
-reqwest = { version = "0.13.2", features = ["json", "stream", "blocking"] }
+reqwest = { version = "0.12.28", features = ["json", "stream"] }
 async-trait = "0.1.89"
 lazy_static = "1.5.0"
 url = "2.5.8"
 hex = "0.4.3"
 once_cell = "1.21.3"
 clap = { version = "4.5.60", features = ["derive"] }
-crypto-common = "0.2.1"
 
 [dev-dependencies]
 regex = "1.12.3"

@@ -1,23 +1,69 @@
-import asyncio, json, os, pathlib, sys
+import asyncio
+import json
+import os
+import pathlib
+import sys
+
 import websockets
 
-CONFIG_PATH = pathlib.Path(
-    os.environ.get("WS_CHECK_CONFIG", "data/publicnode_rpc_list.json")
-)
-if not CONFIG_PATH.exists():
-    print(
-        f"missing config file: {CONFIG_PATH}",
-        file=sys.stderr,
-    )
-    print(
-        "Set WS_CHECK_CONFIG to a JSON file shaped like {'chains': {'name': {'ws': 'wss://...'}}}.",
-        file=sys.stderr,
-    )
-    sys.exit(2)
-with CONFIG_PATH.open() as f:
-    cfg = json.load(f)
 
-chains = cfg['chains']
+def load_dotenv(path: pathlib.Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def load_chains() -> dict[str, dict[str, str]]:
+    config_override = os.environ.get("WS_CHECK_CONFIG")
+    if config_override:
+        config_path = pathlib.Path(config_override)
+        if not config_path.exists():
+            print(f"missing config file: {config_path}", file=sys.stderr)
+            sys.exit(2)
+        with config_path.open() as f:
+            cfg = json.load(f)
+        chains = cfg.get("chains", {})
+        if not isinstance(chains, dict) or not chains:
+            print("WS_CHECK_CONFIG file has no usable 'chains' object", file=sys.stderr)
+            sys.exit(2)
+        return chains
+
+    env = load_dotenv(pathlib.Path(".env"))
+    merged = {**env, **os.environ}
+    chains: dict[str, dict[str, str]] = {}
+    for key, value in merged.items():
+        if not value:
+            continue
+        if key == "WEBSOCKET_PROVIDER":
+            chains["default"] = {"ws": value}
+            continue
+        prefix = "WEBSOCKET_PROVIDER_"
+        if key.startswith(prefix):
+            chain_id = key[len(prefix):]
+            if chain_id:
+                chains[chain_id] = {"ws": value}
+
+    if not chains:
+        print(
+            "No websocket providers found. Set WEBSOCKET_PROVIDER_<chain_id> in .env or env.",
+            file=sys.stderr,
+        )
+        print(
+            "Optionally set WS_CHECK_CONFIG to a JSON file shaped like {'chains': {'name': {'ws': 'wss://...'}}}.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return chains
+
+
+chains = load_chains()
 actions = [
     ("newHeads", ["newHeads"]),
     ("logs", ["logs", {}]),
