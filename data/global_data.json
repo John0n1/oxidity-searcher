@@ -9944,18 +9944,6 @@
       "variant": "direct"
     },
     {
-      "name": "OpenUSDT",
-      "symbol": "OUSDT",
-      "pair": "OUSDT/USD",
-      "base": "OUSDT",
-      "quote": "USD",
-      "chainId": 1,
-      "address": "0xE3fd61Cd8935EAE81e1c31AF36D7134e411490Cd",
-      "assetType": "Crypto",
-      "marketHours": "Crypto",
-      "variant": "direct"
-    },
-    {
       "name": "Pax Gold",
       "symbol": "PAXG",
       "pair": "PAXG/USD",
