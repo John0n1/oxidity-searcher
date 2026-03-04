@@ -5,7 +5,13 @@ use alloy::consensus::Transaction as ConsensusTxTrait;
 use alloy::primitives::{Address, Bytes, TxKind, U256, aliases::U24};
 use alloy::rpc::types::eth::Transaction;
 use alloy_sol_types::{SolCall, SolType};
+use once_cell::sync::Lazy;
+use std::collections::HashMap;
 
+use crate::common::constants::{
+    CHAIN_ARBITRUM, CHAIN_BSC, CHAIN_ETHEREUM, CHAIN_OPTIMISM, CHAIN_POLYGON,
+    default_routers_for_chain, native_sentinel_for_chain, wrapped_native_for_chain,
+};
 use crate::services::strategy::routers::{
     BalancerVault, DexRouter, KyberAggregationRouterV2, OneInchAggregationRouter,
     OneInchAggregationRouterV5, ParaSwapAugustusV6, RelayApprovalProxyV3, RelayRouterV3,
@@ -44,6 +50,38 @@ pub enum SwapDirection {
 pub struct ParsedV3Path {
     pub tokens: Vec<Address>,
     pub fees: Vec<u32>,
+}
+
+static ROUTER_CHAIN_LOOKUP: Lazy<HashMap<Address, u64>> = Lazy::new(|| {
+    let mut lookup = HashMap::new();
+    for chain_id in [
+        CHAIN_ETHEREUM,
+        CHAIN_OPTIMISM,
+        CHAIN_BSC,
+        CHAIN_POLYGON,
+        CHAIN_ARBITRUM,
+    ] {
+        for router in default_routers_for_chain(chain_id).values().copied() {
+            // First insert wins so canonical chain mappings remain stable on collisions.
+            lookup.entry(router).or_insert(chain_id);
+        }
+    }
+    lookup
+});
+
+fn chain_id_for_router(router: Address) -> u64 {
+    ROUTER_CHAIN_LOOKUP
+        .get(&router)
+        .copied()
+        .unwrap_or(CHAIN_ETHEREUM)
+}
+
+fn wrapped_native_for_router(router: Address) -> Address {
+    wrapped_native_for_chain(chain_id_for_router(router))
+}
+
+fn native_sentinel_for_router(router: Address) -> Address {
+    native_sentinel_for_chain(chain_id_for_router(router))
 }
 
 sol! {
@@ -549,8 +587,8 @@ fn decode_swap_input_inner(
             let decoded = BalancerVault::swapCall::abi_decode(input).ok()?;
             observed_aggregator_swap(
                 router,
-                normalize_balancer_asset(decoded.singleSwap.assetIn),
-                normalize_balancer_asset(decoded.singleSwap.assetOut),
+                normalize_balancer_asset(router, decoded.singleSwap.assetIn),
+                normalize_balancer_asset(router, decoded.singleSwap.assetOut),
                 decoded.singleSwap.amount,
                 U256::ZERO,
                 decoded.funds.recipient,
@@ -562,8 +600,8 @@ fn decode_swap_input_inner(
             let last = decoded.swaps.last()?;
             let idx_in = usize::try_from(first.assetInIndex).ok()?;
             let idx_out = usize::try_from(last.assetOutIndex).ok()?;
-            let token_in = normalize_balancer_asset(*decoded.assets.get(idx_in)?);
-            let token_out = normalize_balancer_asset(*decoded.assets.get(idx_out)?);
+            let token_in = normalize_balancer_asset(router, *decoded.assets.get(idx_in)?);
+            let token_out = normalize_balancer_asset(router, *decoded.assets.get(idx_out)?);
             let amount_in = if first.amount > U256::ZERO {
                 first.amount
             } else {
@@ -819,26 +857,20 @@ fn decode_swap_input_inner(
     }
 }
 
-fn normalize_aggregator_token(token: Address) -> Option<Address> {
+fn normalize_aggregator_token(router: Address, token: Address) -> Option<Address> {
     if token == Address::ZERO {
         return None;
     }
-    let native_sentinel = crate::common::constants::native_sentinel_for_chain(
-        crate::common::constants::CHAIN_ETHEREUM,
-    );
+    let native_sentinel = native_sentinel_for_router(router);
     if token == native_sentinel {
-        return Some(crate::common::constants::wrapped_native_for_chain(
-            crate::common::constants::CHAIN_ETHEREUM,
-        ));
+        return Some(wrapped_native_for_router(router));
     }
     Some(token)
 }
 
-fn normalize_balancer_asset(asset: Address) -> Address {
+fn normalize_balancer_asset(router: Address, asset: Address) -> Address {
     if asset == Address::ZERO {
-        return crate::common::constants::wrapped_native_for_chain(
-            crate::common::constants::CHAIN_ETHEREUM,
-        );
+        return wrapped_native_for_router(router);
     }
     asset
 }
@@ -851,8 +883,8 @@ fn observed_aggregator_swap(
     min_out: U256,
     recipient: Address,
 ) -> Option<ObservedSwap> {
-    let token_in = normalize_aggregator_token(token_in_raw)?;
-    let token_out = normalize_aggregator_token(token_out_raw)?;
+    let token_in = normalize_aggregator_token(router, token_in_raw)?;
+    let token_out = normalize_aggregator_token(router, token_out_raw)?;
     if token_in == token_out || amount_in.is_zero() {
         return None;
     }
@@ -905,7 +937,7 @@ fn observed_transit_v2(
         .path
         .iter()
         .copied()
-        .filter_map(normalize_aggregator_token)
+        .filter_map(|token| normalize_aggregator_token(router, token))
         .collect();
     if path.len() < 2 {
         return None;

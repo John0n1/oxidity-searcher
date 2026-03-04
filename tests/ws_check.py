@@ -1,7 +1,19 @@
-import asyncio, json, pathlib
+import asyncio, json, os, pathlib, sys
 import websockets
 
-CONFIG_PATH = pathlib.Path('data/publicnode_rpc_list.json')
+CONFIG_PATH = pathlib.Path(
+    os.environ.get("WS_CHECK_CONFIG", "data/publicnode_rpc_list.json")
+)
+if not CONFIG_PATH.exists():
+    print(
+        f"missing config file: {CONFIG_PATH}",
+        file=sys.stderr,
+    )
+    print(
+        "Set WS_CHECK_CONFIG to a JSON file shaped like {'chains': {'name': {'ws': 'wss://...'}}}.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 with CONFIG_PATH.open() as f:
     cfg = json.load(f)
 

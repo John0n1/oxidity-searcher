@@ -121,6 +121,9 @@ impl TokenManager {
                     if code.is_empty() {
                         self.invalid_tokens.insert((chain_id, *addr));
                         invalid += 1;
+                    } else {
+                        // Clear stale invalid-cache entries after successful on-chain validation.
+                        self.invalid_tokens.remove(&(chain_id, *addr));
                     }
                 }
                 Err(e) => {
