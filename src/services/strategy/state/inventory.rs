@@ -56,7 +56,47 @@ impl StrategyExecutor {
     }
 
     pub async fn maybe_rebalance_inventory(&self) -> Result<(), AppError> {
-        // Strict atomic execution mode: disable periodic inventory holds/rebalancing.
+        let tokens: Vec<Address> = self.inventory_tokens.iter().map(|t| *t).collect();
+        if tokens.is_empty() {
+            return Ok(());
+        }
+        let routers: Vec<Address> = self.router_allowlist.iter().map(|r| *r).collect();
+        if routers.is_empty() {
+            tracing::debug!(
+                target: "inventory",
+                token_count = tokens.len(),
+                "Skipping inventory rebalance: no routers available"
+            );
+            return Ok(());
+        }
+
+        for token in tokens {
+            let mut rebalanced = false;
+            for router in routers.iter().copied() {
+                match self.rebalance_token(token, router).await {
+                    Ok(()) => {
+                        rebalanced = true;
+                        break;
+                    }
+                    Err(err) => {
+                        tracing::debug!(
+                            target: "inventory",
+                            token = %format!("{:#x}", token),
+                            router = %format!("{:#x}", router),
+                            error = %err,
+                            "Inventory rebalance attempt failed on router"
+                        );
+                    }
+                }
+            }
+            if !rebalanced {
+                tracing::debug!(
+                    target: "inventory",
+                    token = %format!("{:#x}", token),
+                    "No successful inventory rebalance route found"
+                );
+            }
+        }
         Ok(())
     }
 

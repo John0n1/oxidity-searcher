@@ -69,19 +69,16 @@ static ROUTER_CHAIN_LOOKUP: Lazy<HashMap<Address, u64>> = Lazy::new(|| {
     lookup
 });
 
-fn chain_id_for_router(router: Address) -> u64 {
-    ROUTER_CHAIN_LOOKUP
-        .get(&router)
-        .copied()
-        .unwrap_or(CHAIN_ETHEREUM)
+fn chain_id_for_router(router: Address) -> Option<u64> {
+    ROUTER_CHAIN_LOOKUP.get(&router).copied()
 }
 
-fn wrapped_native_for_router(router: Address) -> Address {
-    wrapped_native_for_chain(chain_id_for_router(router))
+fn wrapped_native_for_router(router: Address) -> Option<Address> {
+    chain_id_for_router(router).map(wrapped_native_for_chain)
 }
 
-fn native_sentinel_for_router(router: Address) -> Address {
-    native_sentinel_for_chain(chain_id_for_router(router))
+fn native_sentinel_for_router(router: Address) -> Option<Address> {
+    chain_id_for_router(router).map(native_sentinel_for_chain)
 }
 
 sol! {
@@ -862,15 +859,15 @@ fn normalize_aggregator_token(router: Address, token: Address) -> Option<Address
         return None;
     }
     let native_sentinel = native_sentinel_for_router(router);
-    if token == native_sentinel {
-        return Some(wrapped_native_for_router(router));
+    if native_sentinel.is_some() && Some(token) == native_sentinel {
+        return wrapped_native_for_router(router);
     }
     Some(token)
 }
 
 fn normalize_balancer_asset(router: Address, asset: Address) -> Address {
     if asset == Address::ZERO {
-        return wrapped_native_for_router(router);
+        return wrapped_native_for_router(router).unwrap_or(Address::ZERO);
     }
     asset
 }
@@ -1308,6 +1305,34 @@ mod tests {
                 crate::common::constants::CHAIN_ETHEREUM
             )
         );
+        assert_eq!(observed.path[1], dai);
+    }
+
+    #[test]
+    fn unknown_router_does_not_force_mainnet_native_mapping() {
+        let router = Address::from([0x99; 20]);
+        let native_sentinel = crate::common::constants::native_sentinel_for_chain(
+            crate::common::constants::CHAIN_ETHEREUM,
+        );
+        let dai = Address::from([0x45; 20]);
+
+        let call = OneInchAggregationRouter::swapCall {
+            executor: Address::ZERO,
+            desc: OneInchAggregationRouter::SwapDescription {
+                srcToken: native_sentinel,
+                dstToken: dai,
+                srcReceiver: Address::ZERO,
+                dstReceiver: Address::ZERO,
+                amount: U256::from(2_000_000_000_000_000u64),
+                minReturnAmount: U256::from(1_000_000u64),
+                flags: U256::ZERO,
+            },
+            data: Bytes::new(),
+        };
+        let input = call.abi_encode();
+        let observed =
+            decode_swap_input(router, &input, U256::ZERO).expect("decode oneinch unknown router");
+        assert_eq!(observed.path[0], native_sentinel);
         assert_eq!(observed.path[1], dai);
     }
 

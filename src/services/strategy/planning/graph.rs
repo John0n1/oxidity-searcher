@@ -11,7 +11,7 @@ struct Path {
     current_token: Address,
     current_amount: U256,
     gas: u64,
-    score: U256,
+    score_ratio_ppm: U256,
 }
 
 /// Directed liquidity edge for a specific trade size.
@@ -69,10 +69,11 @@ impl QuoteGraph {
             current_token: start,
             current_amount: amount_in,
             gas: 0,
-            score: U256::ZERO,
+            score_ratio_ppm: U256::ZERO,
         }];
 
-        let mut solutions: Vec<(U256, RoutePlan)> = Vec::new();
+        // Rank by dimensionless route ratio (output/input) and use gas as a tie-breaker.
+        let mut solutions: Vec<(U256, u64, RoutePlan)> = Vec::new();
 
         for _depth in 0..opts.max_hops {
             let mut next: Vec<Path> = Vec::new();
@@ -124,23 +125,21 @@ impl QuoteGraph {
                         is_flash: edge.is_flash,
                     });
 
-                    let mut score = scaled_out;
-                    // Subtract paid in (first leg amount) and gas cost.
-                    let gas_cost = U256::from(opts.gas_price).saturating_mul(U256::from(gas));
-                    score = score.saturating_sub(amount_in);
-                    score = score.saturating_sub(gas_cost);
+                    // Keep scoring dimensionless across heterogeneous token decimals/units.
+                    let route_ratio_ppm =
+                        scaled_out.saturating_mul(U256::from(1_000_000u64)) / amount_in;
 
                     let new_path = Path {
                         legs: new_legs,
                         current_token: edge.token_out,
                         current_amount: scaled_out,
                         gas,
-                        score,
+                        score_ratio_ppm: route_ratio_ppm,
                     };
 
                     if edge.token_out == target {
                         if let Some(plan) = Self::to_plan(&new_path.legs) {
-                            solutions.push((new_path.score, plan));
+                            solutions.push((new_path.score_ratio_ppm, new_path.gas, plan));
                         }
                     } else {
                         next.push(new_path);
@@ -148,8 +147,12 @@ impl QuoteGraph {
                 }
             }
 
-            // Beam prune by score
-            next.sort_by(|a, b| b.score.cmp(&a.score));
+            // Beam prune by ratio (descending), then by gas overhead (ascending).
+            next.sort_by(|a, b| {
+                b.score_ratio_ppm
+                    .cmp(&a.score_ratio_ppm)
+                    .then_with(|| a.gas.cmp(&b.gas))
+            });
             if next.len() > opts.beam_size {
                 next.truncate(opts.beam_size);
             }
@@ -159,11 +162,11 @@ impl QuoteGraph {
             }
         }
 
-        solutions.sort_by(|a, b| b.0.cmp(&a.0));
+        solutions.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
         if solutions.len() > k {
             solutions.truncate(k);
         }
-        solutions.into_iter().map(|(_, plan)| plan).collect()
+        solutions.into_iter().map(|(_, _, plan)| plan).collect()
     }
 
     fn to_plan(legs: &[QuoteEdge]) -> Option<RoutePlan> {
@@ -274,5 +277,35 @@ mod tests {
         );
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].legs[0].target, higher.pool);
+    }
+
+    #[test]
+    fn k_best_prefers_lower_gas_when_ratio_is_equal() {
+        let a = Address::from([0x21; 20]);
+        let c = Address::from([0x31; 20]);
+        let mut graph = QuoteGraph::default();
+
+        let mut high_gas = edge(a, c, 120, 110, 120_000);
+        high_gas.pool = Address::from([0xaa; 20]);
+        graph.add_edge(high_gas);
+
+        let mut low_gas = edge(a, c, 120, 110, 40_000);
+        low_gas.pool = Address::from([0xbb; 20]);
+        graph.add_edge(low_gas.clone());
+
+        let plans = graph.k_best(
+            a,
+            c,
+            U256::from(100u64),
+            1,
+            QuoteSearchOptions {
+                gas_price: u128::MAX,
+                max_hops: 2,
+                beam_size: 8,
+                min_ratio_ppm: 500_000,
+            },
+        );
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].legs[0].target, low_gas.pool);
     }
 }

@@ -710,7 +710,8 @@ impl StrategyExecutor {
             gas_price,
             max_hops: 3,
             beam_size: 8,
-            min_ratio_ppm: 900,
+            // Require at least ~90% quoted continuity per hop in ppm space.
+            min_ratio_ppm: 900_000,
         };
         graph
             .k_best(token_in, token_out, amount_in, 1, opts)
@@ -1314,8 +1315,7 @@ impl StrategyExecutor {
                             gas_fees,
                         )
                         .await;
-                    let (tokens_out, access_list, mut calldata, mut gas_limit) = match swap_attempt
-                    {
+                    let (tokens_out, access_list, calldata, gas_limit) = match swap_attempt {
                         Ok(Some(swap)) => (
                             swap.expected_out,
                             swap.access_list.clone(),
@@ -1347,23 +1347,27 @@ impl StrategyExecutor {
                                 .await
                                 .map(|p| p.expected_out)
                                 .unwrap_or(U256::ZERO);
-                            let fallback_expected_out =
+                            let fallback_quote_hint =
                                 proportional_hint.max(route_hint).max(U256::from(1u64));
+                            // Keep fallback execution permissive when quotes are unavailable, but
+                            // do not let unverified hints inflate expected-out profit checks.
+                            let fallback_guarded_out = U256::from(1u64);
                             tracing::debug!(
                                 target: "strategy",
                                 router = %format!("{:#x}", exec_router),
                                 token = %format!("{:#x}", target_token),
                                 amount_in = %value,
-                                expected_out_hint = %fallback_expected_out,
+                                expected_out_hint = %fallback_quote_hint,
+                                guarded_expected_out = %fallback_guarded_out,
                                 "V2 swap quote/build failed; using conservative fallback payload"
                             );
                             (
-                                fallback_expected_out,
+                                fallback_guarded_out,
                                 StrategyExecutor::build_access_list(forward_router, &path),
                                 self.reserve_cache.build_v2_swap_payload(
                                     path.clone(),
                                     value,
-                                    U256::from(1u64),
+                                    fallback_guarded_out,
                                     recipient,
                                     use_flashloan,
                                     self.wrapped_native,
@@ -1641,81 +1645,6 @@ impl StrategyExecutor {
                     } else {
                         U256::ZERO
                     };
-                    if let Some(addr) = access_list.0.first().map(|a| a.address)
-                        && addr != forward_router
-                    {
-                        calldata = self.reserve_cache.build_v2_swap_payload(
-                            path,
-                            value,
-                            tokens_out,
-                            self.signer.address(),
-                            use_flashloan,
-                            self.wrapped_native,
-                        );
-                        gas_limit = gas_limit.max(gas_limit_hint);
-                        return Ok(BackrunTx {
-                            raw: Vec::new(),
-                            hash: B256::ZERO,
-                            to: forward_router,
-                            value: tx_value,
-                            request: TransactionRequest {
-                                from: Some(self.signer.address()),
-                                to: Some(TxKind::Call(forward_router)),
-                                max_fee_per_gas: Some(gas_fees.max_fee_per_gas),
-                                max_priority_fee_per_gas: Some(gas_fees.max_priority_fee_per_gas),
-                                gas: Some(gas_limit),
-                                value: Some(tx_value),
-                                input: TransactionInput::new(calldata.into()),
-                                nonce: Some(nonce),
-                                chain_id: Some(self.chain_id),
-                                access_list: Some(access_list),
-                                ..Default::default()
-                            },
-                            expected_out: tokens_out,
-                            expected_out_token,
-                            unwrap_to_native,
-                            uses_flashloan: false,
-                            flashloan_premium: U256::ZERO,
-                            flashloan_overhead_gas: 0,
-                            router_kind: observed.router_kind,
-                            route_plan: self
-                                .best_route_plan(
-                                    if has_wrapped {
-                                        self.wrapped_native
-                                    } else {
-                                        observed
-                                            .path
-                                            .first()
-                                            .copied()
-                                            .unwrap_or(self.wrapped_native)
-                                    },
-                                    expected_out_token,
-                                    value,
-                                    gas_fees.max_fee_per_gas,
-                                )
-                                .await
-                                .or_else(|| {
-                                    StrategyExecutor::single_leg_route(
-                                        RouteVenue::UniV2,
-                                        forward_router,
-                                        if has_wrapped {
-                                            self.wrapped_native
-                                        } else {
-                                            observed
-                                                .path
-                                                .first()
-                                                .copied()
-                                                .unwrap_or(self.wrapped_native)
-                                        },
-                                        expected_out_token,
-                                        value,
-                                        tokens_out,
-                                        None,
-                                        None,
-                                    )
-                                }),
-                        });
-                    }
                     return Ok(BackrunTx {
                         raw: Vec::new(),
                         hash: B256::ZERO,

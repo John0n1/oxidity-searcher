@@ -516,8 +516,9 @@ impl BundleSender {
             })
             .collect();
 
-        let mut accepted = 0usize;
+        let mut accepted_total = 0usize;
         let mut failures: Vec<String> = Vec::new();
+        let mut failed_target_blocks: Vec<u64> = Vec::new();
         for offset in 1..=target_blocks {
             let target_block = block_number + offset;
             let replacement_uuid = if self.use_replacement_uuid {
@@ -525,6 +526,8 @@ impl BundleSender {
             } else {
                 None
             };
+            let mut accepted_for_target = 0usize;
+            let mut block_failures: Vec<String> = Vec::new();
 
             let mut params = json!({
                 "txs": raw_txs.iter().map(|r| format!("0x{}", hex::encode(r))).collect::<Vec<_>>(),
@@ -587,21 +590,41 @@ impl BundleSender {
             for result in results {
                 match result {
                     Ok((name, _url)) => {
-                        accepted = accepted.saturating_add(1);
+                        accepted_total = accepted_total.saturating_add(1);
+                        accepted_for_target = accepted_for_target.saturating_add(1);
                         if let Some(uuid) = replacement_uuid.as_deref() {
                             self.relay_set_replacement_uuid(&name, uuid);
                         }
                     }
                     Err((name, url, e)) => {
-                        failures.push(format!("{name}@{url}: {e}"));
+                        let detail = format!("{name}@{url}: {e}");
+                        block_failures.push(detail.clone());
+                        failures.push(format!("target_block={target_block} {detail}"));
                     }
                 }
             }
+
+            if accepted_for_target == 0 {
+                failed_target_blocks.push(target_block);
+                tracing::warn!(
+                    target: "executor",
+                    target_block,
+                    failures = %block_failures.join(" | "),
+                    "No relay accepted bundle for target block"
+                );
+            }
         }
 
-        if accepted == 0 {
+        if !failed_target_blocks.is_empty() {
             return Err(AppError::Connection(format!(
-                "All relays rejected bundle across {} block(s): {}",
+                "No relay accepted bundle for target block(s) {:?}: {}",
+                failed_target_blocks,
+                failures.join(" | ")
+            )));
+        }
+        if accepted_total == 0 {
+            return Err(AppError::Connection(format!(
+                "All relays rejected bundle across {} target block(s): {}",
                 target_blocks,
                 failures.join(" | ")
             )));
@@ -609,7 +632,7 @@ impl BundleSender {
         if !failures.is_empty() {
             tracing::warn!(
                 target: "executor",
-                accepted,
+                accepted_total,
                 target_blocks,
                 failures = %failures.join(" | "),
                 "Bundle accepted by subset of relays"

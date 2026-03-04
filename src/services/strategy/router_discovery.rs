@@ -277,13 +277,39 @@ impl RouterDiscovery {
         };
         let body = match std::fs::read_to_string(path) {
             Ok(body) => body,
-            Err(_) => return,
+            Err(err) => {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(
+                        target: "router_discovery",
+                        path = %path,
+                        error = %err,
+                        "Failed reading router discovery cache"
+                    );
+                }
+                return;
+            }
         };
         let parsed: RouterDiscoveryCache = match serde_json::from_str(&body) {
             Ok(parsed) => parsed,
-            Err(_) => return,
+            Err(err) => {
+                tracing::warn!(
+                    target: "router_discovery",
+                    path = %path,
+                    error = %err,
+                    "Failed parsing router discovery cache JSON"
+                );
+                return;
+            }
         };
         if parsed.chain_id != self.chain_id || parsed.version != 1 {
+            tracing::debug!(
+                target: "router_discovery",
+                path = %path,
+                cache_chain_id = parsed.chain_id,
+                expected_chain_id = self.chain_id,
+                cache_version = parsed.version,
+                "Ignoring router discovery cache due to chain/version mismatch"
+            );
             return;
         }
         let mut restored = 0u64;
@@ -324,7 +350,18 @@ impl RouterDiscovery {
                 let _ = tokio::fs::create_dir_all(parent).await;
             }
             let mut cache = match tokio::fs::read_to_string(&path).await {
-                Ok(body) => serde_json::from_str::<RouterDiscoveryCache>(&body).unwrap_or_default(),
+                Ok(body) => match serde_json::from_str::<RouterDiscoveryCache>(&body) {
+                    Ok(cache) => cache,
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "router_discovery",
+                            path = %path,
+                            error = %err,
+                            "Failed parsing existing router discovery cache; rebuilding"
+                        );
+                        RouterDiscoveryCache::default()
+                    }
+                },
                 Err(_) => RouterDiscoveryCache::default(),
             };
             if cache.version == 0 {
