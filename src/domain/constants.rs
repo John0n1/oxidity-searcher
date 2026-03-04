@@ -320,6 +320,35 @@ pub fn default_uniswap_universal_routers(chain_id: u64) -> Vec<Address> {
     out
 }
 
+fn default_address_from_router_keys(chain_id: u64, keys: &[&str]) -> Option<Address> {
+    let routers = ADDRESS_REGISTRY_DEFAULTS.routers_by_chain.get(&chain_id)?;
+    for key in keys {
+        if let Some(addr) = routers.get(*key).copied() {
+            return Some(addr);
+        }
+    }
+    None
+}
+
+pub fn default_dydx_solo_margin(chain_id: u64) -> Option<Address> {
+    default_address_from_router_keys(chain_id, &["dydx_solo_margin", "dydx_solo", "solo_margin"])
+}
+
+pub fn default_maker_flash_lender(chain_id: u64) -> Option<Address> {
+    default_address_from_router_keys(
+        chain_id,
+        &["maker_mcd_flash", "maker_flash_lender", "mcd_flash"],
+    )
+}
+
+pub fn default_uniswap_v2_factory(chain_id: u64) -> Option<Address> {
+    default_address_from_router_keys(chain_id, &["uniswap_v2_factory"])
+}
+
+pub fn default_uniswap_v3_factory(chain_id: u64) -> Option<Address> {
+    default_address_from_router_keys(chain_id, &["uniswap_v3_factory"])
+}
+
 pub fn default_oneinch_routers(chain_id: u64) -> Vec<Address> {
     let Some(routers) = ADDRESS_REGISTRY_DEFAULTS.routers_by_chain.get(&chain_id) else {
         return Vec::new();

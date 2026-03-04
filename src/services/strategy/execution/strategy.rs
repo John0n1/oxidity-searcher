@@ -140,6 +140,11 @@ pub fn classify_allowlist_entry(name: &str) -> AllowlistCategory {
         || lower.contains("quoter")
         || lower.contains("approval_proxy")
         || lower.contains("addresses_provider")
+        || lower.contains("factory")
+        || lower.contains("solo")
+        || lower.contains("flash_lender")
+        || lower.contains("mcd_flash")
+        || lower.contains("dydx")
     {
         return AllowlistCategory::Infra;
     }
@@ -304,6 +309,10 @@ pub struct DynamicGasCap {
 pub enum FlashloanProvider {
     Balancer,
     AaveV3,
+    Dydx,
+    MakerDao,
+    UniswapV2,
+    UniswapV3,
 }
 
 #[derive(Default)]
@@ -732,6 +741,26 @@ impl StrategyExecutor {
                 FlashloanProvider::Balancer => return true,
                 FlashloanProvider::AaveV3 => {
                     if self.aave_pool.is_some() {
+                        return true;
+                    }
+                }
+                FlashloanProvider::Dydx => {
+                    if constants::default_dydx_solo_margin(self.chain_id).is_some() {
+                        return true;
+                    }
+                }
+                FlashloanProvider::MakerDao => {
+                    if constants::default_maker_flash_lender(self.chain_id).is_some() {
+                        return true;
+                    }
+                }
+                FlashloanProvider::UniswapV2 => {
+                    if constants::default_uniswap_v2_factory(self.chain_id).is_some() {
+                        return true;
+                    }
+                }
+                FlashloanProvider::UniswapV3 => {
+                    if constants::default_uniswap_v3_factory(self.chain_id).is_some() {
                         return true;
                     }
                 }
@@ -2198,6 +2227,18 @@ mod tests {
         assert!(!exec.has_usable_flashloan_provider());
 
         exec.aave_pool = Some(Address::from([0x44; 20]));
+        assert!(exec.has_usable_flashloan_provider());
+
+        exec.flashloan_providers = vec![FlashloanProvider::Dydx];
+        assert!(exec.has_usable_flashloan_provider());
+
+        exec.flashloan_providers = vec![FlashloanProvider::MakerDao];
+        assert!(exec.has_usable_flashloan_provider());
+
+        exec.flashloan_providers = vec![FlashloanProvider::UniswapV2];
+        assert!(exec.has_usable_flashloan_provider());
+
+        exec.flashloan_providers = vec![FlashloanProvider::UniswapV3];
         assert!(exec.has_usable_flashloan_provider());
     }
 

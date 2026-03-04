@@ -34,6 +34,34 @@ sol! {
             bytes calldata params
         ) external;
 
+        function executeDydxFlashLoan(
+            address soloMargin,
+            address asset,
+            uint256 amount,
+            bytes calldata params
+        ) external;
+
+        function executeMakerFlashLoan(
+            address lender,
+            address asset,
+            uint256 amount,
+            bytes calldata params
+        ) external;
+
+        function executeUniswapV2FlashLoan(
+            address pair,
+            address asset,
+            uint256 amount,
+            bytes calldata params
+        ) external;
+
+        function executeUniswapV3FlashLoan(
+            address pool,
+            address asset,
+            uint256 amount,
+            bytes calldata params
+        ) external;
+
         error OnlyOwner();
         error OnlyVault();
         error LengthMismatch();
@@ -47,14 +75,34 @@ sol! {
         error BribeFailed();
         error BalanceInvariantBroken(address token, uint256 beforeBalance, uint256 afterBalance);
         error OnlyPool();
+        error OnlyDydxSolo();
+        error OnlyMakerFlashLender();
+        error OnlyUniswapV2Pair();
+        error OnlyUniswapV3Pool();
         error InvalidPool();
+        error InvalidFlashloanPair();
+        error InvalidFlashloanLender();
+        error InvalidFlashloanSolo();
         error InvalidAsset();
         error InvalidBalancerVault();
+        error UnsupportedPairAsset();
         error BalancerTokensNotSorted(uint256 index, address previous, address current);
         error BalancerLoanNotActive();
         error BalancerLoanContextMismatch();
         error BalancerCallbackNotReceived();
         error AaveCallbackNotReceived();
+        error DydxLoanNotActive();
+        error DydxLoanContextMismatch();
+        error DydxCallbackNotReceived();
+        error MakerLoanNotActive();
+        error MakerLoanContextMismatch();
+        error MakerCallbackNotReceived();
+        error UniswapV2LoanNotActive();
+        error UniswapV2LoanContextMismatch();
+        error UniswapV2CallbackNotReceived();
+        error UniswapV3LoanNotActive();
+        error UniswapV3LoanContextMismatch();
+        error UniswapV3CallbackNotReceived();
     }
 
     // Matches abi.decode(userData, (address[], uint256[], bytes[])) in receiveFlashLoan
@@ -175,8 +223,40 @@ mod tests {
             params: vec![0x02u8].into(),
         }
         .abi_encode();
+        let dydx = UnifiedHardenedExecutor::executeDydxFlashLoanCall {
+            soloMargin: Address::from([4u8; 20]),
+            asset: Address::from([5u8; 20]),
+            amount: U256::from(1u64),
+            params: vec![0x03u8].into(),
+        }
+        .abi_encode();
+        let maker = UnifiedHardenedExecutor::executeMakerFlashLoanCall {
+            lender: Address::from([6u8; 20]),
+            asset: Address::from([7u8; 20]),
+            amount: U256::from(1u64),
+            params: vec![0x04u8].into(),
+        }
+        .abi_encode();
+        let univ2 = UnifiedHardenedExecutor::executeUniswapV2FlashLoanCall {
+            pair: Address::from([8u8; 20]),
+            asset: Address::from([9u8; 20]),
+            amount: U256::from(1u64),
+            params: vec![0x05u8].into(),
+        }
+        .abi_encode();
+        let univ3 = UnifiedHardenedExecutor::executeUniswapV3FlashLoanCall {
+            pool: Address::from([10u8; 20]),
+            asset: Address::from([11u8; 20]),
+            amount: U256::from(1u64),
+            params: vec![0x06u8].into(),
+        }
+        .abi_encode();
 
         assert_eq!(hex::encode(&bal[..4]), "76ec49ba");
         assert_eq!(hex::encode(&aave[..4]), "ba0eef35");
+        assert_eq!(hex::encode(&dydx[..4]), "e0a6eb71");
+        assert_eq!(hex::encode(&maker[..4]), "fae47757");
+        assert_eq!(hex::encode(&univ2[..4]), "0e13cb65");
+        assert_eq!(hex::encode(&univ3[..4]), "2fac9144");
     }
 }

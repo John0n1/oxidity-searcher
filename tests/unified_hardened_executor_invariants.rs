@@ -69,7 +69,7 @@ fn flashloan_repayment_guards_are_present() {
         "revert InsufficientFundsForRepayment(tokenAddr, amountOwing, myBalance);",
         "if (bal < amountOwing) {",
         "revert InsufficientFundsForRepayment(asset, amountOwing, bal);",
-        "_safeTransfer(tokenAddr, BALANCER_VAULT, amountOwing);",
+        "_safeTransfer(tokenAddr, balancerVault, amountOwing);",
         "_lowLevelApprove(asset, msg.sender, amountOwing);",
     ];
     for needle in required {
@@ -97,6 +97,81 @@ fn flashloan_input_sanity_guards_are_present() {
         assert!(
             src.contains(needle),
             "missing flashloan input sanity guard in executor source: {needle}"
+        );
+    }
+}
+
+#[test]
+fn sweep_policy_is_manual_first_with_lazy_auto_sweep_guards() {
+    let src = contract_source();
+    let required = [
+        "uint256 public constant AUTO_SWEEP_INTERVAL = 15 days;",
+        "uint256 public lastSweepAt;",
+        "function autoSweepDue() public view returns (bool)",
+        "bool dueForAutoSweep = autoSweepDue();",
+        "if (dueForAutoSweep && surplus > 0) {",
+        "if (dueForAutoSweep && _transferEthToProfitReceiver(false, cachedProfitReceiver)) {",
+        "if (autoSweepDue()) {",
+        "_recordSweep(true);",
+    ];
+    for needle in required {
+        assert!(
+            src.contains(needle),
+            "missing sweep policy guard in executor source: {needle}"
+        );
+    }
+}
+
+#[test]
+fn manual_sweep_paths_reset_sweep_timer() {
+    let src = contract_source();
+    let required = [
+        "function sweepToken(address token) external onlyOwner {",
+        "function sweepETH() external onlyOwner {",
+        "if (_transferEthToProfitReceiver(true, cachedProfitReceiver)) {",
+        "_recordSweep(false);",
+    ];
+    for needle in required {
+        assert!(
+            src.contains(needle),
+            "missing manual sweep timer behavior in executor source: {needle}"
+        );
+    }
+}
+
+#[test]
+fn flashloan_session_state_events_are_present() {
+    let src = contract_source();
+    let required = [
+        "event AavePoolStateUpdated(address indexed previousPool, address indexed newPool);",
+        "event BalancerLoanSessionStateUpdated(bool active, bytes32 contextHash);",
+        "emit BalancerLoanSessionStateUpdated(true, balancerLoanContextHash);",
+        "emit BalancerLoanSessionStateUpdated(false, bytes32(0));",
+        "emit AavePoolStateUpdated(previousPool, pool);",
+        "emit AavePoolStateUpdated(previousPool, address(0));",
+    ];
+    for needle in required {
+        assert!(
+            src.contains(needle),
+            "missing flashloan state transition event in executor source: {needle}"
+        );
+    }
+}
+
+#[test]
+fn hot_loop_state_caching_markers_are_present() {
+    let src = contract_source();
+    let required = [
+        "uint256 targetsLen = targets.length;",
+        "uint256 tokensLen = tokens.length;",
+        "address cachedProfitReceiver = profitReceiver;",
+        "bool cachedSweepToEth = sweepProfitToEth;",
+        "address balancerVault = BALANCER_VAULT;",
+    ];
+    for needle in required {
+        assert!(
+            src.contains(needle),
+            "missing loop/state caching marker in executor source: {needle}"
         );
     }
 }

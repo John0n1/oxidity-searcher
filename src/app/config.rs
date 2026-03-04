@@ -62,7 +62,8 @@ pub struct GlobalSettings {
     // MEV
     #[serde(default = "default_true")]
     pub flashloan_enabled: bool,
-    /// Comma-separated list; supports "auto" prefix, "balancer", "aavev3"
+    /// Comma-separated list; supports `auto`, `balancer`, `aavev3`, `dydx`,
+    /// `makerdao`, `uniswapv2`, and `uniswapv3`.
     #[serde(default = "default_flashloan_provider")]
     pub flashloan_provider: String,
     pub executor_address: Option<Address>,
@@ -342,7 +343,7 @@ fn default_sim_backend() -> String {
     "debug_tracecall".to_string()
 }
 fn default_flashloan_provider() -> String {
-    "auto,aavev3,balancer".to_string()
+    "auto,aavev3,balancer,dydx,makerdao,uniswapv3,uniswapv2".to_string()
 }
 fn default_mev_share_url() -> String {
     "https://mev-share.flashbots.net".to_string()
@@ -1386,11 +1387,15 @@ impl GlobalSettings {
             match p {
                 "aave" | "aavev3" | "aave_v3" => out.push(AaveV3),
                 "balancer" => out.push(Balancer),
+                "dydx" | "dydx_solo" | "dydxsolo" => out.push(Dydx),
+                "maker" | "makerdao" | "maker_dao" | "mcd" => out.push(MakerDao),
+                "uniswapv2" | "uniswap_v2" | "uni_v2" | "univ2" => out.push(UniswapV2),
+                "uniswapv3" | "uniswap_v3" | "uni_v3" | "univ3" => out.push(UniswapV3),
                 _ => {}
             }
         }
         if out.is_empty() && auto {
-            out = vec![AaveV3, Balancer];
+            out = vec![AaveV3, Balancer, Dydx, MakerDao, UniswapV3, UniswapV2];
         }
         if out.is_empty() {
             out = vec![Balancer];
@@ -2343,11 +2348,16 @@ mod tests {
 
     #[test]
     fn flashloan_providers_auto_uses_supported_provider_set_only() {
-        use crate::services::strategy::strategy::FlashloanProvider::{AaveV3, Balancer};
+        use crate::services::strategy::strategy::FlashloanProvider::{
+            AaveV3, Balancer, Dydx, MakerDao, UniswapV2, UniswapV3,
+        };
 
         let mut settings = base_settings();
         settings.flashloan_provider = "auto,aavev2".to_string();
-        assert_eq!(settings.flashloan_providers(), vec![AaveV3, Balancer]);
+        assert_eq!(
+            settings.flashloan_providers(),
+            vec![AaveV3, Balancer, Dydx, MakerDao, UniswapV3, UniswapV2]
+        );
     }
 
     #[test]

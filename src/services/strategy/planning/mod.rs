@@ -13,7 +13,10 @@ pub use execution_planner::{
 pub use graph::{QuoteEdge, QuoteGraph, QuoteSearchOptions};
 pub use routes::{RouteLeg, RoutePlan, RouteVenue};
 
-use crate::common::constants::default_balancer_vault_for_chain;
+use crate::common::constants::{
+    default_balancer_vault_for_chain, default_dydx_solo_margin, default_maker_flash_lender,
+    default_uniswap_v2_factory, default_uniswap_v3_factory,
+};
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
 use crate::data::executor::{FlashCallbackData, UnifiedHardenedExecutor};
@@ -22,7 +25,8 @@ use crate::services::strategy::decode::{
     ObservedSwap, RouterKind, encode_v3_path, reverse_v3_path, target_token,
 };
 use crate::services::strategy::routers::{
-    AavePool, BalancerProtocolFees, BalancerVaultFees, ERC20, UniV2Router, UniV3Router,
+    AavePool, BalancerProtocolFees, BalancerVaultFees, DydxSoloMarginGetters, ERC20,
+    ERC3156FlashLender, UniV2Router, UniV3Router, UniswapV2Factory, UniswapV3Factory,
     registry_v2_router_addresses, registry_v2_router_candidates,
 };
 use crate::services::strategy::strategy::{FlashloanProvider, StrategyExecutor};
@@ -69,6 +73,10 @@ pub struct ApproveTx {
 
 const BALANCER_FLASHLOAN_OVERHEAD_GAS: u64 = 180_000;
 const AAVE_FLASHLOAN_OVERHEAD_GAS: u64 = 200_000;
+const DYDX_FLASHLOAN_OVERHEAD_GAS: u64 = 240_000;
+const MAKER_FLASHLOAN_OVERHEAD_GAS: u64 = 220_000;
+const UNISWAP_V2_FLASHLOAN_OVERHEAD_GAS: u64 = 240_000;
+const UNISWAP_V3_FLASHLOAN_OVERHEAD_GAS: u64 = 260_000;
 const V2_SWAP_OVERHEAD_GAS: u64 = 160_000;
 const CURVE_SWAP_OVERHEAD_GAS: u64 = 220_000;
 const BALANCER_SWAP_OVERHEAD_GAS: u64 = 200_000;
@@ -762,14 +770,24 @@ impl StrategyExecutor {
         // so we must encode as function-params tuple (no outer dynamic wrapper).
         let params = callback.abi_encode_params();
 
-        let calldata = match provider {
+        let (calldata, overhead, premium) = match provider {
             FlashloanProvider::Balancer => {
                 let exec_call = UnifiedHardenedExecutor::executeFlashLoanCall {
                     assets: vec![asset],
                     amounts: vec![amount],
                     params: Bytes::from(params.clone()),
                 };
-                exec_call.abi_encode()
+                let fee = self
+                    .get_balancer_flashloan_fee()
+                    .await
+                    .unwrap_or(U256::ZERO);
+                let premium =
+                    amount.saturating_mul(fee) / U256::from(1_000_000_000_000_000_000u128);
+                (
+                    exec_call.abi_encode(),
+                    BALANCER_FLASHLOAN_OVERHEAD_GAS,
+                    premium,
+                )
             }
             FlashloanProvider::AaveV3 => {
                 let pool = self
@@ -781,13 +799,90 @@ impl StrategyExecutor {
                     amount,
                     params: Bytes::from(params.clone()),
                 };
-                exec_call.abi_encode()
+                let premium_bps = self.fetch_aave_premium(pool).await?;
+                let premium = amount
+                    .saturating_mul(premium_bps)
+                    .saturating_add(U256::from(9_999u64))
+                    / U256::from(10_000u64);
+                (exec_call.abi_encode(), AAVE_FLASHLOAN_OVERHEAD_GAS, premium)
             }
-        };
-
-        let overhead = match provider {
-            FlashloanProvider::Balancer => BALANCER_FLASHLOAN_OVERHEAD_GAS,
-            FlashloanProvider::AaveV3 => AAVE_FLASHLOAN_OVERHEAD_GAS,
+            FlashloanProvider::Dydx => {
+                let solo = default_dydx_solo_margin(self.chain_id)
+                    .ok_or_else(|| AppError::Strategy("dYdX SoloMargin not configured".into()))?;
+                if !self.dydx_market_exists(solo, asset).await? {
+                    return Err(AppError::Strategy(
+                        "dYdX market missing for requested flashloan asset".into(),
+                    ));
+                }
+                let exec_call = UnifiedHardenedExecutor::executeDydxFlashLoanCall {
+                    soloMargin: solo,
+                    asset,
+                    amount,
+                    params: Bytes::from(params.clone()),
+                };
+                (
+                    exec_call.abi_encode(),
+                    DYDX_FLASHLOAN_OVERHEAD_GAS,
+                    U256::from(2u64),
+                )
+            }
+            FlashloanProvider::MakerDao => {
+                let lender = default_maker_flash_lender(self.chain_id).ok_or_else(|| {
+                    AppError::Strategy("Maker flash lender not configured".into())
+                })?;
+                let exec_call = UnifiedHardenedExecutor::executeMakerFlashLoanCall {
+                    lender,
+                    asset,
+                    amount,
+                    params: Bytes::from(params.clone()),
+                };
+                let premium = self.fetch_maker_flash_fee(lender, asset, amount).await?;
+                (
+                    exec_call.abi_encode(),
+                    MAKER_FLASHLOAN_OVERHEAD_GAS,
+                    premium,
+                )
+            }
+            FlashloanProvider::UniswapV2 => {
+                let pair = self
+                    .select_uniswap_v2_flash_pair(asset, amount)
+                    .await?
+                    .ok_or_else(|| {
+                        AppError::Strategy("No viable Uniswap V2 flash pair found".into())
+                    })?;
+                let exec_call = UnifiedHardenedExecutor::executeUniswapV2FlashLoanCall {
+                    pair,
+                    asset,
+                    amount,
+                    params: Bytes::from(params.clone()),
+                };
+                let premium = Self::uniswap_v2_flash_premium(amount);
+                (
+                    exec_call.abi_encode(),
+                    UNISWAP_V2_FLASHLOAN_OVERHEAD_GAS,
+                    premium,
+                )
+            }
+            FlashloanProvider::UniswapV3 => {
+                let (pool, fee_tier) = self
+                    .select_uniswap_v3_flash_pool(asset, amount)
+                    .await?
+                    .ok_or_else(|| {
+                        AppError::Strategy("No viable Uniswap V3 flash pool found".into())
+                    })?;
+                let exec_call = UnifiedHardenedExecutor::executeUniswapV3FlashLoanCall {
+                    pool,
+                    asset,
+                    amount,
+                    params: Bytes::from(params.clone()),
+                };
+                let premium = Self::uniswap_v3_flash_premium(amount, fee_tier);
+                (
+                    exec_call.abi_encode(),
+                    UNISWAP_V3_FLASHLOAN_OVERHEAD_GAS,
+                    premium,
+                )
+            }
         };
 
         let mut gas_limit = gas_limit_hint.saturating_add(overhead);
@@ -803,40 +898,6 @@ impl StrategyExecutor {
             self.chain_id,
         );
 
-        let premium = match provider {
-            FlashloanProvider::Balancer => {
-                let fee = self
-                    .get_balancer_flashloan_fee()
-                    .await
-                    .unwrap_or(U256::ZERO);
-                amount.saturating_mul(fee) / U256::from(1_000_000_000_000_000_000u128)
-            }
-            FlashloanProvider::AaveV3 => {
-                let premium_bps = if let Some(pool_addr) = self.aave_pool {
-                    match AavePool::new(pool_addr, self.http_provider.clone())
-                        .FLASHLOAN_PREMIUM_TOTAL()
-                        .call()
-                        .await
-                    {
-                        Ok(v) => U256::from(v),
-                        Err(e) => {
-                            return Err(AppError::Strategy(format!(
-                                "Failed to read Aave premium: {}",
-                                e
-                            )));
-                        }
-                    }
-                } else {
-                    return Err(AppError::Strategy("Aave pool missing".into()));
-                };
-                // Be conservative for viability checks: round premium up so tiny loans
-                // don't slip through with under-estimated repayment requirements.
-                let numerator = amount
-                    .saturating_mul(premium_bps)
-                    .saturating_add(U256::from(9_999u64));
-                numerator / U256::from(10_000u64)
-            }
-        };
         let _overhead_cost =
             U256::from(overhead).saturating_mul(U256::from(gas_fees.max_fee_per_gas));
 
@@ -2291,6 +2352,22 @@ impl StrategyExecutor {
                     self.quote_aave_flashloan(asset, amount, gas_fees.max_fee_per_gas)
                         .await?
                 }
+                FlashloanProvider::Dydx => {
+                    self.quote_dydx_flashloan(asset, amount, gas_fees.max_fee_per_gas)
+                        .await?
+                }
+                FlashloanProvider::MakerDao => {
+                    self.quote_maker_flashloan(asset, amount, gas_fees.max_fee_per_gas)
+                        .await?
+                }
+                FlashloanProvider::UniswapV2 => {
+                    self.quote_uniswap_v2_flashloan(asset, amount, gas_fees.max_fee_per_gas)
+                        .await?
+                }
+                FlashloanProvider::UniswapV3 => {
+                    self.quote_uniswap_v3_flashloan(asset, amount, gas_fees.max_fee_per_gas)
+                        .await?
+                }
             };
             let Some((total_cost, _)) = quote else {
                 continue;
@@ -2323,6 +2400,26 @@ impl StrategyExecutor {
                         .saturating_add(U256::from(9_999u64))
                         / U256::from(10_000u64)
                 }
+                FlashloanProvider::Dydx => U256::from(2u64),
+                FlashloanProvider::MakerDao => {
+                    let lender = match default_maker_flash_lender(self.chain_id) {
+                        Some(v) => v,
+                        None => continue,
+                    };
+                    match self.fetch_maker_flash_fee(lender, asset, amount).await {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    }
+                }
+                FlashloanProvider::UniswapV2 => Self::uniswap_v2_flash_premium(amount),
+                FlashloanProvider::UniswapV3 => {
+                    let Some((_pool, fee_tier)) =
+                        self.select_uniswap_v3_flash_pool(asset, amount).await?
+                    else {
+                        continue;
+                    };
+                    Self::uniswap_v3_flash_premium(amount, fee_tier)
+                }
             };
             let gas_cost = total_cost.saturating_sub(premium);
             match best {
@@ -2354,6 +2451,22 @@ impl StrategyExecutor {
                 }
                 FlashloanProvider::AaveV3 => {
                     self.quote_aave_flashloan(asset, amount, gas_fees.max_fee_per_gas)
+                        .await?
+                }
+                FlashloanProvider::Dydx => {
+                    self.quote_dydx_flashloan(asset, amount, gas_fees.max_fee_per_gas)
+                        .await?
+                }
+                FlashloanProvider::MakerDao => {
+                    self.quote_maker_flashloan(asset, amount, gas_fees.max_fee_per_gas)
+                        .await?
+                }
+                FlashloanProvider::UniswapV2 => {
+                    self.quote_uniswap_v2_flashloan(asset, amount, gas_fees.max_fee_per_gas)
+                        .await?
+                }
+                FlashloanProvider::UniswapV3 => {
+                    self.quote_uniswap_v3_flashloan(asset, amount, gas_fees.max_fee_per_gas)
                         .await?
                 }
             };
@@ -2499,6 +2612,307 @@ impl StrategyExecutor {
             premium.saturating_add(gas_cost),
             AAVE_FLASHLOAN_OVERHEAD_GAS,
         )))
+    }
+
+    async fn quote_dydx_flashloan(
+        &self,
+        asset: Address,
+        amount: U256,
+        max_fee_per_gas: u128,
+    ) -> Result<Option<(U256, u64)>, AppError> {
+        let solo = match default_dydx_solo_margin(self.chain_id) {
+            Some(addr) => addr,
+            None => return Ok(None),
+        };
+        if !self.dydx_market_exists(solo, asset).await? {
+            return Ok(None);
+        }
+        let liquidity: U256 = match ERC20::new(asset, self.http_provider.clone())
+            .balanceOf(solo)
+            .call()
+            .await
+        {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::debug!(
+                    target: "flashloan",
+                    provider = "dydx",
+                    solo = %format!("{solo:#x}"),
+                    asset = %format!("{asset:#x}"),
+                    error = %err,
+                    "dYdX liquidity probe failed; treating provider as unavailable"
+                );
+                return Ok(None);
+            }
+        };
+        if liquidity < amount {
+            return Ok(None);
+        }
+        let premium = U256::from(2u64);
+        let gas_cost =
+            U256::from(DYDX_FLASHLOAN_OVERHEAD_GAS).saturating_mul(U256::from(max_fee_per_gas));
+        Ok(Some((
+            premium.saturating_add(gas_cost),
+            DYDX_FLASHLOAN_OVERHEAD_GAS,
+        )))
+    }
+
+    async fn quote_maker_flashloan(
+        &self,
+        asset: Address,
+        amount: U256,
+        max_fee_per_gas: u128,
+    ) -> Result<Option<(U256, u64)>, AppError> {
+        let lender = match default_maker_flash_lender(self.chain_id) {
+            Some(addr) => addr,
+            None => return Ok(None),
+        };
+        let max_loan: U256 = match ERC3156FlashLender::new(lender, self.http_provider.clone())
+            .maxFlashLoan(asset)
+            .call()
+            .await
+        {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::debug!(
+                    target: "flashloan",
+                    provider = "maker",
+                    lender = %format!("{lender:#x}"),
+                    asset = %format!("{asset:#x}"),
+                    error = %err,
+                    "Maker maxFlashLoan probe failed; treating provider as unavailable"
+                );
+                return Ok(None);
+            }
+        };
+        if max_loan < amount {
+            return Ok(None);
+        }
+        let premium = match self.fetch_maker_flash_fee(lender, asset, amount).await {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::debug!(
+                    target: "flashloan",
+                    provider = "maker",
+                    lender = %format!("{lender:#x}"),
+                    asset = %format!("{asset:#x}"),
+                    error = %err,
+                    "Maker flashFee probe failed; treating provider as unavailable"
+                );
+                return Ok(None);
+            }
+        };
+        let gas_cost =
+            U256::from(MAKER_FLASHLOAN_OVERHEAD_GAS).saturating_mul(U256::from(max_fee_per_gas));
+        Ok(Some((
+            premium.saturating_add(gas_cost),
+            MAKER_FLASHLOAN_OVERHEAD_GAS,
+        )))
+    }
+
+    async fn quote_uniswap_v2_flashloan(
+        &self,
+        asset: Address,
+        amount: U256,
+        max_fee_per_gas: u128,
+    ) -> Result<Option<(U256, u64)>, AppError> {
+        let Some(_pair) = self.select_uniswap_v2_flash_pair(asset, amount).await? else {
+            return Ok(None);
+        };
+        let premium = Self::uniswap_v2_flash_premium(amount);
+        let gas_cost = U256::from(UNISWAP_V2_FLASHLOAN_OVERHEAD_GAS)
+            .saturating_mul(U256::from(max_fee_per_gas));
+        Ok(Some((
+            premium.saturating_add(gas_cost),
+            UNISWAP_V2_FLASHLOAN_OVERHEAD_GAS,
+        )))
+    }
+
+    async fn quote_uniswap_v3_flashloan(
+        &self,
+        asset: Address,
+        amount: U256,
+        max_fee_per_gas: u128,
+    ) -> Result<Option<(U256, u64)>, AppError> {
+        let Some((_pool, fee_tier)) = self.select_uniswap_v3_flash_pool(asset, amount).await?
+        else {
+            return Ok(None);
+        };
+        let premium = Self::uniswap_v3_flash_premium(amount, fee_tier);
+        let gas_cost = U256::from(UNISWAP_V3_FLASHLOAN_OVERHEAD_GAS)
+            .saturating_mul(U256::from(max_fee_per_gas));
+        Ok(Some((
+            premium.saturating_add(gas_cost),
+            UNISWAP_V3_FLASHLOAN_OVERHEAD_GAS,
+        )))
+    }
+
+    async fn dydx_market_exists(&self, solo: Address, asset: Address) -> Result<bool, AppError> {
+        let solo_getters = DydxSoloMarginGetters::new(solo, self.http_provider.clone());
+        let market_count = solo_getters
+            .getNumMarkets()
+            .call()
+            .await
+            .map_err(|e| AppError::Strategy(format!("dYdX getNumMarkets failed: {}", e)))?
+            .to::<u64>();
+        for market_id in 0..market_count {
+            let token = solo_getters
+                .getMarketTokenAddress(U256::from(market_id))
+                .call()
+                .await
+                .map_err(|e| {
+                    AppError::Strategy(format!("dYdX getMarketTokenAddress failed: {}", e))
+                })?;
+            if token == asset {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    async fn fetch_maker_flash_fee(
+        &self,
+        lender: Address,
+        asset: Address,
+        amount: U256,
+    ) -> Result<U256, AppError> {
+        ERC3156FlashLender::new(lender, self.http_provider.clone())
+            .flashFee(asset, amount)
+            .call()
+            .await
+            .map_err(|e| AppError::Strategy(format!("Maker flashFee fetch failed: {}", e)))
+    }
+
+    async fn select_uniswap_v2_flash_pair(
+        &self,
+        asset: Address,
+        amount: U256,
+    ) -> Result<Option<Address>, AppError> {
+        let factory = default_uniswap_v2_factory(self.chain_id);
+        let factory_contract =
+            factory.map(|addr| UniswapV2Factory::new(addr, self.http_provider.clone()));
+        let candidates = self.flash_counterpart_candidates(asset, 32);
+        let mut best: Option<(Address, U256)> = None;
+
+        for counterpart in candidates {
+            if let Some((pair, reserve_in)) = self
+                .reserve_cache
+                .best_v2_pair_with_liquidity(asset, counterpart)
+            {
+                if reserve_in >= amount {
+                    match best {
+                        None => best = Some((pair, reserve_in)),
+                        Some((_, prev)) if reserve_in > prev => best = Some((pair, reserve_in)),
+                        _ => {}
+                    }
+                }
+                continue;
+            }
+
+            let Some(factory) = &factory_contract else {
+                continue;
+            };
+            let pair = match factory.getPair(asset, counterpart).call().await {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if pair == Address::ZERO {
+                continue;
+            }
+            let reserve_in = match ERC20::new(asset, self.http_provider.clone())
+                .balanceOf(pair)
+                .call()
+                .await
+            {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if reserve_in < amount {
+                continue;
+            }
+            match best {
+                None => best = Some((pair, reserve_in)),
+                Some((_, prev)) if reserve_in > prev => best = Some((pair, reserve_in)),
+                _ => {}
+            }
+        }
+        Ok(best.map(|(pair, _)| pair))
+    }
+
+    async fn select_uniswap_v3_flash_pool(
+        &self,
+        asset: Address,
+        amount: U256,
+    ) -> Result<Option<(Address, u32)>, AppError> {
+        let factory = match default_uniswap_v3_factory(self.chain_id) {
+            Some(addr) => addr,
+            None => return Ok(None),
+        };
+        let factory = UniswapV3Factory::new(factory, self.http_provider.clone());
+        let fee_tiers = [100u32, 500u32, 3_000u32, 10_000u32];
+        let candidates = self.flash_counterpart_candidates(asset, 32);
+        let mut best: Option<(Address, u32, U256)> = None;
+
+        for counterpart in candidates {
+            for fee_tier in fee_tiers {
+                let fee_arg = alloy::primitives::Uint::<24, 1>::from(fee_tier as u64);
+                let pool = match factory.getPool(asset, counterpart, fee_arg).call().await {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if pool == Address::ZERO {
+                    continue;
+                }
+                let reserve_in = match ERC20::new(asset, self.http_provider.clone())
+                    .balanceOf(pool)
+                    .call()
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if reserve_in < amount {
+                    continue;
+                }
+                match best {
+                    None => best = Some((pool, fee_tier, reserve_in)),
+                    Some((_, _, prev)) if reserve_in > prev => {
+                        best = Some((pool, fee_tier, reserve_in))
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(best.map(|(pool, fee, _)| (pool, fee)))
+    }
+
+    fn flash_counterpart_candidates(&self, asset: Address, limit: usize) -> Vec<Address> {
+        let mut out = Vec::new();
+        if self.wrapped_native != Address::ZERO && self.wrapped_native != asset {
+            out.push(self.wrapped_native);
+        }
+        for token in self.reserve_cache.top_v2_tokens_by_connectivity(limit) {
+            if token == asset || out.contains(&token) {
+                continue;
+            }
+            out.push(token);
+        }
+        out
+    }
+
+    fn uniswap_v2_flash_premium(amount: U256) -> U256 {
+        let amount_owing = amount
+            .saturating_mul(U256::from(1_000u64))
+            .saturating_add(U256::from(996u64))
+            / U256::from(997u64);
+        amount_owing.saturating_sub(amount)
+    }
+
+    fn uniswap_v3_flash_premium(amount: U256, fee_tier: u32) -> U256 {
+        amount
+            .saturating_mul(U256::from(fee_tier))
+            .saturating_add(U256::from(999_999u64))
+            / U256::from(1_000_000u64)
     }
 
     async fn aave_reserve_atoken(&self, pool: Address, asset: Address) -> Option<Address> {

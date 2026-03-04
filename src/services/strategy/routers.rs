@@ -620,6 +620,38 @@ sol! {
 
         function getReserveData(address asset) external view returns (AaveReserveData memory);
     }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
+    contract UniswapV2Factory {
+        function getPair(address tokenA, address tokenB) external view returns (address);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
+    contract UniswapV3Factory {
+        function getPool(address tokenA, address tokenB, uint24 fee) external view returns (address);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
+    contract UniswapV3PoolState {
+        function fee() external view returns (uint24);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
+    contract ERC3156FlashLender {
+        function maxFlashLoan(address token) external view returns (uint256);
+        function flashFee(address token, uint256 amount) external view returns (uint256);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
+    contract DydxSoloMarginGetters {
+        function getNumMarkets() external view returns (uint256);
+        function getMarketTokenAddress(uint256 marketId) external view returns (address);
+    }
 }
 
 fn v2_router_priority(name: &str) -> Option<u8> {

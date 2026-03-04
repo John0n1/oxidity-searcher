@@ -828,6 +828,34 @@ impl ReserveCache {
         best.map(|(res, _)| res)
     }
 
+    /// Returns the strongest known V2 pair for a token pair, ranked by inbound reserve depth.
+    pub fn best_v2_pair_with_liquidity(
+        &self,
+        from: Address,
+        to: Address,
+    ) -> Option<(Address, U256)> {
+        let key = Self::token_pair_key(from, to);
+        let mut best: Option<(Address, U256)> = None;
+        for pair in self.v2_pairs_for_tokens(key) {
+            let Some(res) = self.v2_reserves.get(&pair).map(|r| r.clone()) else {
+                continue;
+            };
+            let reserve_in = if from == res.token0 {
+                res.reserve0
+            } else if from == res.token1 {
+                res.reserve1
+            } else {
+                continue;
+            };
+            match best {
+                None => best = Some((pair, reserve_in)),
+                Some((_, prev)) if reserve_in > prev => best = Some((pair, reserve_in)),
+                _ => {}
+            }
+        }
+        best
+    }
+
     async fn handle_v2_log(&self, log: Log) -> Result<(), AppError> {
         let Some(topic0) = log.topic0() else {
             return Ok(());
