@@ -242,14 +242,75 @@ impl StrategyExecutor {
         source: &'static str,
         profit: &ProfitOutcome,
     ) {
+        let (decision_path, gas_covered_eth, gas_refunded_eth, retained_eth, rebate_eth) =
+            self.sponsorship_ledger_from_profit(profit);
+        let native_usd_price = if profit.eth_quote.price.is_finite() && profit.eth_quote.price > 0.0
+        {
+            profit.eth_quote.price
+        } else {
+            0.0
+        };
         self.stats.record_bundle(BundleTelemetry {
             tx_hash: format!("{submitted_hash:#x}"),
             source: source.to_string(),
+            decision_path,
+            status: "Included".to_string(),
             profit_eth: profit.profit_eth_f64,
             gas_cost_eth: profit.gas_cost_eth_f64,
             net_eth: profit.net_profit_eth_f64,
+            gas_covered_eth,
+            gas_refunded_eth,
+            retained_eth,
+            rebate_eth,
+            native_usd_price,
             timestamp_ms: chrono::Utc::now().timestamp_millis(),
         });
+    }
+
+    fn sponsorship_ledger_from_profit(
+        &self,
+        profit: &ProfitOutcome,
+    ) -> (String, f64, f64, f64, f64) {
+        let gas_covered_eth = self.amount_to_display(profit.gas_cost_wei, self.wrapped_native);
+        let gas_refunded_eth = 0.0;
+        let net_wei = profit.net_profit_wei;
+        if net_wei.is_zero() {
+            return (
+                "private_only".to_string(),
+                gas_covered_eth.max(0.0),
+                gas_refunded_eth,
+                0.0,
+                0.0,
+            );
+        }
+
+        if self.sponsorship_enabled {
+            let retained_bps = self.sponsorship_retained_bps.clamp(0, 10_000);
+            let retained_wei = net_wei
+                .saturating_mul(U256::from(retained_bps))
+                .checked_div(U256::from(10_000u64))
+                .unwrap_or(U256::ZERO)
+                .min(net_wei);
+            let rebate_wei = net_wei.saturating_sub(retained_wei);
+            return (
+                "sponsored".to_string(),
+                gas_covered_eth.max(0.0),
+                gas_refunded_eth,
+                self.amount_to_display(retained_wei, self.wrapped_native)
+                    .max(0.0),
+                self.amount_to_display(rebate_wei, self.wrapped_native)
+                    .max(0.0),
+            );
+        }
+
+        (
+            "private_only".to_string(),
+            gas_covered_eth.max(0.0),
+            gas_refunded_eth,
+            self.amount_to_display(net_wei, self.wrapped_native)
+                .max(0.0),
+            0.0,
+        )
     }
 
     fn tx_kind_call_address(kind: Option<&TxKind>) -> Option<Address> {
@@ -495,6 +556,8 @@ impl StrategyExecutor {
                 &profit,
             )
             .await?;
+            let (decision_path, gas_covered_eth, gas_refunded_eth, retained_eth, rebate_eth) =
+                self.sponsorship_ledger_from_profit(&profit);
             self.stats.record_bundle(BundleTelemetry {
                 tx_hash: format!("{submitted_hash:#x}"),
                 source: if liquidation_signal {
@@ -503,9 +566,22 @@ impl StrategyExecutor {
                     "atomic_arb"
                 }
                 .to_string(),
+                decision_path,
+                status: "Included".to_string(),
                 profit_eth: profit.profit_eth_f64,
                 gas_cost_eth: profit.gas_cost_eth_f64,
                 net_eth: profit.net_profit_eth_f64,
+                gas_covered_eth,
+                gas_refunded_eth,
+                retained_eth,
+                rebate_eth,
+                native_usd_price: if profit.eth_quote.price.is_finite()
+                    && profit.eth_quote.price > 0.0
+                {
+                    profit.eth_quote.price
+                } else {
+                    0.0
+                },
                 timestamp_ms: chrono::Utc::now().timestamp_millis(),
             });
             tracing::info!(

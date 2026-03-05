@@ -3,3 +3,4 @@
 
 pub mod block_listener;
 pub mod mempool;
+pub mod public_rpc;

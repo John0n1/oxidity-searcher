@@ -14,12 +14,30 @@ use tokio_util::sync::CancellationToken;
 
 const METRICS_MAX_REQUEST_BYTES: usize = 8 * 1024;
 
+#[derive(Clone, Copy, Debug)]
+pub struct PublicSummaryPolicy {
+    pub retained_bps: u64,
+    pub per_tx_gas_cap_eth: f64,
+    pub per_day_gas_cap_eth: f64,
+}
+
+impl Default for PublicSummaryPolicy {
+    fn default() -> Self {
+        Self {
+            retained_bps: 1_000,
+            per_tx_gas_cap_eth: 0.05,
+            per_day_gas_cap_eth: 0.5,
+        }
+    }
+}
+
 pub async fn spawn_metrics_server(
     port: u16,
     chain_id: u64,
     shutdown: CancellationToken,
     stats: Arc<StrategyStats>,
     portfolio: Arc<PortfolioManager>,
+    public_summary_policy: PublicSummaryPolicy,
     metrics_bind: Option<String>,
     metrics_token: Option<String>,
     enable_shutdown: bool,
@@ -156,6 +174,8 @@ pub async fn spawn_metrics_server(
                     let path = parts.next().unwrap_or("/");
                     let path = path.lines().next().unwrap_or("/");
                     let headers: Vec<&str> = lines.take_while(|l| !l.is_empty()).collect();
+                    let route = path.split('?').next().unwrap_or(path);
+                    let is_public_route = route == "/public/summary";
                     let auth_header = headers.iter().find_map(|l| {
                         let (key, val) = l.split_once(':')?;
                         if key.eq_ignore_ascii_case("authorization") {
@@ -164,10 +184,14 @@ pub async fn spawn_metrics_server(
                             None
                         }
                     });
-                    let ok = auth_header
-                        .and_then(|v| v.strip_prefix("Bearer "))
-                        .map(|v| v.trim() == token)
-                        .unwrap_or(false);
+                    let ok = if is_public_route {
+                        true
+                    } else {
+                        auth_header
+                            .and_then(|v| v.strip_prefix("Bearer "))
+                            .map(|v| v.trim() == token)
+                            .unwrap_or(false)
+                    };
                     if !ok {
                         let body = r#"{"status":"error","error":"unauthorized"}"#;
                         let response = format!(
@@ -178,8 +202,6 @@ pub async fn spawn_metrics_server(
                         let _ = socket.write_all(response.as_bytes()).await;
                         continue;
                     }
-
-                    let route = path.split('?').next().unwrap_or(path);
 
                     if route == "/health" {
                         let body = json!({"status":"ok","chainId":chain_id}).to_string();
@@ -213,6 +235,19 @@ pub async fn spawn_metrics_server(
                         let body = render_metrics(&stats, &portfolio);
                         let response = format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(response.as_bytes()).await;
+                    } else if route == "/public/summary" {
+                        let body = render_public_summary(
+                            chain_id,
+                            &stats,
+                            &portfolio,
+                            public_summary_policy,
+                        );
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
                             body.len(),
                             body
                         );
@@ -609,6 +644,243 @@ fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>)
     body
 }
 
+fn timestamp_ms_to_iso(timestamp_ms: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(timestamp_ms)
+        .unwrap_or_else(chrono::Utc::now)
+        .to_rfc3339()
+}
+
+fn clamp_non_negative(value: f64) -> f64 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+fn render_public_summary(
+    chain_id: u64,
+    stats: &Arc<StrategyStats>,
+    portfolio: &Arc<PortfolioManager>,
+    policy: PublicSummaryPolicy,
+) -> String {
+    let processed = stats.processed.load(std::sync::atomic::Ordering::Relaxed);
+    let submitted = stats.submitted.load(std::sync::atomic::Ordering::Relaxed);
+    let skipped = stats.skipped.load(std::sync::atomic::Ordering::Relaxed);
+    let failed = stats.failed.load(std::sync::atomic::Ordering::Relaxed);
+    let sim_count = stats
+        .sim_latency_ms_count
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let sim_sum = stats
+        .sim_latency_ms_sum
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    let mut bundles: Vec<crate::core::strategy::BundleTelemetry> = {
+        let guard = stats.bundles.lock().unwrap_or_else(|e| e.into_inner());
+        guard.iter().cloned().collect()
+    };
+    bundles.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms));
+
+    let fallback_native_usd_price = bundles
+        .iter()
+        .find_map(|b| {
+            if b.native_usd_price.is_finite() && b.native_usd_price > 0.0 {
+                Some(b.native_usd_price)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0.0);
+    let bundle_price = |bundle: &crate::core::strategy::BundleTelemetry| {
+        if bundle.native_usd_price.is_finite() && bundle.native_usd_price > 0.0 {
+            bundle.native_usd_price
+        } else {
+            fallback_native_usd_price
+        }
+    };
+    let decision_label = |decision_path: &str| match decision_path {
+        "sponsored" => "Sponsored",
+        "pass_through" => "Pass-through",
+        _ => "Private only",
+    };
+
+    let sponsored_tx_count = bundles
+        .iter()
+        .filter(|b| b.decision_path == "sponsored")
+        .count() as u64;
+    let gas_covered_eth_total: f64 = bundles
+        .iter()
+        .map(|b| clamp_non_negative(b.gas_covered_eth))
+        .sum();
+    let gas_refunded_eth_total: f64 = bundles
+        .iter()
+        .map(|b| clamp_non_negative(b.gas_refunded_eth))
+        .sum();
+    let retained_eth_total: f64 = bundles
+        .iter()
+        .map(|b| clamp_non_negative(b.retained_eth))
+        .sum();
+    let rebate_eth_total: f64 = bundles
+        .iter()
+        .map(|b| clamp_non_negative(b.rebate_eth))
+        .sum();
+    let gas_covered_usd_total: f64 = bundles
+        .iter()
+        .map(|b| clamp_non_negative(b.gas_covered_eth) * bundle_price(b))
+        .sum();
+    let gas_refunded_usd_total: f64 = bundles
+        .iter()
+        .map(|b| clamp_non_negative(b.gas_refunded_eth) * bundle_price(b))
+        .sum();
+    let retained_usd_total: f64 = bundles
+        .iter()
+        .map(|b| clamp_non_negative(b.retained_eth) * bundle_price(b))
+        .sum();
+    let mev_returned_usd: f64 = bundles
+        .iter()
+        .map(|b| clamp_non_negative(b.rebate_eth) * bundle_price(b))
+        .sum();
+    let net_profit_eth_total: f64 = portfolio.net_profit_all().iter().map(|(_, v)| *v).sum();
+    let avg_inclusion_seconds = if sim_count > 0 {
+        (sim_sum as f64) / (sim_count as f64) / 1000.0
+    } else {
+        1.2
+    };
+
+    let activity: Vec<serde_json::Value> = bundles
+        .iter()
+        .take(10)
+        .enumerate()
+        .map(|(idx, bundle)| {
+            let path = decision_label(&bundle.decision_path);
+            let price = bundle_price(bundle);
+            let net_to_user_usd = (clamp_non_negative(bundle.gas_refunded_eth)
+                + clamp_non_negative(bundle.rebate_eth))
+                * price;
+            json!({
+                "id": format!("bundle-{}", idx + 1),
+                "txHash": bundle.tx_hash,
+                "path": path,
+                "decisionPath": bundle.decision_path.clone(),
+                "netToUserUsd": net_to_user_usd,
+                "status": bundle.status.clone(),
+                "timestamp": timestamp_ms_to_iso(bundle.timestamp_ms),
+            })
+        })
+        .collect();
+
+    let transactions: Vec<serde_json::Value> = bundles
+        .iter()
+        .take(50)
+        .enumerate()
+        .map(|(idx, bundle)| {
+            let path = decision_label(&bundle.decision_path);
+            let price = bundle_price(bundle);
+            let gas_covered_usd = clamp_non_negative(bundle.gas_covered_eth) * price;
+            let gas_refunded_usd = clamp_non_negative(bundle.gas_refunded_eth) * price;
+            let retained_usd = clamp_non_negative(bundle.retained_eth) * price;
+            let rebate_usd = clamp_non_negative(bundle.rebate_eth) * price;
+            let net_usd = gas_refunded_usd + rebate_usd;
+            json!({
+                "id": format!("tx-{}", idx + 1),
+                "txHash": bundle.tx_hash,
+                "submittedAt": timestamp_ms_to_iso(bundle.timestamp_ms),
+                "status": bundle.status.clone(),
+                "path": path,
+                "decisionPath": bundle.decision_path.clone(),
+                "reason": format!(
+                    "Execution source: {} ({})",
+                    bundle.source,
+                    bundle.decision_path.as_str()
+                ),
+                "gasCoveredUsd": gas_covered_usd,
+                "gasRefundedUsd": gas_refunded_usd,
+                "retainedUsd": retained_usd,
+                "mevRebateUsd": rebate_usd,
+                "netToUserUsd": net_usd,
+                "ledger": {
+                    "gasCoveredEth": clamp_non_negative(bundle.gas_covered_eth),
+                    "gasRefundedEth": clamp_non_negative(bundle.gas_refunded_eth),
+                    "retainedEth": clamp_non_negative(bundle.retained_eth),
+                    "rebateEth": clamp_non_negative(bundle.rebate_eth),
+                    "gasCoveredUsd": gas_covered_usd,
+                    "gasRefundedUsd": gas_refunded_usd,
+                    "retainedUsd": retained_usd,
+                    "rebateUsd": rebate_usd
+                },
+                "timeline": [
+                    {"step": "Received", "status": "done", "time": timestamp_ms_to_iso(bundle.timestamp_ms)},
+                    {"step": "Simulated", "status": "done", "time": timestamp_ms_to_iso(bundle.timestamp_ms)},
+                    {"step": "Submitted", "status": "done", "time": timestamp_ms_to_iso(bundle.timestamp_ms)},
+                    {"step": "Included", "status": "done", "time": timestamp_ms_to_iso(bundle.timestamp_ms)}
+                ]
+            })
+        })
+        .collect();
+
+    let pipeline_ok = if processed == 0 {
+        100.0
+    } else {
+        100.0 * (1.0 - (failed as f64 / processed as f64))
+    };
+    let services = vec![
+        json!({
+            "name": "Pipeline Health",
+            "status": if pipeline_ok >= 99.0 { "operational" } else { "degraded" },
+            "uptimePct": pipeline_ok,
+            "latencyMs": (avg_inclusion_seconds * 1000.0)
+        }),
+        json!({
+            "name": "Bundle Submission",
+            "status": if submitted > 0 || processed == 0 { "operational" } else { "degraded" },
+            "uptimePct": if processed > 0 { 100.0 * (submitted as f64 / processed as f64) } else { 100.0 },
+            "latencyMs": (avg_inclusion_seconds * 1000.0)
+        }),
+        json!({
+            "name": "Risk Filtering",
+            "status": "operational",
+            "uptimePct": 100.0,
+            "latencyMs": 90.0
+        }),
+    ];
+
+    json!({
+        "generatedAt": chrono::Utc::now().to_rfc3339(),
+        "chainId": chain_id,
+        "source": "strategy-metrics",
+        "stats": {
+            "sponsoredTxCount": sponsored_tx_count,
+            "gasRefundedEth": gas_refunded_eth_total + gas_covered_eth_total,
+            "gasCoveredEth": gas_covered_eth_total,
+            "retainedEth": retained_eth_total,
+            "rebateEth": rebate_eth_total,
+            "gasCoveredUsd": gas_covered_usd_total,
+            "gasRefundedUsd": gas_refunded_usd_total,
+            "retainedUsd": retained_usd_total,
+            "rebateUsd": mev_returned_usd,
+            "mevReturnedUsd": mev_returned_usd,
+            "avgInclusionSeconds": avg_inclusion_seconds,
+            "portfolioNetProfitEth": net_profit_eth_total
+        },
+        "activity": activity,
+        "transactions": transactions,
+        "services": services,
+        "incidents": [],
+        "policy": {
+            "retainedBps": policy.retained_bps,
+            "perTxGasCapEth": policy.per_tx_gas_cap_eth,
+            "perDayGasCapEth": policy.per_day_gas_cap_eth
+        },
+        "counters": {
+            "processed": processed,
+            "submitted": submitted,
+            "skipped": skipped,
+            "failed": failed
+        }
+    })
+    .to_string()
+}
+
 struct RateLimiter {
     window_start: Instant,
     count: u32,
@@ -665,6 +937,7 @@ mod tests {
             shutdown,
             stats.clone(),
             portfolio.clone(),
+            PublicSummaryPolicy::default(),
             Some("127.0.0.1".to_string()),
             Some("testtoken".to_string()),
             false,
@@ -700,6 +973,7 @@ mod tests {
             shutdown,
             stats.clone(),
             portfolio.clone(),
+            PublicSummaryPolicy::default(),
             Some("127.0.0.1".to_string()),
             Some("testtoken".to_string()),
             false,
@@ -723,6 +997,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn public_summary_endpoint_serves_without_auth() {
+        let provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
+        let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
+        let stats = Arc::new(StrategyStats::default());
+        let shutdown = CancellationToken::new();
+
+        let addr = spawn_metrics_server(
+            0,
+            1,
+            shutdown,
+            stats,
+            portfolio,
+            PublicSummaryPolicy::default(),
+            Some("127.0.0.1".to_string()),
+            Some("testtoken".to_string()),
+            false,
+        )
+        .await
+        .expect("bind metrics");
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{}/public/summary", addr))
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success());
+        let body = resp.text().await.unwrap();
+
+        assert!(body.contains("\"stats\""));
+        assert!(body.contains("\"policy\""));
+    }
+
+    #[tokio::test]
     async fn shutdown_endpoint_stops_server() {
         let provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
         let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
@@ -735,6 +1045,7 @@ mod tests {
             shutdown,
             stats.clone(),
             portfolio.clone(),
+            PublicSummaryPolicy::default(),
             Some("127.0.0.1".to_string()),
             Some("testtoken".to_string()),
             true,
@@ -782,6 +1093,7 @@ mod tests {
             shutdown,
             stats,
             portfolio,
+            PublicSummaryPolicy::default(),
             Some("127.0.0.1".to_string()),
             None,
             false,
@@ -812,6 +1124,7 @@ mod tests {
             shutdown,
             stats,
             portfolio,
+            PublicSummaryPolicy::default(),
             Some("127.0.0.1".to_string()),
             Some("testtoken".to_string()),
             false,

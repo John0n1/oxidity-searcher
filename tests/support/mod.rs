@@ -146,6 +146,8 @@ pub async fn build_strategy_executor(
         executor_bribe_bps: 0,
         executor_bribe_recipient: None,
         flashloan_enabled: options.flashloan_enabled,
+        sponsorship_enabled: true,
+        sponsorship_retained_bps: 1_000,
         flashloan_providers: options.flashloan_providers,
         aave_pool: options.aave_pool,
         reserve_cache,

@@ -33,6 +33,7 @@ Mainnet-first MEV search and execution engine in Rust, designed to run against a
 - [Database and Migrations](#database-and-migrations)
 - [Testing and Quality](#testing-and-quality)
 - [Metrics Endpoint](#metrics-endpoint)
+- [Public RPC Ingress API](#public-rpc-ingress-api)
 - [Security and Safety Guards](#security-and-safety-guards)
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
@@ -525,6 +526,32 @@ Metrics server starts only when `METRICS_TOKEN` is non-empty.
   - `/` Prometheus text metrics
   - `/health` JSON liveness
   - `/shutdown` graceful cancellation trigger
+
+## Public RPC Ingress API
+
+When `PUBLIC_RPC_INGRESS_ENABLED=true`, the runtime exposes a dedicated JSON-RPC ingress endpoint.
+
+- bind host: `PUBLIC_RPC_INGRESS_BIND` (default `127.0.0.1`)
+- port: `PUBLIC_RPC_INGRESS_PORT` (default `9545`)
+- health route: `GET /health`
+
+Supported JSON-RPC methods:
+
+- `eth_sendRawTransaction`: accepts one signed raw tx hex at `params[0]`, submits through private bundle sender flow, returns tx hash.
+- `eth_chainId`: returns chain id as hex string.
+- `net_version`: returns chain id as decimal string.
+- `web3_clientVersion`: returns gateway identifier string.
+- all other methods return `-32601`.
+
+Explicitly blocked on public ingress (returns `-32601` with `method disabled on public gateway`):
+
+- namespaces: `admin_*`, `debug_*`, `txpool_*`, `trace_*`, `personal_*`, `engine_*`, `miner_*`, `parity_*`, `rpc_*`, `ots_*`, `wallet_*`
+- signing/account write methods: `eth_sendTransaction`, `eth_sign`, `eth_signTypedData*`, `eth_accounts`, `eth_requestAccounts`
+
+Ingress telemetry mapping:
+
+- Accepted ingress submissions are appended to `StrategyStats.bundles` with `source=public_rpc`.
+- Decision path is recorded (`pass_through`) and emitted in `/public/summary` transaction/activity streams.
 
 ## Security and Safety Guards
 

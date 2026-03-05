@@ -441,6 +441,13 @@ async fn main() -> Result<(), AppError> {
             metrics_bind: settings.metrics_bind_value(),
             metrics_token: settings.metrics_token_value(),
             metrics_enable_shutdown: settings.metrics_enable_shutdown_value(),
+            public_rpc_ingress_enabled: settings.public_rpc_ingress_enabled_value(),
+            public_rpc_ingress_port: settings.public_rpc_ingress_port_value(),
+            public_rpc_ingress_bind: settings.public_rpc_ingress_bind_value(),
+            sponsorship_enabled: settings.sponsorship_enabled_value(),
+            sponsorship_retained_bps: settings.sponsorship_retained_bps_value(),
+            sponsorship_per_tx_gas_cap_eth: settings.sponsorship_per_tx_gas_cap_eth_value(),
+            sponsorship_per_day_gas_cap_eth: settings.sponsorship_per_day_gas_cap_eth_value(),
             strategy_enabled,
             slippage_bps,
             profit_guard_base_floor_multiplier_bps: settings
