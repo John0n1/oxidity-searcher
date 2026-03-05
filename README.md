@@ -526,6 +526,8 @@ Metrics server starts only when `METRICS_TOKEN` is non-empty.
   - `/` Prometheus text metrics
   - `/health` JSON liveness
   - `/shutdown` graceful cancellation trigger
+  - `/public/summary` public dashboard/status summary (no auth)
+  - `/partner/summary` partner dashboard summary (requires `Authorization: Bearer <METRICS_TOKEN>`)
 
 ## Public RPC Ingress API
 

@@ -1,0 +1,583 @@
+openapi: 3.0.3
+info:
+  title: Mitander Public RPC and Summary API
+  version: "1.0.0"
+  description: >
+    Schema for Cloudflare API Shield request validation across the public RPC gateway
+    and dashboard summary API endpoints.
+
+servers:
+  - url: https://rpc.mitander.dev
+  - url: https://mitander.dev
+
+paths:
+  /:
+    post:
+      summary: Public JSON-RPC ingress
+      operationId: publicRpcPost
+      servers:
+        - url: https://rpc.mitander.dev
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - $ref: "#/components/schemas/EthSendRawTransactionRequest"
+                - $ref: "#/components/schemas/EthChainIdRequest"
+                - $ref: "#/components/schemas/NetVersionRequest"
+                - $ref: "#/components/schemas/Web3ClientVersionRequest"
+      responses:
+        "200":
+          description: JSON-RPC success or error payload
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/JsonRpcSuccess"
+                  - $ref: "#/components/schemas/JsonRpcError"
+        "400":
+          description: Malformed request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorStatus"
+        "404":
+          description: Route not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorStatus"
+        "413":
+          description: Payload too large
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorStatus"
+
+  /health:
+    get:
+      summary: RPC ingress health
+      operationId: publicRpcHealth
+      servers:
+        - url: https://rpc.mitander.dev
+      responses:
+        "200":
+          description: Health status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /api/public/summary:
+    get:
+      summary: Public dashboard summary
+      operationId: publicSummary
+      servers:
+        - url: https://mitander.dev
+      responses:
+        "200":
+          description: Public execution summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicSummary"
+
+  /api/partner/summary:
+    get:
+      summary: Partner dashboard summary
+      operationId: partnerSummary
+      servers:
+        - url: https://mitander.dev
+      security:
+        - partnerBearer: []
+      responses:
+        "200":
+          description: Partner execution summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicSummary"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorStatus"
+
+components:
+  securitySchemes:
+    partnerBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+
+  schemas:
+    JsonRpcId:
+      nullable: true
+      oneOf:
+        - type: string
+        - type: integer
+        - type: number
+
+    HexEncodedBytes:
+      type: string
+      pattern: "^(0x)?[0-9a-fA-F]+$"
+
+    RpcParamsEmpty:
+      type: array
+      items: {}
+      maxItems: 0
+
+    EthSendRawTransactionRequest:
+      type: object
+      required:
+        - jsonrpc
+        - method
+        - params
+      properties:
+        jsonrpc:
+          type: string
+          enum: ["2.0"]
+        id:
+          $ref: "#/components/schemas/JsonRpcId"
+        method:
+          type: string
+          enum: ["eth_sendRawTransaction"]
+        params:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            $ref: "#/components/schemas/HexEncodedBytes"
+      additionalProperties: false
+
+    EthChainIdRequest:
+      type: object
+      required:
+        - jsonrpc
+        - method
+      properties:
+        jsonrpc:
+          type: string
+          enum: ["2.0"]
+        id:
+          $ref: "#/components/schemas/JsonRpcId"
+        method:
+          type: string
+          enum: ["eth_chainId"]
+        params:
+          $ref: "#/components/schemas/RpcParamsEmpty"
+      additionalProperties: false
+
+    NetVersionRequest:
+      type: object
+      required:
+        - jsonrpc
+        - method
+      properties:
+        jsonrpc:
+          type: string
+          enum: ["2.0"]
+        id:
+          $ref: "#/components/schemas/JsonRpcId"
+        method:
+          type: string
+          enum: ["net_version"]
+        params:
+          $ref: "#/components/schemas/RpcParamsEmpty"
+      additionalProperties: false
+
+    Web3ClientVersionRequest:
+      type: object
+      required:
+        - jsonrpc
+        - method
+      properties:
+        jsonrpc:
+          type: string
+          enum: ["2.0"]
+        id:
+          $ref: "#/components/schemas/JsonRpcId"
+        method:
+          type: string
+          enum: ["web3_clientVersion"]
+        params:
+          $ref: "#/components/schemas/RpcParamsEmpty"
+      additionalProperties: false
+
+    JsonRpcSuccess:
+      type: object
+      required:
+        - jsonrpc
+        - id
+        - result
+      properties:
+        jsonrpc:
+          type: string
+          enum: ["2.0"]
+        id:
+          $ref: "#/components/schemas/JsonRpcId"
+        result:
+          nullable: true
+          oneOf:
+            - type: string
+            - type: integer
+            - type: number
+            - type: object
+            - type: array
+              items: {}
+      additionalProperties: false
+
+    JsonRpcError:
+      type: object
+      required:
+        - jsonrpc
+        - id
+        - error
+      properties:
+        jsonrpc:
+          type: string
+          enum: ["2.0"]
+        id:
+          $ref: "#/components/schemas/JsonRpcId"
+        error:
+          type: object
+          required:
+            - code
+            - message
+          properties:
+            code:
+              type: integer
+              enum: [-32700, -32601, -32602, -32000]
+            message:
+              type: string
+          additionalProperties: true
+      additionalProperties: false
+
+    ErrorStatus:
+      type: object
+      required:
+        - status
+        - error
+      properties:
+        status:
+          type: string
+          enum: ["error"]
+        error:
+          type: string
+      additionalProperties: false
+
+    HealthResponse:
+      type: object
+      required:
+        - status
+        - chainId
+      properties:
+        status:
+          type: string
+          enum: ["ok"]
+        chainId:
+          type: integer
+          minimum: 1
+      additionalProperties: false
+
+    PublicSummary:
+      type: object
+      required:
+        - generatedAt
+        - chainId
+        - source
+        - stats
+        - activity
+        - transactions
+        - services
+        - incidents
+        - policy
+        - counters
+      properties:
+        generatedAt:
+          type: string
+          format: date-time
+        chainId:
+          type: integer
+          minimum: 1
+        source:
+          type: string
+        stats:
+          $ref: "#/components/schemas/PublicStats"
+        activity:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActivityItem"
+        transactions:
+          type: array
+          items:
+            $ref: "#/components/schemas/DashboardTransaction"
+        services:
+          type: array
+          items:
+            $ref: "#/components/schemas/ServiceStatus"
+        incidents:
+          type: array
+          items:
+            $ref: "#/components/schemas/Incident"
+        policy:
+          $ref: "#/components/schemas/PolicyConfig"
+        counters:
+          $ref: "#/components/schemas/SummaryCounters"
+      additionalProperties: true
+
+    PublicStats:
+      type: object
+      required:
+        - sponsoredTxCount
+        - gasRefundedEth
+        - gasCoveredEth
+        - retainedEth
+        - rebateEth
+        - gasCoveredUsd
+        - gasRefundedUsd
+        - retainedUsd
+        - rebateUsd
+        - mevReturnedUsd
+        - avgInclusionSeconds
+        - portfolioNetProfitEth
+      properties:
+        sponsoredTxCount:
+          type: integer
+          minimum: 0
+        gasRefundedEth:
+          type: number
+        gasCoveredEth:
+          type: number
+        retainedEth:
+          type: number
+        rebateEth:
+          type: number
+        gasCoveredUsd:
+          type: number
+        gasRefundedUsd:
+          type: number
+        retainedUsd:
+          type: number
+        rebateUsd:
+          type: number
+        mevReturnedUsd:
+          type: number
+        avgInclusionSeconds:
+          type: number
+          minimum: 0
+        portfolioNetProfitEth:
+          type: number
+      additionalProperties: true
+
+    ActivityItem:
+      type: object
+      required:
+        - id
+        - txHash
+        - path
+        - decisionPath
+        - netToUserUsd
+        - status
+        - timestamp
+      properties:
+        id:
+          type: string
+        txHash:
+          type: string
+          pattern: "^0x[0-9a-fA-F]{64}$"
+        path:
+          type: string
+          enum: ["Sponsored", "Private only", "Pass-through"]
+        decisionPath:
+          type: string
+        netToUserUsd:
+          type: number
+        status:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    DashboardTransaction:
+      type: object
+      required:
+        - id
+        - txHash
+        - submittedAt
+        - status
+        - path
+        - decisionPath
+        - reason
+        - gasCoveredUsd
+        - gasRefundedUsd
+        - retainedUsd
+        - mevRebateUsd
+        - netToUserUsd
+        - ledger
+        - timeline
+      properties:
+        id:
+          type: string
+        txHash:
+          type: string
+          pattern: "^0x[0-9a-fA-F]{64}$"
+        submittedAt:
+          type: string
+          format: date-time
+        status:
+          type: string
+        path:
+          type: string
+          enum: ["Sponsored", "Private only", "Pass-through"]
+        decisionPath:
+          type: string
+        reason:
+          type: string
+        gasCoveredUsd:
+          type: number
+        gasRefundedUsd:
+          type: number
+        retainedUsd:
+          type: number
+        mevRebateUsd:
+          type: number
+        netToUserUsd:
+          type: number
+        ledger:
+          $ref: "#/components/schemas/Ledger"
+        timeline:
+          type: array
+          items:
+            $ref: "#/components/schemas/TimelineStep"
+      additionalProperties: false
+
+    Ledger:
+      type: object
+      required:
+        - gasCoveredEth
+        - gasRefundedEth
+        - retainedEth
+        - rebateEth
+        - gasCoveredUsd
+        - gasRefundedUsd
+        - retainedUsd
+        - rebateUsd
+      properties:
+        gasCoveredEth:
+          type: number
+        gasRefundedEth:
+          type: number
+        retainedEth:
+          type: number
+        rebateEth:
+          type: number
+        gasCoveredUsd:
+          type: number
+        gasRefundedUsd:
+          type: number
+        retainedUsd:
+          type: number
+        rebateUsd:
+          type: number
+      additionalProperties: false
+
+    TimelineStep:
+      type: object
+      required:
+        - step
+        - status
+        - time
+      properties:
+        step:
+          type: string
+        status:
+          type: string
+          enum: ["done", "pending", "failed"]
+        time:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    ServiceStatus:
+      type: object
+      required:
+        - name
+        - status
+        - uptimePct
+        - latencyMs
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          enum: ["operational", "degraded", "outage"]
+        uptimePct:
+          type: number
+          minimum: 0
+          maximum: 100
+        latencyMs:
+          type: number
+          minimum: 0
+      additionalProperties: false
+
+    Incident:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        impact:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+        resolvedAt:
+          type: string
+          format: date-time
+      additionalProperties: true
+
+    PolicyConfig:
+      type: object
+      required:
+        - retainedBps
+        - perTxGasCapEth
+        - perDayGasCapEth
+      properties:
+        retainedBps:
+          type: integer
+          minimum: 0
+          maximum: 10000
+        perTxGasCapEth:
+          type: number
+          minimum: 0
+        perDayGasCapEth:
+          type: number
+          minimum: 0
+      additionalProperties: false
+
+    SummaryCounters:
+      type: object
+      required:
+        - processed
+        - submitted
+        - skipped
+        - failed
+      properties:
+        processed:
+          type: integer
+          minimum: 0
+        submitted:
+          type: integer
+          minimum: 0
+        skipped:
+          type: integer
+          minimum: 0
+        failed:
+          type: integer
+          minimum: 0
+      additionalProperties: false

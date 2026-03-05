@@ -252,6 +252,19 @@ pub async fn spawn_metrics_server(
                             body
                         );
                         let _ = socket.write_all(response.as_bytes()).await;
+                    } else if route == "/partner/summary" {
+                        let body = render_public_summary(
+                            chain_id,
+                            &stats,
+                            &portfolio,
+                            public_summary_policy,
+                        );
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = socket.write_all(response.as_bytes()).await;
                     } else {
                         let body = r#"{"status":"error","error":"not found"}"#;
                         let response = format!(
