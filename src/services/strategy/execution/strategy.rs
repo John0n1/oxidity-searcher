@@ -570,6 +570,8 @@ pub struct StrategyExecutor {
     pub(in crate::services::strategy) flashloan_enabled: bool,
     pub(in crate::services::strategy) sponsorship_enabled: bool,
     pub(in crate::services::strategy) sponsorship_retained_bps: u64,
+    pub(in crate::services::strategy) sponsorship_per_tx_gas_cap_eth: f64,
+    pub(in crate::services::strategy) sponsorship_per_day_gas_cap_eth: f64,
     pub(in crate::services::strategy) flashloan_providers: Vec<FlashloanProvider>,
     pub(in crate::services::strategy) aave_pool: Option<Address>,
     pub(in crate::services::strategy) reserve_cache: Arc<ReserveCache>,
@@ -634,6 +636,8 @@ pub struct StrategyConfig {
     pub flashloan_enabled: bool,
     pub sponsorship_enabled: bool,
     pub sponsorship_retained_bps: u64,
+    pub sponsorship_per_tx_gas_cap_eth: f64,
+    pub sponsorship_per_day_gas_cap_eth: f64,
     pub flashloan_providers: Vec<FlashloanProvider>,
     pub aave_pool: Option<Address>,
     pub reserve_cache: Arc<ReserveCache>,
@@ -1437,6 +1441,19 @@ impl StrategyExecutor {
             flashloan_enabled: config.flashloan_enabled,
             sponsorship_enabled: config.sponsorship_enabled,
             sponsorship_retained_bps: config.sponsorship_retained_bps.clamp(0, 10_000),
+            sponsorship_per_tx_gas_cap_eth: if config.sponsorship_per_tx_gas_cap_eth.is_finite() {
+                config.sponsorship_per_tx_gas_cap_eth.max(0.0)
+            } else {
+                0.05
+            },
+            sponsorship_per_day_gas_cap_eth: if config.sponsorship_per_day_gas_cap_eth.is_finite() {
+                config
+                    .sponsorship_per_day_gas_cap_eth
+                    .max(0.0)
+                    .max(config.sponsorship_per_tx_gas_cap_eth.max(0.0))
+            } else {
+                0.5f64.max(config.sponsorship_per_tx_gas_cap_eth.max(0.0))
+            },
             flashloan_providers: config.flashloan_providers,
             aave_pool: config.aave_pool,
             reserve_cache: config.reserve_cache,
@@ -2668,6 +2685,8 @@ mod tests {
             flashloan_enabled: false,
             sponsorship_enabled: true,
             sponsorship_retained_bps: 1_000,
+            sponsorship_per_tx_gas_cap_eth: 0.05,
+            sponsorship_per_day_gas_cap_eth: 0.5,
             flashloan_providers: vec![FlashloanProvider::Balancer],
             aave_pool: None,
             reserve_cache,

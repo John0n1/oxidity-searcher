@@ -6,13 +6,15 @@ use crate::core::strategy::StrategyStats;
 use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex as TokioMutex;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 const METRICS_MAX_REQUEST_BYTES: usize = 8 * 1024;
+const METRICS_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug)]
 pub struct PublicSummaryPolicy {
@@ -101,179 +103,26 @@ pub async fn spawn_metrics_server(
             };
 
             match accept_result {
-                Ok((mut socket, _)) => {
-                    let mut buf: Vec<u8> = Vec::new();
-                    let mut chunk = [0u8; 1024];
-                    let mut too_large = false;
-                    loop {
-                        let n = socket.read(&mut chunk).await.unwrap_or(0);
-                        if n == 0 {
-                            break;
-                        }
-                        if buf.len().saturating_add(n) > METRICS_MAX_REQUEST_BYTES {
-                            too_large = true;
-                            break;
-                        }
-                        buf.extend_from_slice(&chunk[..n]);
-                        if header_end_offset(&buf).is_some() {
-                            break;
-                        }
-                    }
-                    if too_large {
-                        let body = r#"{"status":"error","error":"request too large"}"#;
-                        let response = format!(
-                            "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let _ = socket.write_all(response.as_bytes()).await;
-                        continue;
-                    }
-                    let Some(header_end) = header_end_offset(&buf) else {
-                        if !buf.is_empty() {
-                            let body = r#"{"status":"error","error":"malformed request"}"#;
-                            let response = format!(
-                                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                                body.len(),
-                                body
-                            );
-                            let _ = socket.write_all(response.as_bytes()).await;
-                        }
-                        continue;
-                    };
-
-                    let req = String::from_utf8_lossy(&buf[..header_end]).to_string();
-                    let mut lines = req.lines();
-                    let request_line = lines.next().unwrap_or_default();
-                    {
-                        let mut guard = limiter.lock().await;
-                        if !guard.allow(60) {
-                            let body = r#"{"status":"error","error":"rate_limited"}"#;
-                            let response = format!(
-                                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                                body.len(),
-                                body
-                            );
-                            let _ = socket.write_all(response.as_bytes()).await;
-                            continue;
-                        }
-                    }
-                    let mut parts = request_line.split_whitespace();
-                    let method = parts.next().unwrap_or("");
-                    if method != "GET" && method != "HEAD" {
-                        let body = r#"{"status":"error","error":"method not allowed"}"#;
-                        let response = format!(
-                            "HTTP/1.1 405 Method Not Allowed\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let _ = socket.write_all(response.as_bytes()).await;
-                        continue;
-                    }
-
-                    let path = parts.next().unwrap_or("/");
-                    let path = path.lines().next().unwrap_or("/");
-                    let headers: Vec<&str> = lines.take_while(|l| !l.is_empty()).collect();
-                    let route = path.split('?').next().unwrap_or(path);
-                    let is_public_route = route == "/public/summary";
-                    let auth_header = headers.iter().find_map(|l| {
-                        let (key, val) = l.split_once(':')?;
-                        if key.eq_ignore_ascii_case("authorization") {
-                            Some(val.trim())
-                        } else {
-                            None
-                        }
+                Ok((socket, _)) => {
+                    let shutdown = shutdown.clone();
+                    let stats = stats.clone();
+                    let portfolio = portfolio.clone();
+                    let limiter = limiter.clone();
+                    let token = token.clone();
+                    tokio::spawn(async move {
+                        handle_metrics_connection(
+                            socket,
+                            chain_id,
+                            shutdown,
+                            stats,
+                            portfolio,
+                            public_summary_policy,
+                            limiter,
+                            token,
+                            enable_shutdown,
+                        )
+                        .await;
                     });
-                    let ok = if is_public_route {
-                        true
-                    } else {
-                        auth_header
-                            .and_then(|v| v.strip_prefix("Bearer "))
-                            .map(|v| v.trim() == token)
-                            .unwrap_or(false)
-                    };
-                    if !ok {
-                        let body = r#"{"status":"error","error":"unauthorized"}"#;
-                        let response = format!(
-                            "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let _ = socket.write_all(response.as_bytes()).await;
-                        continue;
-                    }
-
-                    if route == "/health" {
-                        let body = json!({"status":"ok","chainId":chain_id}).to_string();
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let _ = socket.write_all(response.as_bytes()).await;
-                    } else if route == "/shutdown" {
-                        if enable_shutdown {
-                            shutdown.cancel();
-                            let body =
-                                json!({"status":"ok","message":"shutdown_requested"}).to_string();
-                            let response = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                                body.len(),
-                                body
-                            );
-                            let _ = socket.write_all(response.as_bytes()).await;
-                        } else {
-                            let body = r#"{"status":"error","error":"shutdown route disabled"}"#;
-                            let response = format!(
-                                "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                                body.len(),
-                                body
-                            );
-                            let _ = socket.write_all(response.as_bytes()).await;
-                        }
-                    } else if route == "/" {
-                        let body = render_metrics(&stats, &portfolio);
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let _ = socket.write_all(response.as_bytes()).await;
-                    } else if route == "/public/summary" {
-                        let body = render_public_summary(
-                            chain_id,
-                            &stats,
-                            &portfolio,
-                            public_summary_policy,
-                        );
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let _ = socket.write_all(response.as_bytes()).await;
-                    } else if route == "/partner/summary" {
-                        let body = render_public_summary(
-                            chain_id,
-                            &stats,
-                            &portfolio,
-                            public_summary_policy,
-                        );
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let _ = socket.write_all(response.as_bytes()).await;
-                    } else {
-                        let body = r#"{"status":"error","error":"not found"}"#;
-                        let response = format!(
-                            "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
-                            body.len(),
-                            body
-                        );
-                        let _ = socket.write_all(response.as_bytes()).await;
-                    }
                 }
                 Err(e) => {
                     tracing::warn!("Metrics accept error: {}", e);
@@ -284,6 +133,190 @@ pub async fn spawn_metrics_server(
     });
 
     local
+}
+
+async fn handle_metrics_connection(
+    mut socket: TcpStream,
+    chain_id: u64,
+    shutdown: CancellationToken,
+    stats: Arc<StrategyStats>,
+    portfolio: Arc<PortfolioManager>,
+    public_summary_policy: PublicSummaryPolicy,
+    limiter: Arc<TokioMutex<RateLimiter>>,
+    token: String,
+    enable_shutdown: bool,
+) {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 1024];
+    let mut too_large = false;
+    loop {
+        let n = match timeout(METRICS_READ_TIMEOUT, socket.read(&mut chunk)).await {
+            Ok(Ok(n)) => n,
+            Ok(Err(_)) => return,
+            Err(_) => {
+                let _ = write_http_status_json(
+                    &mut socket,
+                    "408 Request Timeout",
+                    r#"{"status":"error","error":"request timeout"}"#,
+                )
+                .await;
+                return;
+            }
+        };
+        if n == 0 {
+            break;
+        }
+        if buf.len().saturating_add(n) > METRICS_MAX_REQUEST_BYTES {
+            too_large = true;
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if header_end_offset(&buf).is_some() {
+            break;
+        }
+    }
+    if too_large {
+        let _ = write_http_status_json(
+            &mut socket,
+            "413 Payload Too Large",
+            r#"{"status":"error","error":"request too large"}"#,
+        )
+        .await;
+        return;
+    }
+    let Some(header_end) = header_end_offset(&buf) else {
+        if !buf.is_empty() {
+            let _ = write_http_status_json(
+                &mut socket,
+                "400 Bad Request",
+                r#"{"status":"error","error":"malformed request"}"#,
+            )
+            .await;
+        }
+        return;
+    };
+
+    let req = String::from_utf8_lossy(&buf[..header_end]).to_string();
+    let mut lines = req.lines();
+    let request_line = lines.next().unwrap_or_default();
+    {
+        let mut guard = limiter.lock().await;
+        if !guard.allow(60) {
+            let _ = write_http_status_json(
+                &mut socket,
+                "429 Too Many Requests",
+                r#"{"status":"error","error":"rate_limited"}"#,
+            )
+            .await;
+            return;
+        }
+    }
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    if method != "GET" && method != "HEAD" {
+        let _ = write_http_status_json(
+            &mut socket,
+            "405 Method Not Allowed",
+            r#"{"status":"error","error":"method not allowed"}"#,
+        )
+        .await;
+        return;
+    }
+
+    let path = parts.next().unwrap_or("/");
+    let path = path.lines().next().unwrap_or("/");
+    let headers: Vec<&str> = lines.take_while(|l| !l.is_empty()).collect();
+    let route = path.split('?').next().unwrap_or(path);
+    let is_public_route = route == "/public/summary";
+    let auth_header = headers.iter().find_map(|l| {
+        let (key, val) = l.split_once(':')?;
+        if key.eq_ignore_ascii_case("authorization") {
+            Some(val.trim())
+        } else {
+            None
+        }
+    });
+    let ok = if is_public_route {
+        true
+    } else {
+        auth_header
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(|v| v.trim() == token)
+            .unwrap_or(false)
+    };
+    if !ok {
+        let _ = write_http_status_json(
+            &mut socket,
+            "401 Unauthorized",
+            r#"{"status":"error","error":"unauthorized"}"#,
+        )
+        .await;
+        return;
+    }
+
+    if route == "/health" {
+        let body = json!({"status":"ok","chainId":chain_id}).to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = socket.write_all(response.as_bytes()).await;
+    } else if route == "/shutdown" {
+        if enable_shutdown {
+            shutdown.cancel();
+            let body = json!({"status":"ok","message":"shutdown_requested"}).to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        } else {
+            let _ = write_http_status_json(
+                &mut socket,
+                "404 Not Found",
+                r#"{"status":"error","error":"shutdown route disabled"}"#,
+            )
+            .await;
+        }
+    } else if route == "/" {
+        let body = render_metrics(&stats, &portfolio);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = socket.write_all(response.as_bytes()).await;
+    } else if route == "/public/summary" || route == "/partner/summary" {
+        let body = render_public_summary(chain_id, &stats, &portfolio, public_summary_policy);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = socket.write_all(response.as_bytes()).await;
+    } else {
+        let _ = write_http_status_json(
+            &mut socket,
+            "404 Not Found",
+            r#"{"status":"error","error":"not found"}"#,
+        )
+        .await;
+    }
+}
+
+async fn write_http_status_json(
+    socket: &mut TcpStream,
+    status: &str,
+    body: &str,
+) -> Result<(), std::io::Error> {
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    socket.write_all(response.as_bytes()).await
 }
 
 fn header_end_offset(buf: &[u8]) -> Option<usize> {
@@ -757,7 +790,7 @@ fn render_public_summary(
     let avg_inclusion_seconds = if sim_count > 0 {
         (sim_sum as f64) / (sim_count as f64) / 1000.0
     } else {
-        1.2
+        0.0
     };
 
     let activity: Vec<serde_json::Value> = bundles
@@ -767,7 +800,8 @@ fn render_public_summary(
         .map(|(idx, bundle)| {
             let path = decision_label(&bundle.decision_path);
             let price = bundle_price(bundle);
-            let net_to_user_usd = (clamp_non_negative(bundle.gas_refunded_eth)
+            let net_to_user_usd = (clamp_non_negative(bundle.gas_covered_eth)
+                + clamp_non_negative(bundle.gas_refunded_eth)
                 + clamp_non_negative(bundle.rebate_eth))
                 * price;
             json!({
@@ -793,7 +827,12 @@ fn render_public_summary(
             let gas_refunded_usd = clamp_non_negative(bundle.gas_refunded_eth) * price;
             let retained_usd = clamp_non_negative(bundle.retained_eth) * price;
             let rebate_usd = clamp_non_negative(bundle.rebate_eth) * price;
-            let net_usd = gas_refunded_usd + rebate_usd;
+            let net_usd = gas_covered_usd + gas_refunded_usd + rebate_usd;
+            let inclusion_status = match bundle.status.as_str() {
+                "Included" => "done",
+                "Pending" => "pending",
+                _ => "failed",
+            };
             json!({
                 "id": format!("tx-{}", idx + 1),
                 "txHash": bundle.tx_hash,
@@ -825,7 +864,7 @@ fn render_public_summary(
                     {"step": "Received", "status": "done", "time": timestamp_ms_to_iso(bundle.timestamp_ms)},
                     {"step": "Simulated", "status": "done", "time": timestamp_ms_to_iso(bundle.timestamp_ms)},
                     {"step": "Submitted", "status": "done", "time": timestamp_ms_to_iso(bundle.timestamp_ms)},
-                    {"step": "Included", "status": "done", "time": timestamp_ms_to_iso(bundle.timestamp_ms)}
+                    {"step": "Included", "status": inclusion_status, "time": timestamp_ms_to_iso(bundle.timestamp_ms)}
                 ]
             })
         })
@@ -863,7 +902,7 @@ fn render_public_summary(
         "source": "strategy-metrics",
         "stats": {
             "sponsoredTxCount": sponsored_tx_count,
-            "gasRefundedEth": gas_refunded_eth_total + gas_covered_eth_total,
+            "gasRefundedEth": gas_refunded_eth_total,
             "gasCoveredEth": gas_covered_eth_total,
             "retainedEth": retained_eth_total,
             "rebateEth": rebate_eth_total,

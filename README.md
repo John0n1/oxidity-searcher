@@ -543,6 +543,28 @@ Supported JSON-RPC methods:
 - `eth_chainId`: returns chain id as hex string.
 - `net_version`: returns chain id as decimal string.
 - `web3_clientVersion`: returns gateway identifier string.
+- `OPTIONS /`: CORS preflight for browser clients (returns `204`).
+- safe read-method passthrough to upstream chain RPC:
+  - `eth_blockNumber`
+  - `eth_getBlockByNumber`
+  - `eth_getBlockByHash`
+  - `eth_getBlockTransactionCountByNumber`
+  - `eth_getBlockTransactionCountByHash`
+  - `eth_getTransactionByHash`
+  - `eth_getTransactionReceipt`
+  - `eth_getTransactionByBlockHashAndIndex`
+  - `eth_getTransactionByBlockNumberAndIndex`
+  - `eth_getBalance`
+  - `eth_getCode`
+  - `eth_getStorageAt`
+  - `eth_getTransactionCount`
+  - `eth_call`
+  - `eth_estimateGas`
+  - `eth_gasPrice`
+  - `eth_feeHistory`
+  - `eth_maxPriorityFeePerGas`
+  - `eth_getLogs`
+  - `eth_syncing`
 - all other methods return `-32601`.
 
 Explicitly blocked on public ingress (returns `-32601` with `method disabled on public gateway`):

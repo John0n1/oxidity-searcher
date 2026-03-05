@@ -148,6 +148,8 @@ pub async fn build_strategy_executor(
         flashloan_enabled: options.flashloan_enabled,
         sponsorship_enabled: true,
         sponsorship_retained_bps: 1_000,
+        sponsorship_per_tx_gas_cap_eth: 0.05,
+        sponsorship_per_day_gas_cap_eth: 0.5,
         flashloan_providers: options.flashloan_providers,
         aave_pool: options.aave_pool,
         reserve_cache,

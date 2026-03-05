@@ -85,6 +85,7 @@ pub struct EngineConfig {
     pub public_rpc_ingress_enabled: bool,
     pub public_rpc_ingress_port: u16,
     pub public_rpc_ingress_bind: Option<String>,
+    pub public_rpc_upstream_url: Option<String>,
     pub sponsorship_enabled: bool,
     pub sponsorship_retained_bps: u64,
     pub sponsorship_per_tx_gas_cap_eth: f64,
@@ -161,6 +162,7 @@ pub struct Engine {
     public_rpc_ingress_enabled: bool,
     public_rpc_ingress_port: u16,
     public_rpc_ingress_bind: Option<String>,
+    public_rpc_upstream_url: Option<String>,
     sponsorship_enabled: bool,
     sponsorship_retained_bps: u64,
     sponsorship_per_tx_gas_cap_eth: f64,
@@ -239,6 +241,14 @@ impl Engine {
             public_rpc_ingress_enabled: config.public_rpc_ingress_enabled,
             public_rpc_ingress_port: config.public_rpc_ingress_port.max(1),
             public_rpc_ingress_bind: config.public_rpc_ingress_bind,
+            public_rpc_upstream_url: config.public_rpc_upstream_url.and_then(|url| {
+                let trimmed = url.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }),
             sponsorship_enabled: config.sponsorship_enabled,
             sponsorship_retained_bps: config.sponsorship_retained_bps.clamp(0, 10_000),
             sponsorship_per_tx_gas_cap_eth: if config.sponsorship_per_tx_gas_cap_eth.is_finite() {
@@ -910,6 +920,8 @@ impl Engine {
                 self.public_rpc_ingress_bind.clone(),
                 bundle_sender.clone(),
                 stats.clone(),
+                self.public_rpc_upstream_url.clone(),
+                self.relay_http_client.clone(),
             )
             .await
         } else {
@@ -968,6 +980,8 @@ impl Engine {
                 flashloan_enabled: self.flashloan_enabled,
                 sponsorship_enabled: self.sponsorship_enabled,
                 sponsorship_retained_bps: self.sponsorship_retained_bps,
+                sponsorship_per_tx_gas_cap_eth: self.sponsorship_per_tx_gas_cap_eth,
+                sponsorship_per_day_gas_cap_eth: self.sponsorship_per_day_gas_cap_eth,
                 flashloan_providers: self.flashloan_providers.clone(),
                 aave_pool,
                 reserve_cache: reserve_cache.clone(),

@@ -27,6 +27,7 @@ paths:
                 - $ref: "#/components/schemas/EthChainIdRequest"
                 - $ref: "#/components/schemas/NetVersionRequest"
                 - $ref: "#/components/schemas/Web3ClientVersionRequest"
+                - $ref: "#/components/schemas/RpcReadPassthroughRequest"
       responses:
         "200":
           description: JSON-RPC success or error payload
@@ -54,6 +55,14 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorStatus"
+    options:
+      summary: CORS preflight for public JSON-RPC ingress
+      operationId: publicRpcOptions
+      servers:
+        - url: https://rpc.mitander.dev
+      responses:
+        "204":
+          description: Preflight accepted
 
   /health:
     get:
@@ -204,6 +213,45 @@ components:
           enum: ["web3_clientVersion"]
         params:
           $ref: "#/components/schemas/RpcParamsEmpty"
+      additionalProperties: false
+
+    RpcReadPassthroughRequest:
+      type: object
+      required:
+        - jsonrpc
+        - method
+      properties:
+        jsonrpc:
+          type: string
+          enum: ["2.0"]
+        id:
+          $ref: "#/components/schemas/JsonRpcId"
+        method:
+          type: string
+          enum:
+            - eth_blockNumber
+            - eth_getBlockByNumber
+            - eth_getBlockByHash
+            - eth_getBlockTransactionCountByNumber
+            - eth_getBlockTransactionCountByHash
+            - eth_getTransactionByHash
+            - eth_getTransactionReceipt
+            - eth_getTransactionByBlockHashAndIndex
+            - eth_getTransactionByBlockNumberAndIndex
+            - eth_getBalance
+            - eth_getCode
+            - eth_getStorageAt
+            - eth_getTransactionCount
+            - eth_call
+            - eth_estimateGas
+            - eth_gasPrice
+            - eth_feeHistory
+            - eth_maxPriorityFeePerGas
+            - eth_getLogs
+            - eth_syncing
+        params:
+          type: array
+          items: {}
       additionalProperties: false
 
     JsonRpcSuccess:

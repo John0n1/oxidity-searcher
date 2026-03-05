@@ -215,8 +215,9 @@ impl StrategyExecutor {
         revert_exit_reason: &str,
         timeout_exit_reason: &str,
         timeout_warn_message: &str,
-    ) -> Result<(), AppError> {
-        match self.await_receipt(&receipt_target).await? {
+    ) -> Result<ReceiptStatus, AppError> {
+        let status = self.await_receipt(&receipt_target).await?;
+        match status {
             ReceiptStatus::ConfirmedSuccess => {}
             ReceiptStatus::ConfirmedRevert => {
                 self.emergency_exit_inventory(revert_exit_reason).await;
@@ -233,7 +234,7 @@ impl StrategyExecutor {
                 }
             }
         }
-        Ok(())
+        Ok(status)
     }
 
     fn record_bundle_telemetry(
@@ -241,9 +242,15 @@ impl StrategyExecutor {
         submitted_hash: B256,
         source: &'static str,
         profit: &ProfitOutcome,
+        receipt_status: ReceiptStatus,
     ) {
         let (decision_path, gas_covered_eth, gas_refunded_eth, retained_eth, rebate_eth) =
             self.sponsorship_ledger_from_profit(profit);
+        let status = match receipt_status {
+            ReceiptStatus::ConfirmedSuccess => "Included",
+            ReceiptStatus::ConfirmedRevert => "Failed",
+            ReceiptStatus::UnknownTimeout => "Pending",
+        };
         let native_usd_price = if profit.eth_quote.price.is_finite() && profit.eth_quote.price > 0.0
         {
             profit.eth_quote.price
@@ -254,7 +261,7 @@ impl StrategyExecutor {
             tx_hash: format!("{submitted_hash:#x}"),
             source: source.to_string(),
             decision_path,
-            status: "Included".to_string(),
+            status: status.to_string(),
             profit_eth: profit.profit_eth_f64,
             gas_cost_eth: profit.gas_cost_eth_f64,
             net_eth: profit.net_profit_eth_f64,
@@ -271,13 +278,15 @@ impl StrategyExecutor {
         &self,
         profit: &ProfitOutcome,
     ) -> (String, f64, f64, f64, f64) {
-        let gas_covered_eth = self.amount_to_display(profit.gas_cost_wei, self.wrapped_native);
+        let gas_covered_eth = self
+            .amount_to_display(profit.gas_cost_wei, self.wrapped_native)
+            .max(0.0);
         let gas_refunded_eth = 0.0;
         let net_wei = profit.net_profit_wei;
         if net_wei.is_zero() {
             return (
                 "private_only".to_string(),
-                gas_covered_eth.max(0.0),
+                gas_covered_eth,
                 gas_refunded_eth,
                 0.0,
                 0.0,
@@ -285,6 +294,29 @@ impl StrategyExecutor {
         }
 
         if self.sponsorship_enabled {
+            let per_tx_cap = self.sponsorship_per_tx_gas_cap_eth.max(0.0);
+            if per_tx_cap > 0.0 && gas_covered_eth > per_tx_cap {
+                return (
+                    "private_only".to_string(),
+                    gas_covered_eth,
+                    gas_refunded_eth,
+                    self.amount_to_display(net_wei, self.wrapped_native)
+                        .max(0.0),
+                    0.0,
+                );
+            }
+            let per_day_cap = self.sponsorship_per_day_gas_cap_eth.max(per_tx_cap);
+            let used_last_24h = self.sponsored_gas_covered_last_24h_eth();
+            if per_day_cap > 0.0 && used_last_24h + gas_covered_eth > per_day_cap {
+                return (
+                    "private_only".to_string(),
+                    gas_covered_eth,
+                    gas_refunded_eth,
+                    self.amount_to_display(net_wei, self.wrapped_native)
+                        .max(0.0),
+                    0.0,
+                );
+            }
             let retained_bps = self.sponsorship_retained_bps.clamp(0, 10_000);
             let retained_wei = net_wei
                 .saturating_mul(U256::from(retained_bps))
@@ -294,7 +326,7 @@ impl StrategyExecutor {
             let rebate_wei = net_wei.saturating_sub(retained_wei);
             return (
                 "sponsored".to_string(),
-                gas_covered_eth.max(0.0),
+                gas_covered_eth,
                 gas_refunded_eth,
                 self.amount_to_display(retained_wei, self.wrapped_native)
                     .max(0.0),
@@ -305,12 +337,22 @@ impl StrategyExecutor {
 
         (
             "private_only".to_string(),
-            gas_covered_eth.max(0.0),
+            gas_covered_eth,
             gas_refunded_eth,
             self.amount_to_display(net_wei, self.wrapped_native)
                 .max(0.0),
             0.0,
         )
+    }
+
+    fn sponsored_gas_covered_last_24h_eth(&self) -> f64 {
+        let cutoff_ms = chrono::Utc::now().timestamp_millis() - 86_400_000;
+        let bundles = self.stats.bundles.lock().unwrap_or_else(|e| e.into_inner());
+        bundles
+            .iter()
+            .filter(|entry| entry.decision_path == "sponsored" && entry.timestamp_ms >= cutoff_ms)
+            .map(|entry| entry.gas_covered_eth.max(0.0))
+            .sum()
     }
 
     fn tx_kind_call_address(kind: Option<&TxKind>) -> Option<Address> {
@@ -699,6 +741,33 @@ impl StrategyExecutor {
                     fallback_max_fee_per_gas,
                     fallback_gas_limit,
                 ))
+            })
+    }
+
+    fn signer_bundle_prefund_credit_wei(
+        bundle_requests: &[TransactionRequest],
+        signer: Address,
+    ) -> U256 {
+        bundle_requests
+            .iter()
+            // Only credit transfers that land before the signer starts spending.
+            .take_while(|req| req.from != Some(signer))
+            .fold(U256::ZERO, |acc, req| {
+                let Some(from) = req.from else {
+                    return acc;
+                };
+                if from == signer {
+                    return acc;
+                }
+                let to_signer = matches!(req.to.as_ref(), Some(TxKind::Call(addr)) if *addr == signer);
+                if !to_signer {
+                    return acc;
+                }
+                let value = req.value.unwrap_or(U256::ZERO);
+                if value.is_zero() {
+                    return acc;
+                }
+                acc.saturating_add(value)
             })
     }
 
@@ -1508,14 +1577,15 @@ impl StrategyExecutor {
         let tx_hash_label = format!("{tx_hash:#x}");
         self.persist_profit_and_market_data(&tx_hash_label, "strategy_v1", &profit)
             .await?;
-        self.handle_submitted_receipt(
-            submitted_hash,
-            "bundle receipt reverted",
-            "bundle receipt unknown timeout",
-            "Receipt timeout without confirmed revert; emergency exit suppressed",
-        )
-        .await?;
-        self.record_bundle_telemetry(submitted_hash, "mempool", &profit);
+        let receipt_status = self
+            .handle_submitted_receipt(
+                submitted_hash,
+                "bundle receipt reverted",
+                "bundle receipt unknown timeout",
+                "Receipt timeout without confirmed revert; emergency exit suppressed",
+            )
+            .await?;
+        self.record_bundle_telemetry(submitted_hash, "mempool", &profit, receipt_status);
 
         Ok(Some(format!("{submitted_hash:#x}")))
     }
@@ -1756,14 +1826,15 @@ impl StrategyExecutor {
 
         self.persist_profit_and_market_data(&victim_tx_hash, "strategy_mev_share", &profit)
             .await?;
-        self.handle_submitted_receipt(
-            submitted_hash,
-            "mev_share receipt reverted",
-            "mev_share receipt unknown timeout",
-            "MEV-Share receipt timeout without confirmed revert; emergency exit suppressed",
-        )
-        .await?;
-        self.record_bundle_telemetry(submitted_hash, "mev_share", &profit);
+        let receipt_status = self
+            .handle_submitted_receipt(
+                submitted_hash,
+                "mev_share receipt reverted",
+                "mev_share receipt unknown timeout",
+                "MEV-Share receipt timeout without confirmed revert; emergency exit suppressed",
+            )
+            .await?;
+        self.record_bundle_telemetry(submitted_hash, "mev_share", &profit, receipt_status);
 
         Ok(Some(format!("{submitted_hash:#x}")))
     }
@@ -2413,18 +2484,25 @@ impl StrategyExecutor {
         gas_fees: &GasFees,
         router: Address,
     ) -> Result<Option<ProfitOutcome>, AppError> {
+        let signer_prefund_credit_wei =
+            Self::signer_bundle_prefund_credit_wei(&bundle_requests, self.signer.address());
+        let effective_wallet_chain_balance =
+            wallet_chain_balance.saturating_add(signer_prefund_credit_wei);
         let signer_upfront_need = Self::signer_bundle_max_upfront_wei(
             &bundle_requests,
             self.signer.address(),
             gas_fees.max_fee_per_gas,
             gas_limit_hint,
         );
-        if wallet_chain_balance < signer_upfront_need {
+        if effective_wallet_chain_balance < signer_upfront_need {
             self.log_skip(
                 SkipReason::InsufficientBalance,
                 &format!(
-                    "wallet={} below signer_bundle_max_upfront={} (phase=pre_sim)",
-                    wallet_chain_balance, signer_upfront_need
+                    "wallet={} prefund_credit={} effective_wallet={} below signer_bundle_max_upfront={} (phase=pre_sim)",
+                    wallet_chain_balance,
+                    signer_prefund_credit_wei,
+                    effective_wallet_chain_balance,
+                    signer_upfront_need
                 ),
             );
             return Ok(None);
@@ -2612,12 +2690,16 @@ impl StrategyExecutor {
             bribe_wei,
             gas_cost_wei,
         );
-        if wallet_chain_balance < upfront_need {
+        if effective_wallet_chain_balance < upfront_need {
             self.log_skip(
                 SkipReason::InsufficientBalance,
                 &format!(
-                    "need {} wei (principal+bribe+gas; flashloan={}) have {}",
-                    upfront_need, backrun.uses_flashloan, wallet_chain_balance
+                    "need {} wei (principal+bribe+gas; flashloan={}) have wallet={} prefund_credit={} effective_wallet={}",
+                    upfront_need,
+                    backrun.uses_flashloan,
+                    wallet_chain_balance,
+                    signer_prefund_credit_wei,
+                    effective_wallet_chain_balance
                 ),
             );
             return Ok(None);
@@ -2779,6 +2861,25 @@ mod tests {
     use crate::services::strategy::execution::strategy::dummy_executor_for_tests;
     use alloy::rpc::types::eth::TransactionRequest;
 
+    fn sample_profit_outcome(gas_cost_wei: U256, net_profit_wei: U256) -> ProfitOutcome {
+        ProfitOutcome {
+            bundle_gas_limit: 300_000,
+            gas_cost_wei,
+            gross_profit_wei: net_profit_wei.saturating_add(gas_cost_wei),
+            net_profit_wei,
+            bribe_wei: U256::ZERO,
+            flashloan_premium_wei: U256::ZERO,
+            effective_cost_wei: gas_cost_wei,
+            profit_eth_f64: 0.0,
+            gas_cost_eth_f64: 0.0,
+            net_profit_eth_f64: 0.0,
+            eth_quote: PriceQuote {
+                price: 3_000.0,
+                source: "test".to_string(),
+            },
+        }
+    }
+
     #[test]
     fn apply_nonce_plan_orders_txes() {
         let lease = NonceLease {
@@ -2882,6 +2983,74 @@ mod tests {
         assert_eq!(total, U256::from(5_000_120u64));
     }
 
+    #[test]
+    fn signer_bundle_prefund_credit_counts_only_pre_signer_transfers_to_signer() {
+        let signer = Address::from([0x11; 20]);
+        let user_a = Address::from([0x22; 20]);
+        let user_b = Address::from([0x33; 20]);
+        let req_a = TransactionRequest {
+            from: Some(user_a),
+            to: Some(TxKind::Call(signer)),
+            value: Some(U256::from(25u64)),
+            ..Default::default()
+        };
+        let req_b = TransactionRequest {
+            from: Some(user_b),
+            to: Some(TxKind::Call(signer)),
+            value: Some(U256::from(75u64)),
+            ..Default::default()
+        };
+        let signer_req = TransactionRequest {
+            from: Some(signer),
+            to: Some(TxKind::Call(user_a)),
+            value: Some(U256::from(1u64)),
+            ..Default::default()
+        };
+        let after_signer_credit = TransactionRequest {
+            from: Some(user_a),
+            to: Some(TxKind::Call(signer)),
+            value: Some(U256::from(10_000u64)),
+            ..Default::default()
+        };
+
+        let credit = StrategyExecutor::signer_bundle_prefund_credit_wei(
+            &[req_a, req_b, signer_req, after_signer_credit],
+            signer,
+        );
+        assert_eq!(credit, U256::from(100u64));
+    }
+
+    #[test]
+    fn signer_bundle_prefund_credit_ignores_unknown_sender_and_non_signer_targets() {
+        let signer = Address::from([0x11; 20]);
+        let other = Address::from([0x22; 20]);
+        let third = Address::from([0x33; 20]);
+        let unknown_sender = TransactionRequest {
+            from: None,
+            to: Some(TxKind::Call(signer)),
+            value: Some(U256::from(500u64)),
+            ..Default::default()
+        };
+        let wrong_target = TransactionRequest {
+            from: Some(other),
+            to: Some(TxKind::Call(third)),
+            value: Some(U256::from(600u64)),
+            ..Default::default()
+        };
+        let zero_value = TransactionRequest {
+            from: Some(other),
+            to: Some(TxKind::Call(signer)),
+            value: Some(U256::ZERO),
+            ..Default::default()
+        };
+
+        let credit = StrategyExecutor::signer_bundle_prefund_credit_wei(
+            &[unknown_sender, wrong_target, zero_value],
+            signer,
+        );
+        assert_eq!(credit, U256::ZERO);
+    }
+
     #[tokio::test]
     async fn signal_scan_cooldown_is_executor_local() {
         let exec_a = dummy_executor_for_tests().await;
@@ -2969,6 +3138,77 @@ mod tests {
 
         // 500k main gas with 5% headroom; no extra flashloan overhead should be added.
         assert_eq!(planned, 525_000);
+    }
+
+    #[tokio::test]
+    async fn sponsorship_per_tx_cap_forces_private_only_path() {
+        let exec = dummy_executor_for_tests().await;
+        let profit = sample_profit_outcome(
+            U256::from(60_000_000_000_000_000u128), // 0.06 ETH > default 0.05 cap
+            U256::from(1_000_000_000_000_000_000u128),
+        );
+
+        let (path, gas_covered, _gas_refunded, retained, rebate) =
+            exec.sponsorship_ledger_from_profit(&profit);
+        assert_eq!(path, "private_only");
+        assert!(gas_covered > 0.05);
+        assert!(retained > 0.0);
+        assert_eq!(rebate, 0.0);
+    }
+
+    #[tokio::test]
+    async fn sponsorship_per_day_cap_forces_private_only_path() {
+        let exec = dummy_executor_for_tests().await;
+        exec.stats.record_bundle(BundleTelemetry {
+            tx_hash: "0xprefilled".to_string(),
+            source: "test".to_string(),
+            decision_path: "sponsored".to_string(),
+            status: "Included".to_string(),
+            profit_eth: 0.0,
+            gas_cost_eth: 0.0,
+            net_eth: 0.0,
+            gas_covered_eth: 0.49,
+            gas_refunded_eth: 0.0,
+            retained_eth: 0.0,
+            rebate_eth: 0.0,
+            native_usd_price: 0.0,
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+        });
+        let profit = sample_profit_outcome(
+            U256::from(20_000_000_000_000_000u128), // 0.02 ETH -> would exceed 0.5/day
+            U256::from(500_000_000_000_000_000u128),
+        );
+
+        let (path, _gas_covered, _gas_refunded, retained, rebate) =
+            exec.sponsorship_ledger_from_profit(&profit);
+        assert_eq!(path, "private_only");
+        assert!(retained > 0.0);
+        assert_eq!(rebate, 0.0);
+    }
+
+    #[tokio::test]
+    async fn bundle_telemetry_status_matches_receipt_outcome() {
+        let exec = dummy_executor_for_tests().await;
+        let profit = sample_profit_outcome(
+            U256::from(10_000_000_000_000_000u128), // 0.01 ETH
+            U256::from(200_000_000_000_000_000u128),
+        );
+
+        exec.record_bundle_telemetry(
+            B256::from([0x11; 32]),
+            "mempool",
+            &profit,
+            ReceiptStatus::UnknownTimeout,
+        );
+        let last = exec
+            .stats
+            .bundles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .last()
+            .cloned()
+            .expect("telemetry entry");
+        assert_eq!(last.status, "Pending");
     }
 }
 

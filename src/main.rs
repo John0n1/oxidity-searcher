@@ -224,14 +224,12 @@ async fn main() -> Result<(), AppError> {
         None
     };
     let token_manager = if let Some(path) = tokenlist_path.as_deref() {
-        Arc::new(TokenManager::load_from_file(path).unwrap_or_else(|e| {
-            tracing::warn!(
-                "TokenManager: failed to load {}; defaulting to empty list: {}",
-                path,
-                e
-            );
-            TokenManager::default()
-        }))
+        Arc::new(TokenManager::load_from_file(path).map_err(|e| {
+            AppError::Config(format!(
+                "TokenManager failed to load tokenlist from {}: {}",
+                path, e
+            ))
+        })?)
     } else {
         tracing::warn!(
             target: "config",
@@ -444,6 +442,7 @@ async fn main() -> Result<(), AppError> {
             public_rpc_ingress_enabled: settings.public_rpc_ingress_enabled_value(),
             public_rpc_ingress_port: settings.public_rpc_ingress_port_value(),
             public_rpc_ingress_bind: settings.public_rpc_ingress_bind_value(),
+            public_rpc_upstream_url: Some(http_provider_url.clone()),
             sponsorship_enabled: settings.sponsorship_enabled_value(),
             sponsorship_retained_bps: settings.sponsorship_retained_bps_value(),
             sponsorship_per_tx_gas_cap_eth: settings.sponsorship_per_tx_gas_cap_eth_value(),

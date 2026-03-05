@@ -10,6 +10,7 @@ use reqwest::Client;
 use reqwest::header;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -328,17 +329,12 @@ impl PriceFeed {
         }
 
         // 2. Try Chainlink on-chain feed
-        let chainlink_started = Instant::now();
-        let chainlink_quote = self.try_chainlink(&normalized.chainlink_symbol).await?;
-        self.record_provider_outcome(
-            "chainlink",
-            chainlink_quote.is_some(),
-            false,
-            chainlink_started.elapsed(),
-            None,
-        );
-        if let Some(price) = chainlink_quote {
-            self.store_cache(&normalized.cache_key, price.clone()).await;
+        if let Some(price) = self
+            .try_provider_step("chainlink", &normalized.cache_key, |_| async {
+                self.try_chainlink(&normalized.chainlink_symbol).await
+            })
+            .await?
+        {
             return Ok(price);
         }
 
@@ -349,110 +345,76 @@ impl PriceFeed {
         }
 
         // 3. Binance (with API key if provided; then anonymous)
-        let binance_started = Instant::now();
-        let binance_quote = self.try_binance(&normalized).await?;
-        self.record_provider_outcome(
-            "binance",
-            binance_quote.is_some(),
-            false,
-            binance_started.elapsed(),
-            None,
-        );
-        if let Some(q) = binance_quote {
-            self.store_cache(&normalized.cache_key, q.clone()).await;
-            return Ok(q);
+        if let Some(price) = self
+            .try_provider_step("binance", &normalized.cache_key, |_| async {
+                self.try_binance(&normalized).await
+            })
+            .await?
+        {
+            return Ok(price);
         }
 
         // 3b. OKX public ticker
-        let okx_started = Instant::now();
-        let okx_quote = self.try_okx(&normalized).await?;
-        self.record_provider_outcome(
-            "okx",
-            okx_quote.is_some(),
-            false,
-            okx_started.elapsed(),
-            None,
-        );
-        if let Some(q) = okx_quote {
-            self.store_cache(&normalized.cache_key, q.clone()).await;
-            return Ok(q);
+        if let Some(price) = self
+            .try_provider_step("okx", &normalized.cache_key, |_| async {
+                self.try_okx(&normalized).await
+            })
+            .await?
+        {
+            return Ok(price);
         }
 
         // 4. CoinMarketCap (API key)
-        let cmc_started = Instant::now();
-        let cmc_quote = self.try_coinmarketcap(&normalized).await?;
-        self.record_provider_outcome(
-            "coinmarketcap",
-            cmc_quote.is_some(),
-            false,
-            cmc_started.elapsed(),
-            None,
-        );
-        if let Some(q) = cmc_quote {
-            self.store_cache(&normalized.cache_key, q.clone()).await;
-            return Ok(q);
+        if let Some(price) = self
+            .try_provider_step("coinmarketcap", &normalized.cache_key, |_| async {
+                self.try_coinmarketcap(&normalized).await
+            })
+            .await?
+        {
+            return Ok(price);
         }
 
         // 5. CoinGecko (API key or keyless)
-        let gecko_started = Instant::now();
-        let gecko_quote = self.try_coingecko(&normalized).await?;
-        self.record_provider_outcome(
-            "coingecko",
-            gecko_quote.is_some(),
-            false,
-            gecko_started.elapsed(),
-            None,
-        );
-        if let Some(q) = gecko_quote {
-            self.store_cache(&normalized.cache_key, q.clone()).await;
-            return Ok(q);
+        if let Some(price) = self
+            .try_provider_step("coingecko", &normalized.cache_key, |_| async {
+                self.try_coingecko(&normalized).await
+            })
+            .await?
+        {
+            return Ok(price);
         }
 
         // 6. CryptoCompare (API key)
-        let cc_started = Instant::now();
-        let cc_quote = self.try_cryptocompare(&normalized).await?;
-        self.record_provider_outcome(
-            SOURCE_CRYPTOCOMPARE,
-            cc_quote.is_some(),
-            false,
-            cc_started.elapsed(),
-            None,
-        );
-        if let Some(q) = cc_quote {
-            self.store_cache(&normalized.cache_key, q.clone()).await;
-            return Ok(q);
+        if let Some(price) = self
+            .try_provider_step(SOURCE_CRYPTOCOMPARE, &normalized.cache_key, |_| async {
+                self.try_cryptocompare(&normalized).await
+            })
+            .await?
+        {
+            return Ok(price);
         }
 
         // 7. CoinPaprika (keyless)
-        let paprika_started = Instant::now();
-        let paprika_quote = self.try_coinpaprika(&normalized).await?;
-        self.record_provider_outcome(
-            "coinpaprika",
-            paprika_quote.is_some(),
-            false,
-            paprika_started.elapsed(),
-            None,
-        );
-        if let Some(q) = paprika_quote {
-            self.store_cache(&normalized.cache_key, q.clone()).await;
-            return Ok(q);
+        if let Some(price) = self
+            .try_provider_step("coinpaprika", &normalized.cache_key, |_| async {
+                self.try_coinpaprika(&normalized).await
+            })
+            .await?
+        {
+            return Ok(price);
         }
 
         // 8. CryptoCompare public BTC fallback
-        if normalized.chainlink_symbol == "BTC" {
-            let cc_public_started = Instant::now();
-            let cc_public_quote = self.try_cryptocompare_btc_public().await?;
-            self.record_provider_outcome(
-                SOURCE_CRYPTOCOMPARE_PUBLIC_BTC,
-                cc_public_quote.is_some(),
-                false,
-                cc_public_started.elapsed(),
-                None,
-            );
-            if let Some(q) = cc_public_quote {
-                self.store_cache(&normalized.cache_key, q.clone()).await;
-                return Ok(q);
-            }
+        if normalized.chainlink_symbol == "BTC"
+            && let Some(price) = self
+                .try_provider_step(
+                    SOURCE_CRYPTOCOMPARE_PUBLIC_BTC,
+                    &normalized.cache_key,
+                    |_| async { self.try_cryptocompare_btc_public().await },
+                )
+                .await?
+        {
+            return Ok(price);
         }
 
         // 9. Soft-fail: serve stale cache if available instead of hard error
@@ -471,6 +433,26 @@ impl PriceFeed {
             provider: format!("price_feed_all_providers:{}", normalized.cache_key),
             status: 503,
         })
+    }
+
+    async fn try_provider_step<F, Fut>(
+        &self,
+        provider: &'static str,
+        cache_key: &str,
+        fetch: F,
+    ) -> Result<Option<PriceQuote>, AppError>
+    where
+        F: FnOnce(&Self) -> Fut,
+        Fut: Future<Output = Result<Option<PriceQuote>, AppError>>,
+    {
+        let started = Instant::now();
+        let quote = fetch(self).await?;
+        self.record_provider_outcome(provider, quote.is_some(), false, started.elapsed(), None);
+        if let Some(price) = quote {
+            self.store_cache(cache_key, price.clone()).await;
+            return Ok(Some(price));
+        }
+        Ok(None)
     }
 
     async fn try_binance(
