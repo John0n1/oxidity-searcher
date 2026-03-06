@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
 use crate::common::data_path::{resolve_data_path, resolve_required_data_path};
 use crate::common::parsing::parse_boolish;

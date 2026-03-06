@@ -1,5 +1,0 @@
-Contact: mailto:john@mitander.dev
-Expires: 2028-03-05T02:32:00Z
-Encryption: https://mitander.dev/pgp.asc
-Policy: https://mitander.dev/terms
-Preferred-Languages: en, nb

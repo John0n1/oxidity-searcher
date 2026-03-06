@@ -1,0 +1,5 @@
+Contact: mailto:john@oxidity.io
+Expires: 2028-03-05T02:32:00Z
+Encryption: https://oxidity.io/pgp.asc
+Policy: https://oxidity.io/terms
+Preferred-Languages: en, nb

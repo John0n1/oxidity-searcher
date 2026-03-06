@@ -15,7 +15,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-GENERATED_CONF = REPO_ROOT / "deploy/nginx/generated/mitander.dev.conf"
+GENERATED_CONF = REPO_ROOT / "deploy/nginx/generated/oxidity.io.conf"
 NGINX_BIN = shutil.which("nginx") or "/usr/sbin/nginx"
 
 
@@ -181,7 +181,7 @@ def main():
             stderr = nginx_proc.stderr.read() if nginx_proc.stderr else ""
             raise RuntimeError(f"nginx exited early: {stderr}")
         try:
-            health = request("rpc.mitander.dev", nginx_port, "GET", "/health")
+            health = request("rpc.oxidity.io", nginx_port, "GET", "/health")
             if health["status"] == 200:
                 break
         except OSError:
@@ -190,11 +190,11 @@ def main():
     else:
         raise RuntimeError("nginx did not become ready in time")
 
-    public_summary = request("mitander.dev", nginx_port, "GET", "/api/public/summary")
+    public_summary = request("oxidity.io", nginx_port, "GET", "/api/public/summary")
     assert_true(public_summary["status"] == 200, "public summary should proxy successfully")
 
     partner_summary = request(
-        "mitander.dev",
+        "oxidity.io",
         nginx_port,
         "GET",
         "/api/partner/summary",
@@ -208,7 +208,7 @@ def main():
     )
 
     unauthorized = request(
-        "rpc.mitander.dev",
+        "rpc.oxidity.io",
         nginx_port,
         "POST",
         "/",
@@ -221,19 +221,19 @@ def main():
         "rpc ingress should not emit wildcard CORS headers",
     )
 
-    options = request("rpc.mitander.dev", nginx_port, "OPTIONS", "/")
+    options = request("rpc.oxidity.io", nginx_port, "OPTIONS", "/")
     assert_true(options["status"] == 403, "rpc ingress should reject OPTIONS preflight")
     assert_true(
         "access-control-allow-origin" not in options["headers"],
         "OPTIONS rejection should not emit CORS headers",
     )
 
-    get_root = request("rpc.mitander.dev", nginx_port, "GET", "/")
+    get_root = request("rpc.oxidity.io", nginx_port, "GET", "/")
     assert_true(get_root["status"] == 403, "rpc ingress should reject non-POST root requests")
 
     def rpc_post():
         result = request(
-            "rpc.mitander.dev",
+            "rpc.oxidity.io",
             nginx_port,
             "POST",
             "/",

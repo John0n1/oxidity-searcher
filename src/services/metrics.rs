@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Oxidity <john@oxidity.io>
 
 use crate::core::portfolio::PortfolioManager;
 use crate::core::strategy::StrategyStats;
+use crate::data::db::{Database, OnboardingRequestInput};
+use serde::Deserialize;
 use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -13,7 +15,8 @@ use tokio::sync::Mutex as TokioMutex;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
-const METRICS_MAX_REQUEST_BYTES: usize = 8 * 1024;
+const METRICS_MAX_REQUEST_BYTES: usize = 32 * 1024;
+const METRICS_MAX_BODY_BYTES: usize = 24 * 1024;
 const METRICS_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug)]
@@ -21,6 +24,42 @@ pub struct PublicSummaryPolicy {
     pub retained_bps: u64,
     pub per_tx_gas_cap_eth: f64,
     pub per_day_gas_cap_eth: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OnboardingRequestPayload {
+    name: String,
+    email: String,
+    organization: String,
+    team_type: String,
+    volume_band: String,
+    journey_stage: String,
+    timeline: String,
+    requested_track: String,
+    primary_need: String,
+    recommended_path: String,
+    #[serde(default)]
+    notes: String,
+    source_page: Option<String>,
+    intake_packet: String,
+}
+
+#[derive(Debug)]
+struct ValidatedOnboardingRequest {
+    name: String,
+    email: String,
+    organization: String,
+    team_type: String,
+    volume_band: String,
+    journey_stage: String,
+    timeline: String,
+    requested_track: String,
+    primary_need: String,
+    recommended_path: String,
+    notes: String,
+    source_page: Option<String>,
+    intake_packet: String,
 }
 
 impl Default for PublicSummaryPolicy {
@@ -37,6 +76,7 @@ pub async fn spawn_metrics_server(
     port: u16,
     chain_id: u64,
     shutdown: CancellationToken,
+    db: Database,
     stats: Arc<StrategyStats>,
     portfolio: Arc<PortfolioManager>,
     public_summary_policy: PublicSummaryPolicy,
@@ -105,6 +145,7 @@ pub async fn spawn_metrics_server(
             match accept_result {
                 Ok((socket, _)) => {
                     let shutdown = shutdown.clone();
+                    let db = db.clone();
                     let stats = stats.clone();
                     let portfolio = portfolio.clone();
                     let limiter = limiter.clone();
@@ -114,6 +155,7 @@ pub async fn spawn_metrics_server(
                             socket,
                             chain_id,
                             shutdown,
+                            db,
                             stats,
                             portfolio,
                             public_summary_policy,
@@ -139,6 +181,7 @@ async fn handle_metrics_connection(
     mut socket: TcpStream,
     chain_id: u64,
     shutdown: CancellationToken,
+    db: Database,
     stats: Arc<StrategyStats>,
     portfolio: Arc<PortfolioManager>,
     public_summary_policy: PublicSummaryPolicy,
@@ -149,6 +192,8 @@ async fn handle_metrics_connection(
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 1024];
     let mut too_large = false;
+    let mut malformed_content_length = false;
+    let mut expected_total_bytes: Option<usize> = None;
     loop {
         let n = match timeout(METRICS_READ_TIMEOUT, socket.read(&mut chunk)).await {
             Ok(Ok(n)) => n,
@@ -171,7 +216,36 @@ async fn handle_metrics_connection(
             break;
         }
         buf.extend_from_slice(&chunk[..n]);
-        if header_end_offset(&buf).is_some() {
+        if expected_total_bytes.is_none() {
+            if let Some(header_end) = header_end_offset(&buf) {
+                let req = String::from_utf8_lossy(&buf[..header_end]).to_string();
+                let content_length = match parse_content_length(&req) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        malformed_content_length = true;
+                        break;
+                    }
+                };
+                if content_length > METRICS_MAX_BODY_BYTES {
+                    too_large = true;
+                    break;
+                }
+                let Some(total_bytes) = header_end.checked_add(content_length) else {
+                    too_large = true;
+                    break;
+                };
+                if total_bytes > METRICS_MAX_REQUEST_BYTES {
+                    too_large = true;
+                    break;
+                }
+                expected_total_bytes = Some(total_bytes);
+                if buf.len() >= total_bytes {
+                    break;
+                }
+            }
+        } else if let Some(total_bytes) = expected_total_bytes
+            && buf.len() >= total_bytes
+        {
             break;
         }
     }
@@ -180,6 +254,15 @@ async fn handle_metrics_connection(
             &mut socket,
             "413 Payload Too Large",
             r#"{"status":"error","error":"request too large"}"#,
+        )
+        .await;
+        return;
+    }
+    if malformed_content_length {
+        let _ = write_http_status_json(
+            &mut socket,
+            "400 Bad Request",
+            r#"{"status":"error","error":"invalid content-length"}"#,
         )
         .await;
         return;
@@ -195,6 +278,17 @@ async fn handle_metrics_connection(
         }
         return;
     };
+    let total_bytes = expected_total_bytes.unwrap_or(header_end);
+    if buf.len() < total_bytes {
+        let _ = write_http_status_json(
+            &mut socket,
+            "400 Bad Request",
+            r#"{"status":"error","error":"incomplete request body"}"#,
+        )
+        .await;
+        return;
+    }
+    let body_bytes = &buf[header_end..total_bytes];
 
     let req = String::from_utf8_lossy(&buf[..header_end]).to_string();
     let mut lines = req.lines();
@@ -213,7 +307,16 @@ async fn handle_metrics_connection(
     }
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("");
-    if method != "GET" && method != "HEAD" {
+    let path = parts.next().unwrap_or("/");
+    let path = path.lines().next().unwrap_or("/");
+    let route = path.split('?').next().unwrap_or(path);
+    let allows_post = route == "/onboarding/request";
+    let method_allowed = if allows_post {
+        method == "POST"
+    } else {
+        method == "GET" || method == "HEAD"
+    };
+    if !method_allowed {
         let _ = write_http_status_json(
             &mut socket,
             "405 Method Not Allowed",
@@ -222,12 +325,8 @@ async fn handle_metrics_connection(
         .await;
         return;
     }
-
-    let path = parts.next().unwrap_or("/");
-    let path = path.lines().next().unwrap_or("/");
     let headers: Vec<&str> = lines.take_while(|l| !l.is_empty()).collect();
-    let route = path.split('?').next().unwrap_or(path);
-    let is_public_route = route == "/public/summary";
+    let is_public_route = route == "/public/summary" || route == "/onboarding/request";
     let auth_header = headers.iter().find_map(|l| {
         let (key, val) = l.split_once(':')?;
         if key.eq_ignore_ascii_case("authorization") {
@@ -316,6 +415,112 @@ async fn handle_metrics_connection(
             body
         );
         let _ = socket.write_all(response.as_bytes()).await;
+    } else if route == "/onboarding/request" {
+        let content_type = header_value(&headers, "content-type")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if !content_type.starts_with("application/json") {
+            let _ = write_http_status_json(
+                &mut socket,
+                "415 Unsupported Media Type",
+                r#"{"status":"error","error":"content type must be application/json"}"#,
+            )
+            .await;
+            return;
+        }
+
+        let payload: OnboardingRequestPayload = match serde_json::from_slice(body_bytes) {
+            Ok(value) => value,
+            Err(_) => {
+                let _ = write_http_status_json(
+                    &mut socket,
+                    "400 Bad Request",
+                    r#"{"status":"error","error":"invalid onboarding payload"}"#,
+                )
+                .await;
+                return;
+            }
+        };
+        let validated = match validate_onboarding_request(payload) {
+            Ok(value) => value,
+            Err((field, message)) => {
+                let body = json!({
+                    "status": "error",
+                    "error": "validation_failed",
+                    "field": field,
+                    "message": message,
+                })
+                .to_string();
+                let _ = write_http_response(
+                    &mut socket,
+                    "400 Bad Request",
+                    "application/json",
+                    &[("Cache-Control", "no-store")],
+                    &body,
+                )
+                .await;
+                return;
+            }
+        };
+        let remote_addr = forwarded_remote_addr(&headers)
+            .or_else(|| socket.peer_addr().ok().map(|addr| addr.ip().to_string()));
+        let user_agent = header_value(&headers, "user-agent").map(str::to_string);
+        match db
+            .save_onboarding_request(OnboardingRequestInput {
+                name: &validated.name,
+                email: &validated.email,
+                organization: &validated.organization,
+                team_type: &validated.team_type,
+                volume_band: &validated.volume_band,
+                journey_stage: &validated.journey_stage,
+                timeline: &validated.timeline,
+                requested_track: &validated.requested_track,
+                primary_need: &validated.primary_need,
+                recommended_path: &validated.recommended_path,
+                notes: &validated.notes,
+                source_page: validated.source_page.as_deref(),
+                intake_packet: &validated.intake_packet,
+                remote_addr: remote_addr.as_deref(),
+                user_agent: user_agent.as_deref(),
+            })
+            .await
+        {
+            Ok((request_id, created_at)) => {
+                tracing::info!(
+                    target: "onboarding",
+                    request_id,
+                    email = %validated.email,
+                    organization = %validated.organization,
+                    requested_track = %validated.requested_track,
+                    remote_addr = remote_addr.as_deref().unwrap_or("-"),
+                    "Onboarding request recorded"
+                );
+                let body = json!({
+                    "status": "ok",
+                    "requestId": request_id,
+                    "createdAt": created_at,
+                    "message": "request_recorded",
+                })
+                .to_string();
+                let _ = write_http_response(
+                    &mut socket,
+                    "202 Accepted",
+                    "application/json",
+                    &[("Cache-Control", "no-store")],
+                    &body,
+                )
+                .await;
+            }
+            Err(error) => {
+                tracing::error!(target: "onboarding", error = %error, "Failed to persist onboarding request");
+                let _ = write_http_status_json(
+                    &mut socket,
+                    "500 Internal Server Error",
+                    r#"{"status":"error","error":"request_persistence_failed"}"#,
+                )
+                .await;
+            }
+        }
     } else {
         let _ = write_http_status_json(
             &mut socket,
@@ -331,11 +536,28 @@ async fn write_http_status_json(
     status: &str,
     body: &str,
 ) -> Result<(), std::io::Error> {
-    let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+    write_http_response(socket, status, "application/json", &[], body).await
+}
+
+async fn write_http_response(
+    socket: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    extra_headers: &[(&str, &str)],
+    body: &str,
+) -> Result<(), std::io::Error> {
+    let mut response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n",
         body.len(),
-        body
     );
+    for (header, value) in extra_headers {
+        response.push_str(header);
+        response.push_str(": ");
+        response.push_str(value);
+        response.push_str("\r\n");
+    }
+    response.push_str("\r\n");
+    response.push_str(body);
     socket.write_all(response.as_bytes()).await
 }
 
@@ -344,6 +566,185 @@ fn header_end_offset(buf: &[u8]) -> Option<usize> {
         .position(|w| w == b"\r\n\r\n")
         .map(|idx| idx + 4)
         .or_else(|| buf.windows(2).position(|w| w == b"\n\n").map(|idx| idx + 2))
+}
+
+fn parse_content_length(request_headers: &str) -> Result<usize, ()> {
+    for line in request_headers.lines().skip(1) {
+        if line.trim().is_empty() {
+            break;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        if key.eq_ignore_ascii_case("content-length") {
+            return value.trim().parse::<usize>().map_err(|_| ());
+        }
+    }
+    Ok(0)
+}
+
+fn header_value<'a>(headers: &'a [&'a str], name: &str) -> Option<&'a str> {
+    headers.iter().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        if key.eq_ignore_ascii_case(name) {
+            Some(value.trim())
+        } else {
+            None
+        }
+    })
+}
+
+fn forwarded_remote_addr(headers: &[&str]) -> Option<String> {
+    let forwarded = header_value(headers, "x-forwarded-for")?;
+    forwarded
+        .split(',')
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(|value| value.to_string())
+}
+
+fn validate_onboarding_request(
+    payload: OnboardingRequestPayload,
+) -> Result<ValidatedOnboardingRequest, (&'static str, String)> {
+    let name = validate_required_field("name", payload.name, 120)?;
+    let email = validate_email(payload.email)?;
+    let organization = validate_required_field("organization", payload.organization, 160)?;
+    let team_type = validate_choice(
+        "teamType",
+        payload.team_type,
+        &["wallet", "dapp", "searcher", "infra"],
+    )?;
+    let volume_band = validate_choice(
+        "volumeBand",
+        payload.volume_band,
+        &["under-10k", "10k-100k", "100k-1m", "1m-plus"],
+    )?;
+    let journey_stage = validate_choice(
+        "journeyStage",
+        payload.journey_stage,
+        &["researching", "integrating", "staging", "migrating"],
+    )?;
+    let timeline = validate_choice(
+        "timeline",
+        payload.timeline,
+        &["exploring", "30-days", "this-quarter", "immediate"],
+    )?;
+    let requested_track = validate_choice(
+        "requestedTrack",
+        payload.requested_track,
+        &["docs", "staging", "production", "dashboard"],
+    )?;
+    let primary_need = validate_choice(
+        "primaryNeed",
+        payload.primary_need,
+        &[
+            "protected-routing",
+            "selective-sponsorship",
+            "reporting",
+            "migration",
+        ],
+    )?;
+    let recommended_path =
+        validate_required_field("recommendedPath", payload.recommended_path, 120)?;
+    let notes = validate_optional_field(payload.notes, 4_000)?;
+    let source_page = validate_optional_url_field("sourcePage", payload.source_page, 512)?;
+    let intake_packet = validate_required_field("intakePacket", payload.intake_packet, 8_000)?;
+
+    Ok(ValidatedOnboardingRequest {
+        name,
+        email,
+        organization,
+        team_type,
+        volume_band,
+        journey_stage,
+        timeline,
+        requested_track,
+        primary_need,
+        recommended_path,
+        notes,
+        source_page,
+        intake_packet,
+    })
+}
+
+fn validate_required_field(
+    field: &'static str,
+    value: String,
+    max_len: usize,
+) -> Result<String, (&'static str, String)> {
+    let trimmed = value.trim().to_string();
+    if trimmed.is_empty() {
+        return Err((field, "This field is required.".to_string()));
+    }
+    if trimmed.len() > max_len {
+        return Err((field, format!("Must be {max_len} characters or fewer.")));
+    }
+    Ok(trimmed)
+}
+
+fn validate_optional_field(
+    value: String,
+    max_len: usize,
+) -> Result<String, (&'static str, String)> {
+    let trimmed = value.trim().to_string();
+    if trimmed.len() > max_len {
+        return Err(("notes", format!("Must be {max_len} characters or fewer.")));
+    }
+    Ok(trimmed)
+}
+
+fn validate_optional_url_field(
+    field: &'static str,
+    value: Option<String>,
+    max_len: usize,
+) -> Result<Option<String>, (&'static str, String)> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let trimmed = value.trim().to_string();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.len() > max_len {
+        return Err((field, format!("Must be {max_len} characters or fewer.")));
+    }
+    if !(trimmed.starts_with("https://")
+        || trimmed.starts_with("http://localhost")
+        || trimmed.starts_with("http://127.0.0.1"))
+    {
+        return Err((field, "Must be an allowed absolute URL.".to_string()));
+    }
+    Ok(Some(trimmed))
+}
+
+fn validate_choice(
+    field: &'static str,
+    value: String,
+    allowed: &[&str],
+) -> Result<String, (&'static str, String)> {
+    let trimmed = value.trim().to_string();
+    if allowed.iter().any(|candidate| *candidate == trimmed) {
+        Ok(trimmed)
+    } else {
+        Err((field, "Contains an unsupported value.".to_string()))
+    }
+}
+
+fn validate_email(value: String) -> Result<String, (&'static str, String)> {
+    let trimmed = value.trim().to_lowercase();
+    let Some((local, domain)) = trimmed.split_once('@') else {
+        return Err(("email", "Please provide a valid email address.".to_string()));
+    };
+    if local.is_empty()
+        || domain.is_empty()
+        || domain.starts_with('.')
+        || domain.ends_with('.')
+        || !domain.contains('.')
+        || trimmed.len() > 320
+    {
+        return Err(("email", "Please provide a valid email address.".to_string()));
+    }
+    Ok(trimmed)
 }
 
 fn render_metrics(stats: &Arc<StrategyStats>, portfolio: &Arc<PortfolioManager>) -> String {
@@ -1030,10 +1431,15 @@ mod tests {
     use super::*;
     use crate::core::portfolio::PortfolioManager;
     use crate::core::strategy::{BundleTelemetry, StrategyStats};
+    use crate::data::db::Database;
     use crate::network::provider::HttpProvider;
     use alloy::primitives::Address;
     use tokio::net::TcpStream;
     use url::Url;
+
+    async fn test_db() -> Database {
+        Database::new("sqlite::memory:").await.expect("db")
+    }
 
     #[tokio::test]
     async fn metrics_endpoint_serves() {
@@ -1041,11 +1447,13 @@ mod tests {
         let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
         let stats = Arc::new(StrategyStats::default());
         let shutdown = CancellationToken::new();
+        let db = test_db().await;
 
         let addr = spawn_metrics_server(
             0,
             1,
             shutdown,
+            db,
             stats.clone(),
             portfolio.clone(),
             PublicSummaryPolicy::default(),
@@ -1077,11 +1485,13 @@ mod tests {
         let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
         let stats = Arc::new(StrategyStats::default());
         let shutdown = CancellationToken::new();
+        let db = test_db().await;
 
         let addr = spawn_metrics_server(
             0,
             137,
             shutdown,
+            db,
             stats.clone(),
             portfolio.clone(),
             PublicSummaryPolicy::default(),
@@ -1113,11 +1523,13 @@ mod tests {
         let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
         let stats = Arc::new(StrategyStats::default());
         let shutdown = CancellationToken::new();
+        let db = test_db().await;
 
         let addr = spawn_metrics_server(
             0,
             1,
             shutdown,
+            db,
             stats,
             portfolio,
             PublicSummaryPolicy::default(),
@@ -1191,11 +1603,13 @@ mod tests {
         let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
         let stats = Arc::new(StrategyStats::default());
         let shutdown = CancellationToken::new();
+        let db = test_db().await;
 
         let addr = spawn_metrics_server(
             0,
             1,
             shutdown,
+            db,
             stats.clone(),
             portfolio.clone(),
             PublicSummaryPolicy::default(),
@@ -1239,11 +1653,13 @@ mod tests {
         let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
         let stats = Arc::new(StrategyStats::default());
         let shutdown = CancellationToken::new();
+        let db = test_db().await;
 
         let addr = spawn_metrics_server(
             0,
             1,
             shutdown,
+            db,
             stats,
             portfolio,
             PublicSummaryPolicy::default(),
@@ -1270,11 +1686,13 @@ mod tests {
         let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
         let stats = Arc::new(StrategyStats::default());
         let shutdown = CancellationToken::new();
+        let db = test_db().await;
 
         let addr = spawn_metrics_server(
             0,
             1,
             shutdown,
+            db,
             stats,
             portfolio,
             PublicSummaryPolicy::default(),
@@ -1306,5 +1724,66 @@ mod tests {
         let text = String::from_utf8_lossy(&response);
         assert!(text.starts_with("HTTP/1.1 200 OK"));
         assert!(text.contains("\"chainId\":1"));
+    }
+
+    #[tokio::test]
+    async fn onboarding_request_endpoint_persists_request() {
+        let provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
+        let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
+        let stats = Arc::new(StrategyStats::default());
+        let shutdown = CancellationToken::new();
+        let db = test_db().await;
+
+        let addr = spawn_metrics_server(
+            0,
+            1,
+            shutdown,
+            db.clone(),
+            stats,
+            portfolio,
+            PublicSummaryPolicy::default(),
+            Some("127.0.0.1".to_string()),
+            Some("testtoken".to_string()),
+            false,
+        )
+        .await
+        .expect("bind metrics");
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{}/onboarding/request", addr))
+            .header("Content-Type", "application/json")
+            .header("X-Forwarded-For", "203.0.113.9")
+            .json(&json!({
+                "name": "Alice Example",
+                "email": "alice@example.com",
+                "organization": "Example Org",
+                "teamType": "wallet",
+                "volumeBand": "10k-100k",
+                "journeyStage": "integrating",
+                "timeline": "this-quarter",
+                "requestedTrack": "production",
+                "primaryNeed": "protected-routing",
+                "recommendedPath": "Production onboarding",
+                "notes": "Need protected swaps",
+                "sourcePage": "https://oxidity.io/partners?requested=production",
+                "intakePacket": "Oxidity onboarding request"
+            }))
+            .send()
+            .await
+            .expect("submit onboarding request");
+        assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED);
+        let body = resp.text().await.expect("read response body");
+        assert!(body.contains("\"requestId\""));
+
+        let requests = db
+            .recent_onboarding_requests(5)
+            .await
+            .expect("load onboarding requests");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].email, "alice@example.com");
+        assert_eq!(requests[0].remote_addr.as_deref(), Some("203.0.113.9"));
     }
 }

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
 use crate::core::strategy::StrategyWork;
 use std::collections::VecDeque;

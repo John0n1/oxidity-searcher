@@ -14,7 +14,7 @@ rpc_upstream="$4"
 mkdir -p "$(dirname "$output")"
 
 sed \
-  -e "s/__MITANDER_HTTP_PORT__/${listen_port}/g" \
+  -e "s/__OXIDITY_HTTP_PORT__/${listen_port}/g" \
   -e "s#__PUBLIC_METRICS_UPSTREAM__#${metrics_upstream}#g" \
   -e "s#__RPC_UPSTREAM__#${rpc_upstream}#g" \
-  deploy/nginx/mitander.dev.conf.template > "$output"
+  deploy/nginx/oxidity.io.conf.template > "$output"

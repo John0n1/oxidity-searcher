@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
 use crate::common::error::AppError;
 use crate::domain::constants::{FLASHBOTS_MAX_BYTES, FLASHBOTS_MAX_TXS};

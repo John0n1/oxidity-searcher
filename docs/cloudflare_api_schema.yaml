@@ -1,14 +1,14 @@
 openapi: 3.0.3
 info:
-  title: Mitander Public RPC and Summary API
+  title: Oxidity Public RPC and Summary API
   version: "1.0.0"
   description: >
     Schema for Cloudflare API Shield request validation across the public RPC gateway
     and dashboard summary API endpoints.
 
 servers:
-  - url: https://rpc.mitander.dev
-  - url: https://mitander.dev
+  - url: https://rpc.oxidity.io
+  - url: https://oxidity.io
 
 paths:
   /:
@@ -16,7 +16,7 @@ paths:
       summary: Authenticated JSON-RPC ingress
       operationId: publicRpcPost
       servers:
-        - url: https://rpc.mitander.dev
+        - url: https://rpc.oxidity.io
       security:
         - rpcBearer: []
       requestBody:
@@ -77,7 +77,7 @@ paths:
       summary: RPC ingress health
       operationId: publicRpcHealth
       servers:
-        - url: https://rpc.mitander.dev
+        - url: https://rpc.oxidity.io
       responses:
         "200":
           description: Health status
@@ -91,7 +91,7 @@ paths:
       summary: Public dashboard summary
       operationId: publicSummary
       servers:
-        - url: https://mitander.dev
+        - url: https://oxidity.io
       responses:
         "200":
           description: Redacted public execution summary
@@ -105,7 +105,7 @@ paths:
       summary: Partner dashboard summary
       operationId: partnerSummary
       servers:
-        - url: https://mitander.dev
+        - url: https://oxidity.io
       security:
         - partnerBearer: []
       responses:

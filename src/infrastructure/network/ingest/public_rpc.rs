@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
 use crate::core::executor::SharedBundleSender;
 use crate::core::strategy::{BundleTelemetry, StrategyStats};

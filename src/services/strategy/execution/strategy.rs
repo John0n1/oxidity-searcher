@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
 use crate::app::logging::{
     ansi_tables_enabled, format_framed_table, format_framed_table_with_blue_title,

@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+
+# Dashboard is auth-gated and should not be indexed
+Disallow: /dashboard
+
+Sitemap: https://oxidity.io/sitemap.xml

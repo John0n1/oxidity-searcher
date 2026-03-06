@@ -2,9 +2,9 @@
 name = "oxidity-searcher"
 version = "0.1.1-delta"
 edition = "2024"
-authors = ["https://mitander.dev | John Hauger Mitander"]
+authors = ["https://oxidity.io | John Hauger Oxidity"]
 description = "Oxidity Searcher is a MEV-Searcher on The Ethereum Mainnet chain"
-homepage = "https://searcher.mitander.dev/"
+homepage = "https://oxidity.io/"
 repository = "https://github.com/John0n1/oxidity-searcher"
 readme = "README.md"
 license = "MIT"

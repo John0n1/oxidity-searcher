@@ -1,0 +1,21 @@
+{
+  "name": "Oxidity",
+  "short_name": "Oxidity",
+  "description": "Private Ethereum execution with protected orderflow, selective sponsorship, and accountable settlement.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f6fbff",
+  "theme_color": "#f6fbff",
+  "icons": [
+    {
+      "src": "/favicon.png",
+      "sizes": "128x128",
+      "type": "image/png"
+    },
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

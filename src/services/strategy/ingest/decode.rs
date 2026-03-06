@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
 use alloy::consensus::Transaction as ConsensusTxTrait;
 use alloy::primitives::{Address, Bytes, TxKind, U256, aliases::U24};

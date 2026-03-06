@@ -1,18 +1,14 @@
 [Unit]
-Description=cloudflared tunnel for mitander.dev origins
+Description=cloudflared tunnel for oxidity.io origins
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=notify
 TimeoutStartSec=30
-DynamicUser=yes
-StateDirectory=cloudflared
-RuntimeDirectory=cloudflared
-LogsDirectory=cloudflared
 UMask=0077
 EnvironmentFile=/etc/cloudflared/cloudflared.env
-ExecStart=/usr/bin/cloudflared --no-autoupdate --metrics ${CLOUDFLARED_METRICS_ADDR} tunnel run --token-file ${CLOUDFLARED_TOKEN_FILE}
+ExecStart=/usr/bin/cloudflared --no-autoupdate --metrics ${CLOUDFLARED_METRICS_ADDR} tunnel run --token ${CLOUDFLARED_TUNNEL_TOKEN}
 Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=yes

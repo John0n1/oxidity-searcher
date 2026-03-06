@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@mitander.dev>
+// SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
 use crate::common::constants::default_balancer_vault_for_chain;
 use crate::common::error::AppError;
@@ -903,6 +903,7 @@ impl Engine {
             self.metrics_port,
             self.chain_id,
             shutdown.clone(),
+            self.db.clone(),
             stats.clone(),
             self.portfolio.clone(),
             crate::common::metrics::PublicSummaryPolicy {
