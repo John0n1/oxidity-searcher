@@ -108,6 +108,19 @@ struct RouterClassification {
     note: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RouterReviewClassification {
+    pub kind: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RouterReviewEntry {
+    pub address: String,
+    pub seen_count: u64,
+    pub classification: Option<RouterReviewClassification>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct RouterDiscoveryCache {
     version: u32,
@@ -257,6 +270,59 @@ impl RouterDiscovery {
                 discovery.check_and_allow(router).await;
             });
         }
+    }
+
+    pub async fn review_top_unknown_routers(
+        &self,
+        limit: usize,
+        lookback_blocks: u64,
+    ) -> Result<Vec<RouterReviewEntry>, AppError> {
+        let candidates = self
+            .db
+            .top_unknown_routers(self.chain_id, limit.max(1) as u64)
+            .await?;
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let candidate_hex: HashSet<String> = candidates
+            .iter()
+            .map(|(addr, _)| format!("{addr:#x}").to_ascii_lowercase())
+            .collect();
+        let observed = self
+            .collect_recent_selectors(&candidate_hex, lookback_blocks.max(1))
+            .await
+            .unwrap_or_default();
+
+        let mut out = Vec::with_capacity(candidates.len());
+        for (router, seen_count) in candidates {
+            let key = format!("{router:#x}").to_ascii_lowercase();
+            let classification = if let Some(selector_counts) = observed.get(&key) {
+                let bytecode = self.fetch_router_bytecode(router).await.unwrap_or_default();
+                self.classify_selector_profile(
+                    selector_counts,
+                    &bytecode,
+                    self.min_hits.max(2),
+                    "manual_review",
+                )
+                .map(|classified| RouterReviewClassification {
+                    kind: match classified.kind {
+                        RouterKind::V2Like => "v2".to_string(),
+                        RouterKind::V3Like => "v3".to_string(),
+                    },
+                    note: classified.note,
+                })
+            } else {
+                None
+            };
+
+            out.push(RouterReviewEntry {
+                address: key,
+                seen_count,
+                classification,
+            });
+        }
+        Ok(out)
     }
 
     pub fn spawn_bootstrap_top_unknown(&self, limit: usize, lookback_blocks: u64) {

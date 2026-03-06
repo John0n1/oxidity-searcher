@@ -140,6 +140,8 @@ pub fn classify_allowlist_entry(name: &str) -> AllowlistCategory {
         || lower.contains("quoter")
         || lower.contains("approval_proxy")
         || lower.contains("addresses_provider")
+        || lower.contains("seadrop")
+        || lower.contains("depository")
         || lower.contains("factory")
         || lower.contains("solo")
         || lower.contains("flash_lender")
@@ -238,6 +240,7 @@ pub struct StrategyRuntimeSettings {
     pub atomic_arb_max_attempts: usize,
     pub atomic_arb_seed_wei: U256,
     pub flashloan_allow_nonflash_fallback: bool,
+    pub inventory_public_exit_fallback_enabled: bool,
 }
 
 impl Default for StrategyRuntimeSettings {
@@ -291,6 +294,7 @@ impl Default for StrategyRuntimeSettings {
             atomic_arb_max_attempts: 2,
             atomic_arb_seed_wei: U256::from(3_000_000_000_000_000u128),
             flashloan_allow_nonflash_fallback: false,
+            inventory_public_exit_fallback_enabled: false,
         }
     }
 }
@@ -729,6 +733,10 @@ impl StrategyExecutor {
 
     pub(in crate::services::strategy) fn router_risk_hard_block(&self) -> bool {
         self.runtime.router_risk_hard_block
+    }
+
+    pub(in crate::services::strategy) fn inventory_public_exit_fallback_enabled(&self) -> bool {
+        self.runtime.inventory_public_exit_fallback_enabled
     }
 
     pub(in crate::services::strategy) fn sandwich_risk_max_victim_slippage_bps(&self) -> u64 {
@@ -1899,6 +1907,22 @@ mod tests {
             .expect("decode");
         assert_eq!(decoded.path.len(), 2);
         assert_eq!(decoded.min_out, U256::from(5u64));
+    }
+
+    #[test]
+    fn classifies_known_non_router_entries_as_infra() {
+        assert_eq!(
+            classify_allowlist_entry("MULTICALL3"),
+            AllowlistCategory::Infra
+        );
+        assert_eq!(
+            classify_allowlist_entry("SEADROP"),
+            AllowlistCategory::Infra
+        );
+        assert_eq!(
+            classify_allowlist_entry("RELAY_DEPOSITORY"),
+            AllowlistCategory::Infra
+        );
     }
 
     #[test]

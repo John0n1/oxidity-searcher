@@ -1,0 +1,134 @@
+server {
+    listen __MITANDER_HTTP_PORT__;
+    listen [::]:__MITANDER_HTTP_PORT__;
+    server_name www.mitander.dev;
+
+    return 301 https://mitander.dev$request_uri;
+}
+
+server {
+    listen __MITANDER_HTTP_PORT__;
+    listen [::]:__MITANDER_HTTP_PORT__;
+    server_name mitander.dev;
+
+    root /var/www/mitander.dev;
+    index index.html;
+    client_max_body_size 512k;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header X-Permitted-Cross-Domain-Policies "none" always;
+    add_header Permissions-Policy "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), usb=(), fullscreen=(self)" always;
+    add_header Cross-Origin-Opener-Policy "same-origin" always;
+    add_header Cross-Origin-Embedder-Policy "unsafe-none" always;
+    add_header Cross-Origin-Resource-Policy "same-origin" always;
+    add_header Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; connect-src 'self' https://mitander.dev https://rpc.mitander.dev; img-src 'self' data: https:; font-src 'self' https://fonts.gstatic.com data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self' 'unsafe-inline'; upgrade-insecure-requests" always;
+
+    location = /api/public/summary {
+        limit_req zone=summary_per_ip burst=20 nodelay;
+        proxy_pass http://__PUBLIC_METRICS_UPSTREAM__/public/summary;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 10s;
+        proxy_send_timeout 10s;
+        proxy_next_upstream off;
+    }
+
+    location = /api/partner/summary {
+        limit_req zone=summary_per_ip burst=10 nodelay;
+        proxy_pass http://__PUBLIC_METRICS_UPSTREAM__/partner/summary;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 10s;
+        proxy_send_timeout 10s;
+        proxy_next_upstream off;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location ~* \.(?:css|js|mjs|map|ico|png|jpg|jpeg|gif|svg|webp|woff2?)$ {
+        expires 7d;
+        add_header Cache-Control "public, max-age=604800, immutable" always;
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+        add_header X-Frame-Options "DENY" always;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header X-Permitted-Cross-Domain-Policies "none" always;
+        add_header Permissions-Policy "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), usb=(), fullscreen=(self)" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Embedder-Policy "unsafe-none" always;
+        add_header Cross-Origin-Resource-Policy "same-origin" always;
+        add_header Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; connect-src 'self' https://mitander.dev https://rpc.mitander.dev; img-src 'self' data: https:; font-src 'self' https://fonts.gstatic.com data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self' 'unsafe-inline'; upgrade-insecure-requests" always;
+        try_files $uri =404;
+    }
+}
+
+server {
+    listen __MITANDER_HTTP_PORT__;
+    listen [::]:__MITANDER_HTTP_PORT__;
+    server_name rpc.mitander.dev;
+
+    client_max_body_size 512k;
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-Permitted-Cross-Domain-Policies "none" always;
+    add_header Permissions-Policy "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), usb=(), fullscreen=()" always;
+    add_header Cross-Origin-Opener-Policy "same-origin" always;
+    add_header Cross-Origin-Embedder-Policy "unsafe-none" always;
+    add_header Cross-Origin-Resource-Policy "same-origin" always;
+    add_header Content-Security-Policy "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'" always;
+
+    location = /health {
+        include includes/rpc_allowlist.conf;
+        limit_except GET HEAD {
+            deny all;
+        }
+        proxy_pass http://__RPC_UPSTREAM__/health;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 10s;
+        proxy_send_timeout 10s;
+    }
+
+    location = / {
+        include includes/rpc_allowlist.conf;
+        limit_req zone=rpc_per_ip burst=15 nodelay;
+        limit_except POST {
+            deny all;
+        }
+        proxy_pass http://__RPC_UPSTREAM__;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 3s;
+        proxy_read_timeout 15s;
+        proxy_send_timeout 15s;
+    }
+
+    location / {
+        return 404;
+    }
+}

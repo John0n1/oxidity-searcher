@@ -198,9 +198,11 @@ How each section is used:
 
 Current snapshot size (repository state now):
 
-- `tokenlist`: 685 entries
+<!-- BEGIN:global_data_counts -->
+- `tokenlist`: 674 entries
 - `pairs`: 476 entries
-- `executor_abi`: 43 ABI items
+- `executor_abi`: 82 ABI items
+<!-- END:global_data_counts -->
 
 Chain 1 address registry includes major routers and infra (examples): Uniswap V2/V3/Universal, 1inch variants, ParaSwap, Kyber, 0x, Relay routers, Balancer vault, Aave pool, and discovered router entries.
 

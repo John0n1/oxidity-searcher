@@ -1,0 +1,36 @@
+[Unit]
+Description=cloudflared tunnel for mitander.dev origins
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+TimeoutStartSec=30
+DynamicUser=yes
+StateDirectory=cloudflared
+RuntimeDirectory=cloudflared
+LogsDirectory=cloudflared
+UMask=0077
+EnvironmentFile=/etc/cloudflared/cloudflared.env
+ExecStart=/usr/bin/cloudflared --no-autoupdate --metrics ${CLOUDFLARED_METRICS_ADDR} tunnel run --token-file ${CLOUDFLARED_TOKEN_FILE}
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/cloudflared
+
+[Install]
+WantedBy=multi-user.target

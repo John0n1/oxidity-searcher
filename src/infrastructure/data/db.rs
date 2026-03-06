@@ -6,8 +6,10 @@ use crate::data::schema::TransactionRecord;
 use alloy::primitives::Address;
 use sqlx::{
     Pool, Row, Sqlite,
+    migrate::Migrator,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
+use std::path::Path;
 use std::str::FromStr;
 
 fn to_i64(value: u64, label: &str) -> Result<i64, AppError> {
@@ -35,7 +37,9 @@ impl Database {
             .await
             .map_err(|e| AppError::Initialization(format!("DB Connect failed: {}", e)))?;
 
-        sqlx::migrate!("./migrations")
+        Migrator::new(Path::new("./migrations"))
+            .await
+            .map_err(|e| AppError::Initialization(format!("DB Migrator init failed: {}", e)))?
             .run(&pool)
             .await
             .map_err(|e| AppError::Initialization(format!("DB Migration failed: {}", e)))?;
@@ -330,15 +334,21 @@ impl Database {
         Ok(())
     }
 
-    pub async fn approved_routers(&self, chain_id: u64) -> Result<Vec<Address>, AppError> {
+    async fn router_addresses_by_status(
+        &self,
+        chain_id: u64,
+        status: &str,
+    ) -> Result<Vec<Address>, AppError> {
         let chain_id_i64 = to_i64(chain_id, "router_discovery.chain_id")?;
-        let rows = sqlx::query(
-            "SELECT address FROM router_discovery WHERE chain_id = ? AND status = 'approved'",
-        )
-        .bind(chain_id_i64)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| AppError::Initialization(format!("Router discovery load failed: {}", e)))?;
+        let rows =
+            sqlx::query("SELECT address FROM router_discovery WHERE chain_id = ? AND status = ?")
+                .bind(chain_id_i64)
+                .bind(status)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| {
+                    AppError::Initialization(format!("Router discovery load failed: {}", e))
+                })?;
 
         let mut out = Vec::new();
         for row in rows {
@@ -349,11 +359,20 @@ impl Database {
                 tracing::warn!(
                     target: "router_discovery",
                     address = %addr_str,
+                    status,
                     "Invalid router address stored"
                 );
             }
         }
         Ok(out)
+    }
+
+    pub async fn approved_routers(&self, chain_id: u64) -> Result<Vec<Address>, AppError> {
+        self.router_addresses_by_status(chain_id, "approved").await
+    }
+
+    pub async fn ignored_routers(&self, chain_id: u64) -> Result<Vec<Address>, AppError> {
+        self.router_addresses_by_status(chain_id, "ignored").await
     }
 
     pub async fn top_unknown_routers(
@@ -368,7 +387,7 @@ impl Database {
             SELECT address, seen_count
             FROM router_discovery
             WHERE chain_id = ?
-              AND COALESCE(status, '') != 'approved'
+              AND COALESCE(status, '') NOT IN ('approved', 'ignored')
             ORDER BY seen_count DESC
             LIMIT ?
             "#,
@@ -474,6 +493,39 @@ mod tests {
             .expect_err("u64::MAX block_number should fail conversion");
         let msg = format!("{err}");
         assert!(msg.contains("conversion failed"));
+    }
+
+    #[tokio::test]
+    async fn top_unknown_routers_excludes_resolved_statuses() {
+        let db = Database::new("sqlite::memory:").await.expect("db");
+        let unresolved = "0x00000000000000000000000000000000000000aa";
+        let approved = "0x00000000000000000000000000000000000000bb";
+        let ignored = "0x00000000000000000000000000000000000000cc";
+
+        db.record_router_observation(1, unresolved, "test", "unknown_router", 15)
+            .await
+            .expect("insert unresolved");
+        db.record_router_observation(1, approved, "test", "unknown_router", 20)
+            .await
+            .expect("insert approved");
+        db.record_router_observation(1, ignored, "test", "unknown_router", 25)
+            .await
+            .expect("insert ignored");
+
+        db.set_router_status(1, approved, "approved", Some("v2"), Some("approved"))
+            .await
+            .expect("approve router");
+        db.set_router_status(1, ignored, "ignored", None, Some("ignored"))
+            .await
+            .expect("ignore router");
+
+        let top = db
+            .top_unknown_routers(1, 10)
+            .await
+            .expect("load unresolved");
+        assert_eq!(top.len(), 1);
+        assert_eq!(format!("{:#x}", top[0].0), unresolved);
+        assert_eq!(top[0].1, 15);
     }
 }
 

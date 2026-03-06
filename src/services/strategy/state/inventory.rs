@@ -100,17 +100,30 @@ impl StrategyExecutor {
         Ok(())
     }
 
-    async fn send_inventory_bundle_with_public_fallback(&self, raw_tx: &Vec<u8>, stage: &str) {
+    async fn send_inventory_bundle_with_optional_public_fallback(
+        &self,
+        raw_tx: &[u8],
+        stage: &str,
+    ) {
         if let Err(e) = self
             .bundle_sender
-            .send_bundle(std::slice::from_ref(raw_tx), self.chain_id)
+            .send_bundle(&[raw_tx.to_vec()], self.chain_id)
             .await
         {
+            if !self.inventory_public_exit_fallback_enabled() {
+                tracing::error!(
+                    target: "inventory",
+                    stage,
+                    error = %e,
+                    "Bundle submit failed for inventory tx; public fallback is disabled"
+                );
+                return;
+            }
             tracing::warn!(
                 target: "inventory",
                 stage,
                 error = %e,
-                "Bundle submit failed for inventory tx; falling back to public send"
+                "Bundle submit failed for inventory tx; manual public fallback enabled"
             );
             if let Err(public_err) = self.bundle_sender.send_public_tx(raw_tx).await {
                 tracing::warn!(
@@ -209,7 +222,7 @@ impl StrategyExecutor {
                     nonce,
                 )
                 .await?;
-            self.send_inventory_bundle_with_public_fallback(&approval.raw, "approval")
+            self.send_inventory_bundle_with_optional_public_fallback(&approval.raw, "approval")
                 .await;
         }
 
@@ -244,7 +257,7 @@ impl StrategyExecutor {
             )
             .await;
         let (raw, _, _) = self.sign_with_access_list(request, access_list).await?;
-        self.send_inventory_bundle_with_public_fallback(&raw, "swap")
+        self.send_inventory_bundle_with_optional_public_fallback(&raw, "swap")
             .await;
 
         Ok(())

@@ -1,0 +1,14 @@
+[profile.default]
+src = "data"
+test = "test"
+out = "out"
+libs = ["lib"]
+solc_version = "0.8.34"
+optimizer = true
+optimizer_runs = 200
+fs_permissions = [{ access = "read", path = "./data" }]
+
+[invariant]
+runs = 64
+depth = 32
+fail_on_revert = true

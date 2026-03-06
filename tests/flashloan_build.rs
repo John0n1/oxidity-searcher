@@ -24,6 +24,41 @@ fn rpc_access_list_unsupported(msg: &str) -> bool {
         || normalized.contains("eip2930")
 }
 
+fn env_var(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn staging_rpc_url() -> Option<Url> {
+    let raw = match env_var("OXIDITY_STAGING_MAINNET_RPC_URL") {
+        Some(value) => value,
+        None => {
+            eprintln!("skip: set OXIDITY_STAGING_MAINNET_RPC_URL for ignored staging smoke tests");
+            return None;
+        }
+    };
+    match Url::parse(&raw) {
+        Ok(url) => Some(url),
+        Err(err) => {
+            eprintln!("skip: invalid OXIDITY_STAGING_MAINNET_RPC_URL: {err}");
+            None
+        }
+    }
+}
+
+fn staging_address(key: &str, default: &str) -> Option<Address> {
+    let raw = env_var(key).unwrap_or_else(|| default.to_string());
+    match raw.parse() {
+        Ok(address) => Some(address),
+        Err(err) => {
+            eprintln!("skip: invalid {key}: {err}");
+            None
+        }
+    }
+}
+
 async fn build_flashloan_executor(
     executor_addr: Address,
     flashloan_providers: Vec<FlashloanProvider>,
@@ -179,13 +214,22 @@ async fn flashloan_builder_uses_aave_selector() {
 #[tokio::test]
 #[ignore]
 async fn live_executor_flashloan_smoke_mainnet() {
-    let http = HttpProvider::new_http(Url::parse("http://127.0.0.1:8545").expect("rpc url"));
-    let owner: Address = "0x3Fe744D63be96C0081960D5d191F1f3BFE3a3bd8"
-        .parse()
-        .expect("owner");
-    let executor: Address = "0x019223bd084590c474fecdd45779b202b20c2b98"
-        .parse()
-        .expect("executor");
+    let Some(rpc_url) = staging_rpc_url() else {
+        return;
+    };
+    let Some(owner) = staging_address(
+        "OXIDITY_STAGING_EXECUTOR_OWNER",
+        "0x3Fe744D63be96C0081960D5d191F1f3BFE3a3bd8",
+    ) else {
+        return;
+    };
+    let Some(executor) = staging_address(
+        "OXIDITY_STAGING_EXECUTOR_ADDRESS",
+        "0x019223bd084590c474fecdd45779b202b20c2b98",
+    ) else {
+        return;
+    };
+    let http = HttpProvider::new_http(rpc_url);
     let weth = wrapped_native_for_chain(CHAIN_ETHEREUM);
 
     let callback = FlashCallbackData {
@@ -232,16 +276,28 @@ async fn live_executor_flashloan_smoke_mainnet() {
 #[tokio::test]
 #[ignore]
 async fn live_executor_aave_smoke_mainnet() {
-    let http = HttpProvider::new_http(Url::parse("http://127.0.0.1:8545").expect("rpc url"));
-    let owner: Address = "0x3Fe744D63be96C0081960D5d191F1f3BFE3a3bd8"
-        .parse()
-        .expect("owner");
-    let executor: Address = "0x019223bd084590c474fecdd45779b202b20c2b98"
-        .parse()
-        .expect("executor");
-    let aave_pool: Address = "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2"
-        .parse()
-        .expect("aave pool");
+    let Some(rpc_url) = staging_rpc_url() else {
+        return;
+    };
+    let Some(owner) = staging_address(
+        "OXIDITY_STAGING_EXECUTOR_OWNER",
+        "0x3Fe744D63be96C0081960D5d191F1f3BFE3a3bd8",
+    ) else {
+        return;
+    };
+    let Some(executor) = staging_address(
+        "OXIDITY_STAGING_EXECUTOR_ADDRESS",
+        "0x019223bd084590c474fecdd45779b202b20c2b98",
+    ) else {
+        return;
+    };
+    let Some(aave_pool) = staging_address(
+        "OXIDITY_STAGING_AAVE_POOL",
+        "0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2",
+    ) else {
+        return;
+    };
+    let http = HttpProvider::new_http(rpc_url);
     let weth = wrapped_native_for_chain(CHAIN_ETHEREUM);
 
     let callback = FlashCallbackData {

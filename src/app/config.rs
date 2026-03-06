@@ -100,6 +100,20 @@ pub struct GlobalSettings {
     #[serde(default = "default_public_rpc_ingress_port")]
     pub public_rpc_ingress_port: u16,
     pub public_rpc_ingress_bind: Option<String>,
+    pub public_rpc_ingress_auth_token: Option<String>,
+    pub public_rpc_ingress_allowed_cidrs: Option<String>,
+    #[serde(default = "default_public_rpc_ingress_max_concurrent")]
+    pub public_rpc_ingress_max_concurrent: usize,
+    #[serde(default = "default_public_rpc_ingress_requests_per_minute")]
+    pub public_rpc_ingress_requests_per_minute: u32,
+    #[serde(default = "default_public_rpc_ingress_send_raw_per_minute")]
+    pub public_rpc_ingress_send_raw_per_minute: u32,
+    #[serde(default = "default_public_rpc_ingress_eth_call_per_minute")]
+    pub public_rpc_ingress_eth_call_per_minute: u32,
+    #[serde(default = "default_public_rpc_ingress_eth_estimate_gas_per_minute")]
+    pub public_rpc_ingress_eth_estimate_gas_per_minute: u32,
+    #[serde(default = "default_public_rpc_ingress_eth_get_logs_per_minute")]
+    pub public_rpc_ingress_eth_get_logs_per_minute: u32,
     #[serde(default = "default_true")]
     pub sponsorship_enabled: bool,
     #[serde(default = "default_sponsorship_retained_bps")]
@@ -261,6 +275,8 @@ pub struct GlobalSettings {
     pub atomic_arb_seed_wei: u128,
     #[serde(default)]
     pub flashloan_allow_nonflash_fallback: bool,
+    #[serde(default = "default_false")]
+    pub inventory_public_exit_fallback_enabled: bool,
 
     // Router discovery
     #[serde(default = "default_router_discovery_enabled")]
@@ -323,6 +339,24 @@ fn default_metrics_port() -> u16 {
 }
 fn default_public_rpc_ingress_port() -> u16 {
     9545
+}
+fn default_public_rpc_ingress_max_concurrent() -> usize {
+    64
+}
+fn default_public_rpc_ingress_requests_per_minute() -> u32 {
+    240
+}
+fn default_public_rpc_ingress_send_raw_per_minute() -> u32 {
+    12
+}
+fn default_public_rpc_ingress_eth_call_per_minute() -> u32 {
+    120
+}
+fn default_public_rpc_ingress_eth_estimate_gas_per_minute() -> u32 {
+    60
+}
+fn default_public_rpc_ingress_eth_get_logs_per_minute() -> u32 {
+    30
 }
 fn default_log_level() -> String {
     "info".to_string()
@@ -702,6 +736,14 @@ fn is_passthrough_env_key(key: &str) -> bool {
         "PUBLIC_RPC_INGRESS_ENABLED",
         "PUBLIC_RPC_INGRESS_PORT",
         "PUBLIC_RPC_INGRESS_BIND",
+        "PUBLIC_RPC_INGRESS_AUTH_TOKEN",
+        "PUBLIC_RPC_INGRESS_ALLOWED_CIDRS",
+        "PUBLIC_RPC_INGRESS_MAX_CONCURRENT",
+        "PUBLIC_RPC_INGRESS_REQUESTS_PER_MINUTE",
+        "PUBLIC_RPC_INGRESS_SEND_RAW_PER_MINUTE",
+        "PUBLIC_RPC_INGRESS_ETH_CALL_PER_MINUTE",
+        "PUBLIC_RPC_INGRESS_ETH_ESTIMATE_GAS_PER_MINUTE",
+        "PUBLIC_RPC_INGRESS_ETH_GET_LOGS_PER_MINUTE",
         "SPONSORSHIP_ENABLED",
         "SPONSORSHIP_RETAINED_BPS",
         "SPONSORSHIP_PER_TX_GAS_CAP_ETH",
@@ -774,6 +816,7 @@ fn is_passthrough_env_key(key: &str) -> bool {
         "ATOMIC_ARB_MAX_CANDIDATES",
         "ATOMIC_ARB_MAX_ATTEMPTS",
         "ATOMIC_ARB_SEED_WEI",
+        "INVENTORY_PUBLIC_EXIT_FALLBACK_ENABLED",
         "FEED_AUDIT_MAX_LAG_BLOCKS",
         "FEED_AUDIT_RECHECK_SECS",
         "FEED_AUDIT_PUBLIC_RPC_URL",
@@ -899,6 +942,7 @@ fn redact_effective_config(value: &mut Value) {
         "wallet_key",
         "bundle_signer_key",
         "metrics_token",
+        "public_rpc_ingress_auth_token",
         "binance_api_key",
         "coinmarketcap_api_key",
         "coingecko_api_key",
@@ -1363,6 +1407,58 @@ impl GlobalSettings {
             .filter(|s| !s.is_empty())
     }
 
+    pub fn public_rpc_ingress_auth_token_value(&self) -> Option<String> {
+        self.public_rpc_ingress_auth_token
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    pub fn public_rpc_ingress_allowed_cidrs_value(&self) -> Vec<String> {
+        let raw = self
+            .public_rpc_ingress_allowed_cidrs
+            .as_deref()
+            .unwrap_or("127.0.0.0/8,::1/128");
+        let parsed: Vec<String> = raw
+            .split([',', ' ', '\n', '\t'])
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+        if parsed.is_empty() {
+            vec!["127.0.0.0/8".to_string(), "::1/128".to_string()]
+        } else {
+            parsed
+        }
+    }
+
+    pub fn public_rpc_ingress_max_concurrent_value(&self) -> usize {
+        self.public_rpc_ingress_max_concurrent.clamp(1, 2_048)
+    }
+
+    pub fn public_rpc_ingress_requests_per_minute_value(&self) -> u32 {
+        self.public_rpc_ingress_requests_per_minute
+            .clamp(10, 60_000)
+    }
+
+    pub fn public_rpc_ingress_send_raw_per_minute_value(&self) -> u32 {
+        self.public_rpc_ingress_send_raw_per_minute.clamp(1, 10_000)
+    }
+
+    pub fn public_rpc_ingress_eth_call_per_minute_value(&self) -> u32 {
+        self.public_rpc_ingress_eth_call_per_minute.clamp(1, 10_000)
+    }
+
+    pub fn public_rpc_ingress_eth_estimate_gas_per_minute_value(&self) -> u32 {
+        self.public_rpc_ingress_eth_estimate_gas_per_minute
+            .clamp(1, 10_000)
+    }
+
+    pub fn public_rpc_ingress_eth_get_logs_per_minute_value(&self) -> u32 {
+        self.public_rpc_ingress_eth_get_logs_per_minute
+            .clamp(1, 10_000)
+    }
+
     pub fn sponsorship_enabled_value(&self) -> bool {
         self.sponsorship_enabled
     }
@@ -1786,6 +1882,7 @@ impl GlobalSettings {
             atomic_arb_max_attempts: self.atomic_arb_max_attempts.clamp(1, 8),
             atomic_arb_seed_wei: U256::from(self.atomic_arb_seed_wei),
             flashloan_allow_nonflash_fallback: self.flashloan_allow_nonflash_fallback,
+            inventory_public_exit_fallback_enabled: self.inventory_public_exit_fallback_enabled,
         }
     }
 
@@ -2201,6 +2298,19 @@ mod tests {
             public_rpc_ingress_enabled: default_false(),
             public_rpc_ingress_port: default_public_rpc_ingress_port(),
             public_rpc_ingress_bind: None,
+            public_rpc_ingress_auth_token: None,
+            public_rpc_ingress_allowed_cidrs: None,
+            public_rpc_ingress_max_concurrent: default_public_rpc_ingress_max_concurrent(),
+            public_rpc_ingress_requests_per_minute: default_public_rpc_ingress_requests_per_minute(
+            ),
+            public_rpc_ingress_send_raw_per_minute: default_public_rpc_ingress_send_raw_per_minute(
+            ),
+            public_rpc_ingress_eth_call_per_minute: default_public_rpc_ingress_eth_call_per_minute(
+            ),
+            public_rpc_ingress_eth_estimate_gas_per_minute:
+                default_public_rpc_ingress_eth_estimate_gas_per_minute(),
+            public_rpc_ingress_eth_get_logs_per_minute:
+                default_public_rpc_ingress_eth_get_logs_per_minute(),
             sponsorship_enabled: default_true(),
             sponsorship_retained_bps: default_sponsorship_retained_bps(),
             sponsorship_per_tx_gas_cap_eth: default_sponsorship_per_tx_gas_cap_eth(),
@@ -2283,6 +2393,7 @@ mod tests {
             atomic_arb_max_attempts: default_atomic_arb_max_attempts(),
             atomic_arb_seed_wei: default_atomic_arb_seed_wei(),
             flashloan_allow_nonflash_fallback: false,
+            inventory_public_exit_fallback_enabled: default_false(),
             router_discovery_enabled: default_router_discovery_enabled(),
             router_discovery_min_hits: default_router_discovery_min_hits(),
             router_discovery_flush_every: default_router_discovery_flush_every(),

@@ -759,7 +759,8 @@ impl StrategyExecutor {
                 if from == signer {
                     return acc;
                 }
-                let to_signer = matches!(req.to.as_ref(), Some(TxKind::Call(addr)) if *addr == signer);
+                let to_signer =
+                    matches!(req.to.as_ref(), Some(TxKind::Call(addr)) if *addr == signer);
                 if !to_signer {
                     return acc;
                 }

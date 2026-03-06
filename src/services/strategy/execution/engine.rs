@@ -15,7 +15,7 @@ use crate::infrastructure::data::address_registry::AddressRegistry;
 use crate::infrastructure::data::token_manager::TokenManager;
 use crate::network::block_listener::BlockListener;
 use crate::network::gas::GasOracle;
-use crate::network::ingest::public_rpc::spawn_public_rpc_ingress;
+use crate::network::ingest::public_rpc::{PublicRpcIngressPolicyConfig, spawn_public_rpc_ingress};
 use crate::network::mempool::MempoolScanner;
 use crate::network::mev_share::MevShareClient;
 use crate::network::nonce::NonceManager;
@@ -86,6 +86,7 @@ pub struct EngineConfig {
     pub public_rpc_ingress_port: u16,
     pub public_rpc_ingress_bind: Option<String>,
     pub public_rpc_upstream_url: Option<String>,
+    pub public_rpc_policy: PublicRpcIngressPolicyConfig,
     pub sponsorship_enabled: bool,
     pub sponsorship_retained_bps: u64,
     pub sponsorship_per_tx_gas_cap_eth: f64,
@@ -163,6 +164,7 @@ pub struct Engine {
     public_rpc_ingress_port: u16,
     public_rpc_ingress_bind: Option<String>,
     public_rpc_upstream_url: Option<String>,
+    public_rpc_policy: PublicRpcIngressPolicyConfig,
     sponsorship_enabled: bool,
     sponsorship_retained_bps: u64,
     sponsorship_per_tx_gas_cap_eth: f64,
@@ -249,6 +251,7 @@ impl Engine {
                     Some(trimmed.to_string())
                 }
             }),
+            public_rpc_policy: config.public_rpc_policy,
             sponsorship_enabled: config.sponsorship_enabled,
             sponsorship_retained_bps: config.sponsorship_retained_bps.clamp(0, 10_000),
             sponsorship_per_tx_gas_cap_eth: if config.sponsorship_per_tx_gas_cap_eth.is_finite() {
@@ -922,6 +925,7 @@ impl Engine {
                 stats.clone(),
                 self.public_rpc_upstream_url.clone(),
                 self.relay_http_client.clone(),
+                self.public_rpc_policy.clone(),
             )
             .await
         } else {

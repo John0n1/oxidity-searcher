@@ -1,6 +1,7 @@
 # Development build, config and artifacts
-mitander.dev/
 target/
+out/
+cache/
 .vscode/
 .venv/
 tmp/
@@ -9,6 +10,6 @@ config.toml
 .cargo
 *.db
 *.ipc
-
-
-
+mitander.dev/node_modules/
+mitander.dev/dist/
+mitander.dev/.vite/

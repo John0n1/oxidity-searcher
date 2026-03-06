@@ -35,11 +35,12 @@
 - No explicit on-chain reentrancy guard; callback/session checks reduce replay classes but owner payloads still drive call graph complexity.
 
 ## Security Invariants Checked In CI
-- Source-level invariant tests added in:
-  - `tests/unified_hardened_executor_invariants.rs`
-- Invariants covered:
-  - owner/session guard presence.
-  - Balancer callback auth + context + single-use session reset.
-  - Aave callback auth + session reset semantics.
-  - repayment sufficiency checks and repayment mechanisms.
-  - flashloan input sanity checks (length/zero/sorted/token/pool validity).
+- Execution tests and invariant fuzzing live in:
+  - `test/UnifiedHardenedExecutor.t.sol`
+- Coverage now exercises the contract on a real EVM rather than string-matching source:
+  - owner-only guards on bundle, sweep, and approval entry points.
+  - Balancer flash-loan round-trip repayment and callback context mismatch rejection.
+  - Aave flash-loan callback authorization and exact repayment approval/pull flow.
+  - manual sweep timer reset semantics.
+  - USDT-style zero-reset approval behavior under fuzzed allowance changes.
+  - invariant fuzzing for owner stability, non-zero profit receiver, and `autoSweepDue()` consistency relative to `lastSweepAt`.

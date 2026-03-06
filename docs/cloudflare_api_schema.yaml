@@ -13,10 +13,12 @@ servers:
 paths:
   /:
     post:
-      summary: Public JSON-RPC ingress
+      summary: Authenticated JSON-RPC ingress
       operationId: publicRpcPost
       servers:
         - url: https://rpc.mitander.dev
+      security:
+        - rpcBearer: []
       requestBody:
         required: true
         content:
@@ -43,6 +45,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorStatus"
+        "401":
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorStatus"
+        "403":
+          description: Source network rejected by ingress allowlist
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorStatus"
         "404":
           description: Route not found
           content:
@@ -55,14 +69,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorStatus"
-    options:
-      summary: CORS preflight for public JSON-RPC ingress
-      operationId: publicRpcOptions
-      servers:
-        - url: https://rpc.mitander.dev
-      responses:
-        "204":
-          description: Preflight accepted
+        "429":
+          description: Request budget exhausted
 
   /health:
     get:
@@ -86,7 +94,7 @@ paths:
         - url: https://mitander.dev
       responses:
         "200":
-          description: Public execution summary
+          description: Redacted public execution summary
           content:
             application/json:
               schema:
@@ -102,11 +110,11 @@ paths:
         - partnerBearer: []
       responses:
         "200":
-          description: Partner execution summary
+          description: Detailed partner execution summary
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/PublicSummary"
+                $ref: "#/components/schemas/PartnerSummary"
         "401":
           description: Unauthorized
           content:
@@ -116,6 +124,10 @@ paths:
 
 components:
   securitySchemes:
+    rpcBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
     partnerBearer:
       type: http
       scheme: bearer
@@ -357,11 +369,11 @@ components:
         activity:
           type: array
           items:
-            $ref: "#/components/schemas/ActivityItem"
+            $ref: "#/components/schemas/PublicActivityItem"
         transactions:
           type: array
           items:
-            $ref: "#/components/schemas/DashboardTransaction"
+            $ref: "#/components/schemas/PublicDashboardTransaction"
         services:
           type: array
           items:
@@ -375,6 +387,20 @@ components:
         counters:
           $ref: "#/components/schemas/SummaryCounters"
       additionalProperties: true
+
+    PartnerSummary:
+      allOf:
+        - $ref: "#/components/schemas/PublicSummary"
+        - type: object
+          properties:
+            activity:
+              type: array
+              items:
+                $ref: "#/components/schemas/PartnerActivityItem"
+            transactions:
+              type: array
+              items:
+                $ref: "#/components/schemas/PartnerDashboardTransaction"
 
     PublicStats:
       type: object
@@ -420,27 +446,20 @@ components:
           type: number
       additionalProperties: true
 
-    ActivityItem:
+    PublicActivityItem:
       type: object
       required:
         - id
-        - txHash
         - path
-        - decisionPath
         - netToUserUsd
         - status
         - timestamp
       properties:
         id:
           type: string
-        txHash:
-          type: string
-          pattern: "^0x[0-9a-fA-F]{64}$"
         path:
           type: string
           enum: ["Sponsored", "Private only", "Pass-through"]
-        decisionPath:
-          type: string
         netToUserUsd:
           type: number
         status:
@@ -450,29 +469,35 @@ components:
           format: date-time
       additionalProperties: false
 
-    DashboardTransaction:
+    PartnerActivityItem:
+      allOf:
+        - $ref: "#/components/schemas/PublicActivityItem"
+        - type: object
+          required:
+            - txHash
+            - decisionPath
+          properties:
+            txHash:
+              type: string
+              pattern: "^0x[0-9a-fA-F]{64}$"
+            decisionPath:
+              type: string
+
+    PublicDashboardTransaction:
       type: object
       required:
         - id
-        - txHash
         - submittedAt
         - status
         - path
-        - decisionPath
         - reason
         - gasCoveredUsd
         - gasRefundedUsd
         - retainedUsd
-        - mevRebateUsd
         - netToUserUsd
-        - ledger
-        - timeline
       properties:
         id:
           type: string
-        txHash:
-          type: string
-          pattern: "^0x[0-9a-fA-F]{64}$"
         submittedAt:
           type: string
           format: date-time
@@ -481,8 +506,6 @@ components:
         path:
           type: string
           enum: ["Sponsored", "Private only", "Pass-through"]
-        decisionPath:
-          type: string
         reason:
           type: string
         gasCoveredUsd:
@@ -491,16 +514,34 @@ components:
           type: number
         retainedUsd:
           type: number
-        mevRebateUsd:
-          type: number
         netToUserUsd:
           type: number
-        ledger:
-          $ref: "#/components/schemas/Ledger"
-        timeline:
-          type: array
-          items:
-            $ref: "#/components/schemas/TimelineStep"
+      additionalProperties: false
+
+    PartnerDashboardTransaction:
+      allOf:
+        - $ref: "#/components/schemas/PublicDashboardTransaction"
+        - type: object
+          required:
+            - txHash
+            - decisionPath
+            - mevRebateUsd
+            - ledger
+            - timeline
+          properties:
+            txHash:
+              type: string
+              pattern: "^0x[0-9a-fA-F]{64}$"
+            decisionPath:
+              type: string
+            mevRebateUsd:
+              type: number
+            ledger:
+              $ref: "#/components/schemas/Ledger"
+            timeline:
+              type: array
+              items:
+                $ref: "#/components/schemas/TimelineStep"
       additionalProperties: false
 
     Ledger:

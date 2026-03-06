@@ -15,6 +15,7 @@ use oxidity_searcher::infrastructure::data::address_registry::validate_address_m
 use oxidity_searcher::infrastructure::data::db::Database;
 use oxidity_searcher::infrastructure::data::token_manager::TokenManager;
 use oxidity_searcher::infrastructure::network::gas::GasOracle;
+use oxidity_searcher::infrastructure::network::ingest::public_rpc::PublicRpcIngressPolicyConfig;
 use oxidity_searcher::infrastructure::network::nonce::NonceManager;
 use oxidity_searcher::infrastructure::network::price_feed::PriceFeed;
 use oxidity_searcher::infrastructure::network::provider::ConnectionFactory;
@@ -324,6 +325,7 @@ async fn main() -> Result<(), AppError> {
         let router_allowlist = Arc::new(DashSet::new());
         let wrapper_allowlist = Arc::new(DashSet::new());
         let infra_allowlist = Arc::new(DashSet::new());
+        let mut static_ignored = Vec::new();
         for (name, addr) in settings.routers_for_chain(chain_id)? {
             match classify_allowlist_entry(&name) {
                 AllowlistCategory::Routers => {
@@ -331,15 +333,42 @@ async fn main() -> Result<(), AppError> {
                 }
                 AllowlistCategory::Wrappers => {
                     wrapper_allowlist.insert(addr);
+                    static_ignored.push((addr, format!("static_allowlist:{name}")));
                 }
                 AllowlistCategory::Infra => {
                     infra_allowlist.insert(addr);
+                    static_ignored.push((addr, format!("static_allowlist:{name}")));
                 }
             }
         }
         if let Ok(approved) = db.approved_routers(chain_id).await {
             for addr in approved {
                 router_allowlist.insert(addr);
+            }
+        }
+        if let Ok(ignored) = db.ignored_routers(chain_id).await {
+            for addr in ignored {
+                infra_allowlist.insert(addr);
+            }
+        }
+        for (addr, note) in static_ignored {
+            if let Err(err) = db
+                .set_router_status(
+                    chain_id,
+                    &format!("{addr:#x}"),
+                    "ignored",
+                    None,
+                    Some(&note),
+                )
+                .await
+            {
+                tracing::debug!(
+                    target: "router_discovery",
+                    chain_id,
+                    address = %format!("{addr:#x}"),
+                    error = %err,
+                    "Failed to persist static infra address as ignored"
+                );
             }
         }
         if router_allowlist.is_empty() {
@@ -443,6 +472,18 @@ async fn main() -> Result<(), AppError> {
             public_rpc_ingress_port: settings.public_rpc_ingress_port_value(),
             public_rpc_ingress_bind: settings.public_rpc_ingress_bind_value(),
             public_rpc_upstream_url: Some(http_provider_url.clone()),
+            public_rpc_policy: PublicRpcIngressPolicyConfig {
+                auth_token: settings.public_rpc_ingress_auth_token_value(),
+                allowed_cidrs: settings.public_rpc_ingress_allowed_cidrs_value(),
+                max_concurrent_requests: settings.public_rpc_ingress_max_concurrent_value(),
+                requests_per_minute: settings.public_rpc_ingress_requests_per_minute_value(),
+                send_raw_per_minute: settings.public_rpc_ingress_send_raw_per_minute_value(),
+                eth_call_per_minute: settings.public_rpc_ingress_eth_call_per_minute_value(),
+                eth_estimate_gas_per_minute: settings
+                    .public_rpc_ingress_eth_estimate_gas_per_minute_value(),
+                eth_get_logs_per_minute: settings
+                    .public_rpc_ingress_eth_get_logs_per_minute_value(),
+            },
             sponsorship_enabled: settings.sponsorship_enabled_value(),
             sponsorship_retained_bps: settings.sponsorship_retained_bps_value(),
             sponsorship_per_tx_gas_cap_eth: settings.sponsorship_per_tx_gas_cap_eth_value(),

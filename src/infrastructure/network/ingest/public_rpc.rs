@@ -5,17 +5,23 @@ use crate::core::executor::SharedBundleSender;
 use crate::core::strategy::{BundleTelemetry, StrategyStats};
 use alloy::eips::eip2718::Decodable2718;
 use alloy_consensus::{Transaction, TxEnvelope};
+use ipnet::IpNet;
 use reqwest::Client;
 use serde_json::{Value, json};
-use std::net::SocketAddr;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{Mutex as TokioMutex, Semaphore};
 use tokio::time::{Duration, timeout};
 use tokio_util::sync::CancellationToken;
 
 const PUBLIC_RPC_MAX_REQUEST_BYTES: usize = 256 * 1024;
 const PUBLIC_RPC_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const PUBLIC_RPC_BUDGET_WINDOW: Duration = Duration::from_secs(60);
+const PUBLIC_RPC_BUDGET_TTL: Duration = Duration::from_secs(5 * 60);
 const PUBLIC_RPC_LOCAL_METHODS: [&str; 4] = [
     "eth_sendRawTransaction",
     "eth_chainId",
@@ -67,6 +73,142 @@ const PUBLIC_RPC_BLOCKED_EXACT_METHODS: [&str; 7] = [
     "eth_requestaccounts",
 ];
 
+#[derive(Clone, Debug)]
+pub struct PublicRpcIngressPolicyConfig {
+    pub auth_token: Option<String>,
+    pub allowed_cidrs: Vec<String>,
+    pub max_concurrent_requests: usize,
+    pub requests_per_minute: u32,
+    pub send_raw_per_minute: u32,
+    pub eth_call_per_minute: u32,
+    pub eth_estimate_gas_per_minute: u32,
+    pub eth_get_logs_per_minute: u32,
+}
+
+#[derive(Clone, Debug)]
+struct PublicRpcIngressPolicy {
+    auth_token: String,
+    allowed_cidrs: Vec<IpNet>,
+    max_concurrent_requests: usize,
+    requests_per_minute: u32,
+    send_raw_per_minute: u32,
+    eth_call_per_minute: u32,
+    eth_estimate_gas_per_minute: u32,
+    eth_get_logs_per_minute: u32,
+}
+
+impl PublicRpcIngressPolicy {
+    fn from_config(config: PublicRpcIngressPolicyConfig) -> Result<Self, String> {
+        let auth_token = config
+            .auth_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "missing public RPC auth token".to_string())?
+            .to_string();
+        let mut allowed_cidrs = Vec::new();
+        for entry in config.allowed_cidrs {
+            let parsed = entry
+                .trim()
+                .parse::<IpNet>()
+                .map_err(|err| format!("invalid CIDR '{entry}': {err}"))?;
+            allowed_cidrs.push(parsed);
+        }
+        if allowed_cidrs.is_empty() {
+            return Err("public RPC allowlist cannot be empty".to_string());
+        }
+        Ok(Self {
+            auth_token,
+            allowed_cidrs,
+            max_concurrent_requests: config.max_concurrent_requests.max(1),
+            requests_per_minute: config.requests_per_minute.max(1),
+            send_raw_per_minute: config.send_raw_per_minute.max(1),
+            eth_call_per_minute: config.eth_call_per_minute.max(1),
+            eth_estimate_gas_per_minute: config.eth_estimate_gas_per_minute.max(1),
+            eth_get_logs_per_minute: config.eth_get_logs_per_minute.max(1),
+        })
+    }
+
+    fn is_authorized(&self, header: Option<&str>) -> bool {
+        header
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .map(str::trim)
+            .is_some_and(|token| token == self.auth_token)
+    }
+
+    fn allows_ip(&self, ip: IpAddr) -> bool {
+        self.allowed_cidrs.iter().any(|cidr| cidr.contains(&ip))
+    }
+
+    fn method_budget(&self, method: &str) -> u32 {
+        match method {
+            "eth_sendRawTransaction" => self.send_raw_per_minute,
+            "eth_call" => self.eth_call_per_minute,
+            "eth_estimateGas" => self.eth_estimate_gas_per_minute,
+            "eth_getLogs" => self.eth_get_logs_per_minute,
+            _ => self.requests_per_minute,
+        }
+    }
+}
+
+#[derive(Default)]
+struct PublicRpcRateLimiter {
+    clients: HashMap<String, ClientBudgetWindow>,
+}
+
+struct ClientBudgetWindow {
+    window_started_at: Instant,
+    last_seen_at: Instant,
+    total_count: u32,
+    method_counts: HashMap<&'static str, u32>,
+}
+
+impl Default for ClientBudgetWindow {
+    fn default() -> Self {
+        Self {
+            window_started_at: Instant::now(),
+            last_seen_at: Instant::now(),
+            total_count: 0,
+            method_counts: HashMap::new(),
+        }
+    }
+}
+
+impl PublicRpcRateLimiter {
+    fn allow(&mut self, client_key: &str, method: &str, policy: &PublicRpcIngressPolicy) -> bool {
+        let now = Instant::now();
+        self.clients
+            .retain(|_, window| now.duration_since(window.last_seen_at) <= PUBLIC_RPC_BUDGET_TTL);
+
+        let entry = self.clients.entry(client_key.to_string()).or_default();
+
+        if now.duration_since(entry.window_started_at) >= PUBLIC_RPC_BUDGET_WINDOW {
+            entry.window_started_at = now;
+            entry.total_count = 0;
+            entry.method_counts.clear();
+        }
+        entry.last_seen_at = now;
+
+        if entry.total_count >= policy.requests_per_minute {
+            return false;
+        }
+        let key = rate_limit_bucket(method);
+        let method_budget = policy.method_budget(method);
+        let current_method_count = entry.method_counts.get(key).copied().unwrap_or(0);
+        if current_method_count >= method_budget {
+            return false;
+        }
+
+        entry.total_count = entry.total_count.saturating_add(1);
+        entry
+            .method_counts
+            .entry(key)
+            .and_modify(|count| *count = count.saturating_add(1))
+            .or_insert(1);
+        true
+    }
+}
+
 pub async fn spawn_public_rpc_ingress(
     port: u16,
     chain_id: u64,
@@ -76,7 +218,19 @@ pub async fn spawn_public_rpc_ingress(
     stats: Arc<StrategyStats>,
     upstream_rpc_url: Option<String>,
     http_client: Client,
+    policy_config: PublicRpcIngressPolicyConfig,
 ) -> Option<SocketAddr> {
+    let policy = match PublicRpcIngressPolicy::from_config(policy_config) {
+        Ok(policy) => Arc::new(policy),
+        Err(error) => {
+            tracing::warn!(
+                target: "public_rpc",
+                error = %error,
+                "Public RPC ingress disabled"
+            );
+            return None;
+        }
+    };
     let bind_addr = bind
         .as_deref()
         .map(str::trim)
@@ -119,6 +273,8 @@ pub async fn spawn_public_rpc_ingress(
         );
     }
 
+    let limiter = Arc::new(TokioMutex::new(PublicRpcRateLimiter::default()));
+    let semaphore = Arc::new(Semaphore::new(policy.max_concurrent_requests));
     tokio::spawn(async move {
         loop {
             let accept_result = tokio::select! {
@@ -130,19 +286,40 @@ pub async fn spawn_public_rpc_ingress(
             };
 
             match accept_result {
-                Ok((socket, _)) => {
+                Ok((socket, peer_addr)) => {
+                    let permit = match semaphore.clone().try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            tokio::spawn(async move {
+                                let mut socket = socket;
+                                let _ = write_http_json(
+                                    &mut socket,
+                                    "503 Service Unavailable",
+                                    json!({"status":"error","error":"ingress busy"}),
+                                )
+                                .await;
+                            });
+                            continue;
+                        }
+                    };
                     let stats = stats.clone();
                     let bundle_sender = bundle_sender.clone();
                     let upstream_rpc_url = upstream_rpc_url.clone();
                     let http_client = http_client.clone();
+                    let policy = policy.clone();
+                    let limiter = limiter.clone();
                     tokio::spawn(async move {
+                        let _permit = permit;
                         handle_public_rpc_connection(
                             socket,
+                            peer_addr,
                             chain_id,
                             bundle_sender,
                             stats,
                             upstream_rpc_url,
                             http_client,
+                            policy,
+                            limiter,
                         )
                         .await;
                     });
@@ -160,11 +337,14 @@ pub async fn spawn_public_rpc_ingress(
 
 async fn handle_public_rpc_connection(
     mut socket: TcpStream,
+    peer_addr: SocketAddr,
     chain_id: u64,
     bundle_sender: SharedBundleSender,
     stats: Arc<StrategyStats>,
     upstream_rpc_url: Option<String>,
     http_client: Client,
+    policy: Arc<PublicRpcIngressPolicy>,
+    limiter: Arc<TokioMutex<PublicRpcRateLimiter>>,
 ) {
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 4096];
@@ -226,8 +406,25 @@ async fn handle_public_rpc_connection(
     let path = req_parts.next().unwrap_or("/");
     let route = path.split('?').next().unwrap_or(path);
     let headers: Vec<&str> = lines.take_while(|l| !l.is_empty()).collect();
+    let client_ip = resolve_client_ip(peer_addr, &headers);
 
-    if method == "GET" && route == "/health" {
+    if !policy.allows_ip(client_ip) {
+        tracing::warn!(
+            target: "public_rpc",
+            client_ip = %client_ip,
+            route,
+            "Rejected public RPC request from disallowed network"
+        );
+        let _ = write_http_json(
+            &mut socket,
+            "403 Forbidden",
+            json!({"status":"error","error":"forbidden"}),
+        )
+        .await;
+        return;
+    }
+
+    if (method == "GET" || method == "HEAD") && route == "/health" {
         let _ = write_http_json(
             &mut socket,
             "200 OK",
@@ -242,6 +439,23 @@ async fn handle_public_rpc_connection(
             &mut socket,
             "404 Not Found",
             json!({"status":"error","error":"not found"}),
+        )
+        .await;
+        return;
+    }
+
+    let auth_header = header_value(&headers, "authorization");
+    if !policy.is_authorized(auth_header) {
+        tracing::warn!(
+            target: "public_rpc",
+            client_ip = %client_ip,
+            route,
+            "Rejected public RPC request with missing or invalid auth"
+        );
+        let _ = write_http_json(
+            &mut socket,
+            "401 Unauthorized",
+            json!({"status":"error","error":"unauthorized"}),
         )
         .await;
         return;
@@ -330,6 +544,25 @@ async fn handle_public_rpc_connection(
         .get("method")
         .and_then(Value::as_str)
         .unwrap_or_default();
+
+    {
+        let mut guard = limiter.lock().await;
+        if !guard.allow(&client_ip.to_string(), method, &policy) {
+            tracing::warn!(
+                target: "public_rpc",
+                client_ip = %client_ip,
+                method,
+                "Rejected public RPC request due to rate limit"
+            );
+            let _ = write_http_json(
+                &mut socket,
+                "429 Too Many Requests",
+                json!({"status":"error","error":"rate_limited"}),
+            )
+            .await;
+            return;
+        }
+    }
 
     let response_payload = if is_public_local_method_allowed(method) {
         match method {
@@ -566,6 +799,45 @@ fn header_end_offset(buf: &[u8]) -> Option<usize> {
         .or_else(|| buf.windows(2).position(|w| w == b"\n\n").map(|idx| idx + 2))
 }
 
+fn header_value<'a>(headers: &'a [&'a str], key: &str) -> Option<&'a str> {
+    headers.iter().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if name.eq_ignore_ascii_case(key) {
+            Some(value.trim())
+        } else {
+            None
+        }
+    })
+}
+
+fn resolve_client_ip(peer_addr: SocketAddr, headers: &[&str]) -> IpAddr {
+    if peer_addr.ip().is_loopback() {
+        if let Some(forwarded) = header_value(headers, "x-forwarded-for")
+            && let Some(ip) = forwarded
+                .split(',')
+                .find_map(|entry| entry.trim().parse::<IpAddr>().ok())
+        {
+            return ip;
+        }
+        if let Some(real_ip) = header_value(headers, "x-real-ip")
+            && let Ok(ip) = real_ip.parse::<IpAddr>()
+        {
+            return ip;
+        }
+    }
+    peer_addr.ip()
+}
+
+fn rate_limit_bucket(method: &str) -> &'static str {
+    match method {
+        "eth_sendRawTransaction" => "eth_sendRawTransaction",
+        "eth_call" => "eth_call",
+        "eth_estimateGas" => "eth_estimateGas",
+        "eth_getLogs" => "eth_getLogs",
+        _ => "default",
+    }
+}
+
 async fn write_http_json(
     socket: &mut tokio::net::TcpStream,
     status: &str,
@@ -573,7 +845,7 @@ async fn write_http_json(
 ) -> Result<(), std::io::Error> {
     let body = body.to_string();
     let response = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: {}\r\n\r\n{}",
         body.len(),
         body
     );
@@ -583,11 +855,17 @@ async fn write_http_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::executor::BundleSender;
+    use crate::core::strategy::StrategyStats;
+    use crate::network::provider::HttpProvider;
     use alloy::eips::eip2718::Encodable2718;
     use alloy::network::TxSignerSync;
     use alloy::primitives::{Address, Bytes, TxKind, U256};
     use alloy::signers::local::PrivateKeySigner;
     use alloy_consensus::{SignableTransaction, TxEip1559, TxEnvelope};
+    use std::str::FromStr;
+    use tokio_util::sync::CancellationToken;
+    use url::Url;
 
     fn signed_test_raw_tx(chain_id: u64) -> Vec<u8> {
         let signer: PrivateKeySigner =
@@ -608,6 +886,57 @@ mod tests {
         let sig = TxSignerSync::sign_transaction_sync(&signer, &mut tx).expect("sign tx");
         let signed: TxEnvelope = tx.into_signed(sig).into();
         signed.encoded_2718()
+    }
+
+    fn test_policy_config() -> PublicRpcIngressPolicyConfig {
+        PublicRpcIngressPolicyConfig {
+            auth_token: Some("test-rpc-token".to_string()),
+            allowed_cidrs: vec!["127.0.0.0/8".to_string(), "::1/128".to_string()],
+            max_concurrent_requests: 4,
+            requests_per_minute: 16,
+            send_raw_per_minute: 2,
+            eth_call_per_minute: 2,
+            eth_estimate_gas_per_minute: 2,
+            eth_get_logs_per_minute: 1,
+        }
+    }
+
+    fn test_bundle_sender(stats: Arc<StrategyStats>) -> SharedBundleSender {
+        let signer: PrivateKeySigner =
+            "59c6995e998f97a5a0044966f0945382d8ad7f7f6d0f7f6f4c6f9d5cb66f17d1"
+                .parse()
+                .expect("private key");
+        Arc::new(BundleSender::new(
+            HttpProvider::new_http(Url::parse("http://127.0.0.1:8545").expect("rpc url")),
+            Client::new(),
+            true,
+            "https://relay.flashbots.net".to_string(),
+            "https://mev-share.flashbots.net".to_string(),
+            Vec::new(),
+            signer,
+            stats,
+            true,
+            false,
+            1,
+        ))
+    }
+
+    async fn spawn_test_public_rpc(policy_config: PublicRpcIngressPolicyConfig) -> SocketAddr {
+        let stats = Arc::new(StrategyStats::default());
+        let shutdown = CancellationToken::new();
+        spawn_public_rpc_ingress(
+            0,
+            1,
+            shutdown,
+            Some("127.0.0.1".to_string()),
+            test_bundle_sender(stats.clone()),
+            stats,
+            Some("http://127.0.0.1:8545".to_string()),
+            Client::new(),
+            policy_config,
+        )
+        .await
+        .expect("bind public rpc")
     }
 
     #[test]
@@ -671,5 +1000,100 @@ mod tests {
         assert!(is_public_method_blocked("eth_sendTransaction"));
         assert!(is_public_method_blocked("ETH_SENDTRANSACTION"));
         assert!(!is_public_method_blocked("eth_chainId"));
+    }
+
+    #[test]
+    fn policy_requires_non_empty_auth_token() {
+        let mut config = test_policy_config();
+        config.auth_token = None;
+        assert!(PublicRpcIngressPolicy::from_config(config).is_err());
+    }
+
+    #[test]
+    fn resolve_client_ip_prefers_forwarded_header_from_loopback_proxy() {
+        let peer = SocketAddr::from(([127, 0, 0, 1], 9545));
+        let headers = vec!["X-Forwarded-For: 198.51.100.7, 127.0.0.1"];
+        let resolved = resolve_client_ip(peer, &headers);
+        assert_eq!(resolved, IpAddr::from_str("198.51.100.7").unwrap());
+    }
+
+    #[test]
+    fn rate_limiter_enforces_total_and_method_budgets() {
+        let policy = PublicRpcIngressPolicy::from_config(test_policy_config()).expect("policy");
+        let mut limiter = PublicRpcRateLimiter::default();
+        assert!(limiter.allow("127.0.0.1", "eth_getLogs", &policy));
+        assert!(!limiter.allow("127.0.0.1", "eth_getLogs", &policy));
+        assert!(limiter.allow("127.0.0.1", "eth_chainId", &policy));
+    }
+
+    #[tokio::test]
+    async fn public_rpc_rejects_missing_auth_and_no_cors_header() {
+        let addr = spawn_test_public_rpc(test_policy_config()).await;
+        let response = reqwest::Client::new()
+            .post(format!("http://{addr}"))
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "eth_chainId",
+                "params": []
+            }))
+            .send()
+            .await
+            .expect("send request");
+
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn public_rpc_rejects_disallowed_forwarded_ip() {
+        let mut config = test_policy_config();
+        config.allowed_cidrs = vec!["203.0.113.0/24".to_string()];
+        let addr = spawn_test_public_rpc(config).await;
+        let response = reqwest::Client::new()
+            .post(format!("http://{addr}"))
+            .header("Authorization", "Bearer test-rpc-token")
+            .header("X-Forwarded-For", "198.51.100.7")
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "eth_chainId",
+                "params": []
+            }))
+            .send()
+            .await
+            .expect("send request");
+
+        assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn public_rpc_enforces_per_method_budget() {
+        let mut config = test_policy_config();
+        config.requests_per_minute = 10;
+        config.eth_get_logs_per_minute = 1;
+        let addr = spawn_test_public_rpc(config).await;
+        let client = reqwest::Client::new();
+        let request = || {
+            client
+                .post(format!("http://{addr}"))
+                .header("Authorization", "Bearer test-rpc-token")
+                .json(&json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "eth_getLogs",
+                    "params": [{}]
+                }))
+        };
+
+        let first = request().send().await.expect("first request");
+        assert_eq!(first.status(), reqwest::StatusCode::OK);
+        let second = request().send().await.expect("second request");
+        assert_eq!(second.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
     }
 }

@@ -1,0 +1,43 @@
+name: Staging Live Smoke
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: staging-live-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  live-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: staging
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run ignored mainnet executor smoke tests
+        env:
+          OXIDITY_STAGING_MAINNET_RPC_URL: ${{ secrets.OXIDITY_STAGING_MAINNET_RPC_URL }}
+          OXIDITY_STAGING_EXECUTOR_OWNER: ${{ secrets.OXIDITY_STAGING_EXECUTOR_OWNER }}
+          OXIDITY_STAGING_EXECUTOR_ADDRESS: ${{ secrets.OXIDITY_STAGING_EXECUTOR_ADDRESS }}
+          OXIDITY_STAGING_AAVE_POOL: ${{ secrets.OXIDITY_STAGING_AAVE_POOL }}
+        run: cargo test --workspace --locked --test flashloan_build -- --ignored --nocapture

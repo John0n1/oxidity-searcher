@@ -288,10 +288,30 @@ async fn handle_metrics_connection(
             body
         );
         let _ = socket.write_all(response.as_bytes()).await;
-    } else if route == "/public/summary" || route == "/partner/summary" {
-        let body = render_public_summary(chain_id, &stats, &portfolio, public_summary_policy);
+    } else if route == "/public/summary" {
+        let body = render_summary(
+            chain_id,
+            &stats,
+            &portfolio,
+            public_summary_policy,
+            SummaryAudience::Public,
+        );
         let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = socket.write_all(response.as_bytes()).await;
+    } else if route == "/partner/summary" {
+        let body = render_summary(
+            chain_id,
+            &stats,
+            &portfolio,
+            public_summary_policy,
+            SummaryAudience::Partner,
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: {}\r\n\r\n{}",
             body.len(),
             body
         );
@@ -704,11 +724,24 @@ fn clamp_non_negative(value: f64) -> f64 {
     }
 }
 
-fn render_public_summary(
+#[derive(Clone, Copy)]
+enum SummaryAudience {
+    Public,
+    Partner,
+}
+
+impl SummaryAudience {
+    fn includes_partner_detail(self) -> bool {
+        matches!(self, SummaryAudience::Partner)
+    }
+}
+
+fn render_summary(
     chain_id: u64,
     stats: &Arc<StrategyStats>,
     portfolio: &Arc<PortfolioManager>,
     policy: PublicSummaryPolicy,
+    audience: SummaryAudience,
 ) -> String {
     let processed = stats.processed.load(std::sync::atomic::Ordering::Relaxed);
     let submitted = stats.submitted.load(std::sync::atomic::Ordering::Relaxed);
@@ -804,15 +837,23 @@ fn render_public_summary(
                 + clamp_non_negative(bundle.gas_refunded_eth)
                 + clamp_non_negative(bundle.rebate_eth))
                 * price;
-            json!({
+            let mut item = json!({
                 "id": format!("bundle-{}", idx + 1),
-                "txHash": bundle.tx_hash,
                 "path": path,
-                "decisionPath": bundle.decision_path.clone(),
                 "netToUserUsd": net_to_user_usd,
                 "status": bundle.status.clone(),
                 "timestamp": timestamp_ms_to_iso(bundle.timestamp_ms),
-            })
+            });
+            if audience.includes_partner_detail()
+                && let Some(obj) = item.as_object_mut()
+            {
+                obj.insert("txHash".to_string(), json!(bundle.tx_hash));
+                obj.insert(
+                    "decisionPath".to_string(),
+                    json!(bundle.decision_path.clone()),
+                );
+            }
+            item
         })
         .collect();
 
@@ -833,40 +874,54 @@ fn render_public_summary(
                 "Pending" => "pending",
                 _ => "failed",
             };
-            json!({
+            let mut item = json!({
                 "id": format!("tx-{}", idx + 1),
-                "txHash": bundle.tx_hash,
                 "submittedAt": timestamp_ms_to_iso(bundle.timestamp_ms),
                 "status": bundle.status.clone(),
                 "path": path,
-                "decisionPath": bundle.decision_path.clone(),
                 "reason": format!(
                     "Execution source: {} ({})",
                     bundle.source,
                     bundle.decision_path.as_str()
                 ),
-                "gasCoveredUsd": gas_covered_usd,
-                "gasRefundedUsd": gas_refunded_usd,
-                "retainedUsd": retained_usd,
-                "mevRebateUsd": rebate_usd,
                 "netToUserUsd": net_usd,
-                "ledger": {
-                    "gasCoveredEth": clamp_non_negative(bundle.gas_covered_eth),
-                    "gasRefundedEth": clamp_non_negative(bundle.gas_refunded_eth),
-                    "retainedEth": clamp_non_negative(bundle.retained_eth),
-                    "rebateEth": clamp_non_negative(bundle.rebate_eth),
-                    "gasCoveredUsd": gas_covered_usd,
-                    "gasRefundedUsd": gas_refunded_usd,
-                    "retainedUsd": retained_usd,
-                    "rebateUsd": rebate_usd
-                },
-                "timeline": [
-                    {"step": "Received", "status": "done", "time": timestamp_ms_to_iso(bundle.timestamp_ms)},
-                    {"step": "Simulated", "status": "done", "time": timestamp_ms_to_iso(bundle.timestamp_ms)},
-                    {"step": "Submitted", "status": "done", "time": timestamp_ms_to_iso(bundle.timestamp_ms)},
-                    {"step": "Included", "status": inclusion_status, "time": timestamp_ms_to_iso(bundle.timestamp_ms)}
-                ]
-            })
+            });
+            if audience.includes_partner_detail()
+                && let Some(obj) = item.as_object_mut()
+            {
+                obj.insert("txHash".to_string(), json!(bundle.tx_hash));
+                obj.insert(
+                    "decisionPath".to_string(),
+                    json!(bundle.decision_path.clone()),
+                );
+                obj.insert("gasCoveredUsd".to_string(), json!(gas_covered_usd));
+                obj.insert("gasRefundedUsd".to_string(), json!(gas_refunded_usd));
+                obj.insert("retainedUsd".to_string(), json!(retained_usd));
+                obj.insert("mevRebateUsd".to_string(), json!(rebate_usd));
+                obj.insert(
+                    "ledger".to_string(),
+                    json!({
+                        "gasCoveredEth": clamp_non_negative(bundle.gas_covered_eth),
+                        "gasRefundedEth": clamp_non_negative(bundle.gas_refunded_eth),
+                        "retainedEth": clamp_non_negative(bundle.retained_eth),
+                        "rebateEth": clamp_non_negative(bundle.rebate_eth),
+                        "gasCoveredUsd": gas_covered_usd,
+                        "gasRefundedUsd": gas_refunded_usd,
+                        "retainedUsd": retained_usd,
+                        "rebateUsd": rebate_usd
+                    }),
+                );
+                obj.insert(
+                    "timeline".to_string(),
+                    json!([
+                        {"step": "Received", "status": "done", "time": timestamp_ms_to_iso(bundle.timestamp_ms)},
+                        {"step": "Simulated", "status": "done", "time": timestamp_ms_to_iso(bundle.timestamp_ms)},
+                        {"step": "Submitted", "status": "done", "time": timestamp_ms_to_iso(bundle.timestamp_ms)},
+                        {"step": "Included", "status": inclusion_status, "time": timestamp_ms_to_iso(bundle.timestamp_ms)}
+                    ]),
+                );
+            }
+            item
         })
         .collect();
 
@@ -899,7 +954,11 @@ fn render_public_summary(
     json!({
         "generatedAt": chrono::Utc::now().to_rfc3339(),
         "chainId": chain_id,
-        "source": "strategy-metrics",
+        "source": if audience.includes_partner_detail() {
+            "strategy-metrics-partner"
+        } else {
+            "strategy-metrics-public"
+        },
         "stats": {
             "sponsoredTxCount": sponsored_tx_count,
             "gasRefundedEth": gas_refunded_eth_total,
@@ -970,7 +1029,7 @@ impl Default for RateLimiter {
 mod tests {
     use super::*;
     use crate::core::portfolio::PortfolioManager;
-    use crate::core::strategy::StrategyStats;
+    use crate::core::strategy::{BundleTelemetry, StrategyStats};
     use crate::network::provider::HttpProvider;
     use alloy::primitives::Address;
     use tokio::net::TcpStream;
@@ -1082,6 +1141,48 @@ mod tests {
 
         assert!(body.contains("\"stats\""));
         assert!(body.contains("\"policy\""));
+    }
+
+    #[test]
+    fn public_summary_redacts_transaction_and_ledger_details() {
+        let provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
+        let portfolio = Arc::new(PortfolioManager::new(provider, Address::ZERO));
+        let stats = Arc::new(StrategyStats::default());
+        stats.record_bundle(BundleTelemetry {
+            tx_hash: "0xabc".to_string(),
+            source: "public_rpc".to_string(),
+            decision_path: "private_only".to_string(),
+            status: "Included".to_string(),
+            profit_eth: 0.0,
+            gas_cost_eth: 0.0,
+            net_eth: 0.0,
+            gas_covered_eth: 0.1,
+            gas_refunded_eth: 0.2,
+            retained_eth: 0.3,
+            rebate_eth: 0.4,
+            native_usd_price: 2_000.0,
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+        });
+
+        let public = render_summary(
+            1,
+            &stats,
+            &portfolio,
+            PublicSummaryPolicy::default(),
+            SummaryAudience::Public,
+        );
+        let partner = render_summary(
+            1,
+            &stats,
+            &portfolio,
+            PublicSummaryPolicy::default(),
+            SummaryAudience::Partner,
+        );
+
+        assert!(!public.contains("\"txHash\""));
+        assert!(!public.contains("\"ledger\""));
+        assert!(partner.contains("\"txHash\""));
+        assert!(partner.contains("\"ledger\""));
     }
 
     #[tokio::test]
