@@ -7,6 +7,7 @@ pub mod common;
 pub mod domain;
 pub mod infrastructure;
 pub mod services;
+pub mod wallet;
 
 // Stable module aliases used across internal modules and integration tests.
 pub use infrastructure::data;

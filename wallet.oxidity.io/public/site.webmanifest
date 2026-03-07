@@ -1,0 +1,21 @@
+{
+  "name": "Oxidity Wallet",
+  "short_name": "Oxidity Wallet",
+  "description": "Self-custody Ethereum wallet with private-ready execution, extension packaging, and Android distribution.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#eff6ff",
+  "theme_color": "#eff6ff",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    },
+    {
+      "src": "/favicon.png",
+      "sizes": "128x128",
+      "type": "image/png"
+    }
+  ]
+}

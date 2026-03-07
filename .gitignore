@@ -13,3 +13,13 @@ config.toml
 mitander.dev/node_modules/
 mitander.dev/dist/
 mitander.dev/.vite/
+wallet.oxidity.io/node_modules/
+wallet.oxidity.io/dist/
+wallet.oxidity.io/dist-extension/
+wallet.oxidity.io/dist-extension-base/
+wallet.oxidity.io/android/.gradle/
+wallet.oxidity.io/android/app/build/
+wallet.oxidity.io/android/build/
+wallet.oxidity.io/android/local.properties
+deploy/nginx/generated/*.conf
+tmp-wallet-*/
