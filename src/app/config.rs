@@ -84,44 +84,11 @@ pub struct GlobalSettings {
     pub address_registry_path: Option<String>,
     pub data_dir: Option<String>,
     pub global_paths_path: Option<String>,
-    #[serde(default = "default_metrics_port")]
-    pub metrics_port: u16,
     #[serde(default = "default_log_level")]
     pub log_level: String,
     #[serde(default = "default_true")]
     pub strategy_enabled: bool,
     pub strategy_workers: Option<usize>,
-    pub metrics_bind: Option<String>,
-    pub metrics_token: Option<String>,
-    #[serde(default = "default_false")]
-    pub metrics_enable_shutdown: bool,
-    #[serde(default = "default_false")]
-    pub public_rpc_ingress_enabled: bool,
-    #[serde(default = "default_public_rpc_ingress_port")]
-    pub public_rpc_ingress_port: u16,
-    pub public_rpc_ingress_bind: Option<String>,
-    pub public_rpc_ingress_auth_token: Option<String>,
-    pub public_rpc_ingress_allowed_cidrs: Option<String>,
-    #[serde(default = "default_public_rpc_ingress_max_concurrent")]
-    pub public_rpc_ingress_max_concurrent: usize,
-    #[serde(default = "default_public_rpc_ingress_requests_per_minute")]
-    pub public_rpc_ingress_requests_per_minute: u32,
-    #[serde(default = "default_public_rpc_ingress_send_raw_per_minute")]
-    pub public_rpc_ingress_send_raw_per_minute: u32,
-    #[serde(default = "default_public_rpc_ingress_eth_call_per_minute")]
-    pub public_rpc_ingress_eth_call_per_minute: u32,
-    #[serde(default = "default_public_rpc_ingress_eth_estimate_gas_per_minute")]
-    pub public_rpc_ingress_eth_estimate_gas_per_minute: u32,
-    #[serde(default = "default_public_rpc_ingress_eth_get_logs_per_minute")]
-    pub public_rpc_ingress_eth_get_logs_per_minute: u32,
-    #[serde(default = "default_true")]
-    pub sponsorship_enabled: bool,
-    #[serde(default = "default_sponsorship_retained_bps")]
-    pub sponsorship_retained_bps: u64,
-    #[serde(default = "default_sponsorship_per_tx_gas_cap_eth")]
-    pub sponsorship_per_tx_gas_cap_eth: f64,
-    #[serde(default = "default_sponsorship_per_day_gas_cap_eth")]
-    pub sponsorship_per_day_gas_cap_eth: f64,
     #[serde(default = "default_slippage_bps")]
     pub slippage_bps: u64,
     /// Multiplier applied to the base dynamic profit floor.
@@ -334,41 +301,8 @@ fn default_true() -> bool {
 fn default_false() -> bool {
     false
 }
-fn default_metrics_port() -> u16 {
-    9000
-}
-fn default_public_rpc_ingress_port() -> u16 {
-    9545
-}
-fn default_public_rpc_ingress_max_concurrent() -> usize {
-    64
-}
-fn default_public_rpc_ingress_requests_per_minute() -> u32 {
-    240
-}
-fn default_public_rpc_ingress_send_raw_per_minute() -> u32 {
-    12
-}
-fn default_public_rpc_ingress_eth_call_per_minute() -> u32 {
-    120
-}
-fn default_public_rpc_ingress_eth_estimate_gas_per_minute() -> u32 {
-    60
-}
-fn default_public_rpc_ingress_eth_get_logs_per_minute() -> u32 {
-    30
-}
 fn default_log_level() -> String {
     "info".to_string()
-}
-fn default_sponsorship_retained_bps() -> u64 {
-    1_000
-}
-fn default_sponsorship_per_tx_gas_cap_eth() -> f64 {
-    0.05
-}
-fn default_sponsorship_per_day_gas_cap_eth() -> f64 {
-    0.5
 }
 fn default_slippage_bps() -> u64 {
     12
@@ -729,25 +663,6 @@ fn is_passthrough_env_key(key: &str) -> bool {
         "MEV_SHARE_STREAM_URL",
         "MEV_SHARE_ENABLED",
         "MEV_SHARE_HISTORY_LIMIT",
-        "METRICS_BIND",
-        "METRICS_TOKEN",
-        "METRICS_PORT",
-        "METRICS_ENABLE_SHUTDOWN",
-        "PUBLIC_RPC_INGRESS_ENABLED",
-        "PUBLIC_RPC_INGRESS_PORT",
-        "PUBLIC_RPC_INGRESS_BIND",
-        "PUBLIC_RPC_INGRESS_AUTH_TOKEN",
-        "PUBLIC_RPC_INGRESS_ALLOWED_CIDRS",
-        "PUBLIC_RPC_INGRESS_MAX_CONCURRENT",
-        "PUBLIC_RPC_INGRESS_REQUESTS_PER_MINUTE",
-        "PUBLIC_RPC_INGRESS_SEND_RAW_PER_MINUTE",
-        "PUBLIC_RPC_INGRESS_ETH_CALL_PER_MINUTE",
-        "PUBLIC_RPC_INGRESS_ETH_ESTIMATE_GAS_PER_MINUTE",
-        "PUBLIC_RPC_INGRESS_ETH_GET_LOGS_PER_MINUTE",
-        "SPONSORSHIP_ENABLED",
-        "SPONSORSHIP_RETAINED_BPS",
-        "SPONSORSHIP_PER_TX_GAS_CAP_ETH",
-        "SPONSORSHIP_PER_DAY_GAS_CAP_ETH",
         "DATA_DIR",
         "GLOBAL_PATHS_PATH",
         "GLOBAL_DATA_PATH",
@@ -941,8 +856,6 @@ fn redact_effective_config(value: &mut Value) {
     const SECRET_FIELDS: &[&str] = &[
         "wallet_key",
         "bundle_signer_key",
-        "metrics_token",
-        "public_rpc_ingress_auth_token",
         "binance_api_key",
         "coinmarketcap_api_key",
         "coingecko_api_key",
@@ -1378,110 +1291,6 @@ impl GlobalSettings {
             return parsed.max(1);
         }
         self.strategy_workers.unwrap_or(32).max(1)
-    }
-
-    pub fn metrics_bind_value(&self) -> Option<String> {
-        self.metrics_bind.clone()
-    }
-
-    pub fn metrics_token_value(&self) -> Option<String> {
-        self.metrics_token.clone()
-    }
-
-    pub fn metrics_enable_shutdown_value(&self) -> bool {
-        self.metrics_enable_shutdown
-    }
-
-    pub fn public_rpc_ingress_enabled_value(&self) -> bool {
-        self.public_rpc_ingress_enabled
-    }
-
-    pub fn public_rpc_ingress_port_value(&self) -> u16 {
-        self.public_rpc_ingress_port.max(1)
-    }
-
-    pub fn public_rpc_ingress_bind_value(&self) -> Option<String> {
-        self.public_rpc_ingress_bind
-            .as_ref()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    }
-
-    pub fn public_rpc_ingress_auth_token_value(&self) -> Option<String> {
-        self.public_rpc_ingress_auth_token
-            .as_ref()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    }
-
-    pub fn public_rpc_ingress_allowed_cidrs_value(&self) -> Vec<String> {
-        let raw = self
-            .public_rpc_ingress_allowed_cidrs
-            .as_deref()
-            .unwrap_or("127.0.0.0/8,::1/128");
-        let parsed: Vec<String> = raw
-            .split([',', ' ', '\n', '\t'])
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-            .map(ToOwned::to_owned)
-            .collect();
-        if parsed.is_empty() {
-            vec!["127.0.0.0/8".to_string(), "::1/128".to_string()]
-        } else {
-            parsed
-        }
-    }
-
-    pub fn public_rpc_ingress_max_concurrent_value(&self) -> usize {
-        self.public_rpc_ingress_max_concurrent.clamp(1, 2_048)
-    }
-
-    pub fn public_rpc_ingress_requests_per_minute_value(&self) -> u32 {
-        self.public_rpc_ingress_requests_per_minute
-            .clamp(10, 60_000)
-    }
-
-    pub fn public_rpc_ingress_send_raw_per_minute_value(&self) -> u32 {
-        self.public_rpc_ingress_send_raw_per_minute.clamp(1, 10_000)
-    }
-
-    pub fn public_rpc_ingress_eth_call_per_minute_value(&self) -> u32 {
-        self.public_rpc_ingress_eth_call_per_minute.clamp(1, 10_000)
-    }
-
-    pub fn public_rpc_ingress_eth_estimate_gas_per_minute_value(&self) -> u32 {
-        self.public_rpc_ingress_eth_estimate_gas_per_minute
-            .clamp(1, 10_000)
-    }
-
-    pub fn public_rpc_ingress_eth_get_logs_per_minute_value(&self) -> u32 {
-        self.public_rpc_ingress_eth_get_logs_per_minute
-            .clamp(1, 10_000)
-    }
-
-    pub fn sponsorship_enabled_value(&self) -> bool {
-        self.sponsorship_enabled
-    }
-
-    pub fn sponsorship_retained_bps_value(&self) -> u64 {
-        self.sponsorship_retained_bps.clamp(0, 10_000)
-    }
-
-    pub fn sponsorship_per_tx_gas_cap_eth_value(&self) -> f64 {
-        if self.sponsorship_per_tx_gas_cap_eth.is_finite() {
-            self.sponsorship_per_tx_gas_cap_eth.clamp(0.0, 10_000.0)
-        } else {
-            default_sponsorship_per_tx_gas_cap_eth()
-        }
-    }
-
-    pub fn sponsorship_per_day_gas_cap_eth_value(&self) -> f64 {
-        let per_day = if self.sponsorship_per_day_gas_cap_eth.is_finite() {
-            self.sponsorship_per_day_gas_cap_eth.clamp(0.0, 1_000_000.0)
-        } else {
-            default_sponsorship_per_day_gas_cap_eth()
-        };
-        per_day.max(self.sponsorship_per_tx_gas_cap_eth_value())
     }
 
     pub fn etherscan_api_key_value(&self) -> Option<String> {
@@ -2288,33 +2097,9 @@ mod tests {
             address_registry_path: None,
             data_dir: None,
             global_paths_path: None,
-            metrics_port: default_metrics_port(),
             log_level: default_log_level(),
             strategy_enabled: default_true(),
             strategy_workers: None,
-            metrics_bind: None,
-            metrics_token: None,
-            metrics_enable_shutdown: default_false(),
-            public_rpc_ingress_enabled: default_false(),
-            public_rpc_ingress_port: default_public_rpc_ingress_port(),
-            public_rpc_ingress_bind: None,
-            public_rpc_ingress_auth_token: None,
-            public_rpc_ingress_allowed_cidrs: None,
-            public_rpc_ingress_max_concurrent: default_public_rpc_ingress_max_concurrent(),
-            public_rpc_ingress_requests_per_minute: default_public_rpc_ingress_requests_per_minute(
-            ),
-            public_rpc_ingress_send_raw_per_minute: default_public_rpc_ingress_send_raw_per_minute(
-            ),
-            public_rpc_ingress_eth_call_per_minute: default_public_rpc_ingress_eth_call_per_minute(
-            ),
-            public_rpc_ingress_eth_estimate_gas_per_minute:
-                default_public_rpc_ingress_eth_estimate_gas_per_minute(),
-            public_rpc_ingress_eth_get_logs_per_minute:
-                default_public_rpc_ingress_eth_get_logs_per_minute(),
-            sponsorship_enabled: default_true(),
-            sponsorship_retained_bps: default_sponsorship_retained_bps(),
-            sponsorship_per_tx_gas_cap_eth: default_sponsorship_per_tx_gas_cap_eth(),
-            sponsorship_per_day_gas_cap_eth: default_sponsorship_per_day_gas_cap_eth(),
             slippage_bps: default_slippage_bps(),
             profit_guard_base_floor_multiplier_bps: default_profit_guard_base_floor_multiplier_bps(
             ),

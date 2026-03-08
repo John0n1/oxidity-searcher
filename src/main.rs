@@ -15,7 +15,6 @@ use oxidity_searcher::infrastructure::data::address_registry::validate_address_m
 use oxidity_searcher::infrastructure::data::db::Database;
 use oxidity_searcher::infrastructure::data::token_manager::TokenManager;
 use oxidity_searcher::infrastructure::network::gas::GasOracle;
-use oxidity_searcher::infrastructure::network::ingest::public_rpc::PublicRpcIngressPolicyConfig;
 use oxidity_searcher::infrastructure::network::nonce::NonceManager;
 use oxidity_searcher::infrastructure::network::price_feed::PriceFeed;
 use oxidity_searcher::infrastructure::network::provider::ConnectionFactory;
@@ -43,10 +42,6 @@ struct Cli {
     /// Do not submit transactions/bundles, only simulate/log
     #[arg(long, default_value_t = false)]
     dry_run: bool,
-
-    /// Metrics port (overrides config/env)
-    #[arg(long)]
-    metrics_port: Option<u16>,
 
     /// Enable strategies (ingest + execute)
     #[arg(long, default_value_t = true)]
@@ -204,7 +199,6 @@ async fn main() -> Result<(), AppError> {
     let relay_url = settings.flashbots_relay_url();
     let bundle_signer = PrivateKeySigner::from_str(&settings.bundle_signer_key())
         .map_err(|e| AppError::Config(format!("Invalid bundle signer key: {}", e)))?;
-    let metrics_base: u16 = cli.metrics_port.unwrap_or(settings.metrics_port);
     let slippage_bps = cli.slippage_bps.unwrap_or(settings.slippage_bps);
     let strategy_enabled_flag =
         !cli.no_strategy && cli.strategy_enabled && settings.strategy_enabled;
@@ -244,7 +238,7 @@ async fn main() -> Result<(), AppError> {
         .build()
         .map_err(|e| AppError::Initialization(format!("relay HTTP client init failed: {e}")))?;
 
-    for (idx, chain_id) in chains.iter().copied().enumerate() {
+    for chain_id in chains.iter().copied() {
         let http_provider_url = settings.get_http_provider(chain_id)?;
         let provider_jwt_secret_path = settings.get_provider_jwt_secret_path(chain_id);
         let ipc_provider = settings.get_ipc_provider(chain_id);
@@ -422,21 +416,6 @@ async fn main() -> Result<(), AppError> {
             None
         };
 
-        let metrics_port = if chains.len() > 1 {
-            let idx_u16 = u16::try_from(idx).map_err(|_| {
-                AppError::Config(format!(
-                    "Too many chains configured for metrics port indexing: idx={idx}"
-                ))
-            })?;
-            metrics_base.checked_add(idx_u16).ok_or_else(|| {
-                AppError::Config(format!(
-                    "Metrics port overflow: base={metrics_base} idx={idx}"
-                ))
-            })?
-        } else {
-            metrics_base
-        };
-
         let engine = Engine::new(EngineConfig {
             http_provider,
             websocket_provider,
@@ -464,30 +443,6 @@ async fn main() -> Result<(), AppError> {
             gas_cap_multiplier_bps: settings.gas_cap_multiplier_bps_value(),
             simulator,
             token_manager: token_manager.clone(),
-            metrics_port,
-            metrics_bind: settings.metrics_bind_value(),
-            metrics_token: settings.metrics_token_value(),
-            metrics_enable_shutdown: settings.metrics_enable_shutdown_value(),
-            public_rpc_ingress_enabled: settings.public_rpc_ingress_enabled_value(),
-            public_rpc_ingress_port: settings.public_rpc_ingress_port_value(),
-            public_rpc_ingress_bind: settings.public_rpc_ingress_bind_value(),
-            public_rpc_upstream_url: Some(http_provider_url.clone()),
-            public_rpc_policy: PublicRpcIngressPolicyConfig {
-                auth_token: settings.public_rpc_ingress_auth_token_value(),
-                allowed_cidrs: settings.public_rpc_ingress_allowed_cidrs_value(),
-                max_concurrent_requests: settings.public_rpc_ingress_max_concurrent_value(),
-                requests_per_minute: settings.public_rpc_ingress_requests_per_minute_value(),
-                send_raw_per_minute: settings.public_rpc_ingress_send_raw_per_minute_value(),
-                eth_call_per_minute: settings.public_rpc_ingress_eth_call_per_minute_value(),
-                eth_estimate_gas_per_minute: settings
-                    .public_rpc_ingress_eth_estimate_gas_per_minute_value(),
-                eth_get_logs_per_minute: settings
-                    .public_rpc_ingress_eth_get_logs_per_minute_value(),
-            },
-            sponsorship_enabled: settings.sponsorship_enabled_value(),
-            sponsorship_retained_bps: settings.sponsorship_retained_bps_value(),
-            sponsorship_per_tx_gas_cap_eth: settings.sponsorship_per_tx_gas_cap_eth_value(),
-            sponsorship_per_day_gas_cap_eth: settings.sponsorship_per_day_gas_cap_eth_value(),
             strategy_enabled,
             slippage_bps,
             profit_guard_base_floor_multiplier_bps: settings

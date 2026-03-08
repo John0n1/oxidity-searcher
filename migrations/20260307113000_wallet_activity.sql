@@ -1,0 +1,3 @@
+-- Wallet activity persistence removed.
+-- This migration is intentionally left as a no-op so existing databases
+-- continue to satisfy sqlx migration history without recreating the tables.

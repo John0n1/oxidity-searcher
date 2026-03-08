@@ -351,7 +351,6 @@ pub struct StrategyStats {
     pub ingest_queue_dropped: AtomicU64,
     pub ingest_queue_full: AtomicU64,
     pub ingest_backpressure: AtomicU64,
-    pub bundles: StdMutex<Vec<BundleTelemetry>>,
     pub nonce_state_loads: AtomicU64,
     pub nonce_state_load_fail: AtomicU64,
     pub nonce_state_persist: AtomicU64,
@@ -366,23 +365,6 @@ pub struct StrategyStats {
     pub relay_bundle_status: StdMutex<HashMap<String, RelayBundleStatus>>,
     pub opportunity_rejections: StdMutex<HashMap<String, u64>>,
     pub decision_traces: StdMutex<Vec<String>>,
-}
-
-#[derive(Clone, Debug)]
-pub struct BundleTelemetry {
-    pub tx_hash: String,
-    pub source: String,
-    pub decision_path: String,
-    pub status: String,
-    pub profit_eth: f64,
-    pub gas_cost_eth: f64,
-    pub net_eth: f64,
-    pub gas_covered_eth: f64,
-    pub gas_refunded_eth: f64,
-    pub retained_eth: f64,
-    pub rebate_eth: f64,
-    pub native_usd_price: f64,
-    pub timestamp_ms: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -432,14 +414,6 @@ impl StrategyStats {
             self.ingest_backpressure.fetch_add(1, Ordering::Relaxed);
         } else {
             self.ingest_queue_depth.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    pub fn record_bundle(&self, entry: BundleTelemetry) {
-        let mut guard = self.bundles.lock().unwrap_or_else(|e| e.into_inner());
-        guard.push(entry);
-        if guard.len() > 50 {
-            guard.remove(0);
         }
     }
 
@@ -572,10 +546,6 @@ pub struct StrategyExecutor {
     pub(in crate::services::strategy) executor_bribe_bps: u64,
     pub(in crate::services::strategy) executor_bribe_recipient: Option<Address>,
     pub(in crate::services::strategy) flashloan_enabled: bool,
-    pub(in crate::services::strategy) sponsorship_enabled: bool,
-    pub(in crate::services::strategy) sponsorship_retained_bps: u64,
-    pub(in crate::services::strategy) sponsorship_per_tx_gas_cap_eth: f64,
-    pub(in crate::services::strategy) sponsorship_per_day_gas_cap_eth: f64,
     pub(in crate::services::strategy) flashloan_providers: Vec<FlashloanProvider>,
     pub(in crate::services::strategy) aave_pool: Option<Address>,
     pub(in crate::services::strategy) reserve_cache: Arc<ReserveCache>,
@@ -638,10 +608,6 @@ pub struct StrategyConfig {
     pub executor_bribe_bps: u64,
     pub executor_bribe_recipient: Option<Address>,
     pub flashloan_enabled: bool,
-    pub sponsorship_enabled: bool,
-    pub sponsorship_retained_bps: u64,
-    pub sponsorship_per_tx_gas_cap_eth: f64,
-    pub sponsorship_per_day_gas_cap_eth: f64,
     pub flashloan_providers: Vec<FlashloanProvider>,
     pub aave_pool: Option<Address>,
     pub reserve_cache: Arc<ReserveCache>,
@@ -1447,21 +1413,6 @@ impl StrategyExecutor {
             executor_bribe_bps: config.executor_bribe_bps,
             executor_bribe_recipient: config.executor_bribe_recipient,
             flashloan_enabled: config.flashloan_enabled,
-            sponsorship_enabled: config.sponsorship_enabled,
-            sponsorship_retained_bps: config.sponsorship_retained_bps.clamp(0, 10_000),
-            sponsorship_per_tx_gas_cap_eth: if config.sponsorship_per_tx_gas_cap_eth.is_finite() {
-                config.sponsorship_per_tx_gas_cap_eth.max(0.0)
-            } else {
-                0.05
-            },
-            sponsorship_per_day_gas_cap_eth: if config.sponsorship_per_day_gas_cap_eth.is_finite() {
-                config
-                    .sponsorship_per_day_gas_cap_eth
-                    .max(0.0)
-                    .max(config.sponsorship_per_tx_gas_cap_eth.max(0.0))
-            } else {
-                0.5f64.max(config.sponsorship_per_tx_gas_cap_eth.max(0.0))
-            },
             flashloan_providers: config.flashloan_providers,
             aave_pool: config.aave_pool,
             reserve_cache: config.reserve_cache,
@@ -2707,10 +2658,6 @@ mod tests {
             executor_bribe_bps: 0,
             executor_bribe_recipient: None,
             flashloan_enabled: false,
-            sponsorship_enabled: true,
-            sponsorship_retained_bps: 1_000,
-            sponsorship_per_tx_gas_cap_eth: 0.05,
-            sponsorship_per_day_gas_cap_eth: 0.5,
             flashloan_providers: vec![FlashloanProvider::Balancer],
             aave_pool: None,
             reserve_cache,

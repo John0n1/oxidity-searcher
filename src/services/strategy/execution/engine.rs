@@ -15,7 +15,6 @@ use crate::infrastructure::data::address_registry::AddressRegistry;
 use crate::infrastructure::data::token_manager::TokenManager;
 use crate::network::block_listener::BlockListener;
 use crate::network::gas::GasOracle;
-use crate::network::ingest::public_rpc::{PublicRpcIngressPolicyConfig, spawn_public_rpc_ingress};
 use crate::network::mempool::MempoolScanner;
 use crate::network::mev_share::MevShareClient;
 use crate::network::nonce::NonceManager;
@@ -78,19 +77,6 @@ pub struct EngineConfig {
     pub gas_cap_multiplier_bps: u64,
     pub simulator: Simulator,
     pub token_manager: Arc<TokenManager>,
-    pub metrics_port: u16,
-    pub metrics_bind: Option<String>,
-    pub metrics_token: Option<String>,
-    pub metrics_enable_shutdown: bool,
-    pub public_rpc_ingress_enabled: bool,
-    pub public_rpc_ingress_port: u16,
-    pub public_rpc_ingress_bind: Option<String>,
-    pub public_rpc_upstream_url: Option<String>,
-    pub public_rpc_policy: PublicRpcIngressPolicyConfig,
-    pub sponsorship_enabled: bool,
-    pub sponsorship_retained_bps: u64,
-    pub sponsorship_per_tx_gas_cap_eth: f64,
-    pub sponsorship_per_day_gas_cap_eth: f64,
     pub strategy_enabled: bool,
     pub slippage_bps: u64,
     pub profit_guard_base_floor_multiplier_bps: u64,
@@ -156,19 +142,6 @@ pub struct Engine {
     gas_cap_multiplier_bps: u64,
     simulator: Simulator,
     token_manager: Arc<TokenManager>,
-    metrics_port: u16,
-    metrics_bind: Option<String>,
-    metrics_token: Option<String>,
-    metrics_enable_shutdown: bool,
-    public_rpc_ingress_enabled: bool,
-    public_rpc_ingress_port: u16,
-    public_rpc_ingress_bind: Option<String>,
-    public_rpc_upstream_url: Option<String>,
-    public_rpc_policy: PublicRpcIngressPolicyConfig,
-    sponsorship_enabled: bool,
-    sponsorship_retained_bps: u64,
-    sponsorship_per_tx_gas_cap_eth: f64,
-    sponsorship_per_day_gas_cap_eth: f64,
     strategy_enabled: bool,
     slippage_bps: u64,
     profit_guard_base_floor_multiplier_bps: u64,
@@ -236,34 +209,6 @@ impl Engine {
             gas_cap_multiplier_bps: config.gas_cap_multiplier_bps,
             simulator: config.simulator,
             token_manager: config.token_manager,
-            metrics_port: config.metrics_port,
-            metrics_bind: config.metrics_bind,
-            metrics_token: config.metrics_token,
-            metrics_enable_shutdown: config.metrics_enable_shutdown,
-            public_rpc_ingress_enabled: config.public_rpc_ingress_enabled,
-            public_rpc_ingress_port: config.public_rpc_ingress_port.max(1),
-            public_rpc_ingress_bind: config.public_rpc_ingress_bind,
-            public_rpc_upstream_url: config.public_rpc_upstream_url.and_then(|url| {
-                let trimmed = url.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed.to_string())
-                }
-            }),
-            public_rpc_policy: config.public_rpc_policy,
-            sponsorship_enabled: config.sponsorship_enabled,
-            sponsorship_retained_bps: config.sponsorship_retained_bps.clamp(0, 10_000),
-            sponsorship_per_tx_gas_cap_eth: if config.sponsorship_per_tx_gas_cap_eth.is_finite() {
-                config.sponsorship_per_tx_gas_cap_eth.max(0.0)
-            } else {
-                0.05
-            },
-            sponsorship_per_day_gas_cap_eth: if config.sponsorship_per_day_gas_cap_eth.is_finite() {
-                config.sponsorship_per_day_gas_cap_eth.max(0.0)
-            } else {
-                0.5
-            },
             strategy_enabled: config.strategy_enabled,
             slippage_bps: config.slippage_bps,
             profit_guard_base_floor_multiplier_bps: config.profit_guard_base_floor_multiplier_bps,
@@ -899,39 +844,6 @@ impl Engine {
                 Ok::<(), AppError>(())
             }
         };
-        let _metrics_addr = crate::common::metrics::spawn_metrics_server(
-            self.metrics_port,
-            self.chain_id,
-            shutdown.clone(),
-            self.db.clone(),
-            stats.clone(),
-            self.portfolio.clone(),
-            crate::common::metrics::PublicSummaryPolicy {
-                retained_bps: self.sponsorship_retained_bps,
-                per_tx_gas_cap_eth: self.sponsorship_per_tx_gas_cap_eth,
-                per_day_gas_cap_eth: self.sponsorship_per_day_gas_cap_eth,
-            },
-            self.metrics_bind.clone(),
-            self.metrics_token.clone(),
-            self.metrics_enable_shutdown,
-        )
-        .await;
-        let _public_rpc_addr = if self.public_rpc_ingress_enabled {
-            spawn_public_rpc_ingress(
-                self.public_rpc_ingress_port,
-                self.chain_id,
-                shutdown.clone(),
-                self.public_rpc_ingress_bind.clone(),
-                bundle_sender.clone(),
-                stats.clone(),
-                self.public_rpc_upstream_url.clone(),
-                self.relay_http_client.clone(),
-                self.public_rpc_policy.clone(),
-            )
-            .await
-        } else {
-            None
-        };
         if self.strategy_enabled {
             // Validate tokenlist addresses for this chain before strategy uses them.
             let invalid = self
@@ -983,10 +895,6 @@ impl Engine {
                 executor_bribe_bps: self.executor_bribe_bps,
                 executor_bribe_recipient: self.executor_bribe_recipient,
                 flashloan_enabled: self.flashloan_enabled,
-                sponsorship_enabled: self.sponsorship_enabled,
-                sponsorship_retained_bps: self.sponsorship_retained_bps,
-                sponsorship_per_tx_gas_cap_eth: self.sponsorship_per_tx_gas_cap_eth,
-                sponsorship_per_day_gas_cap_eth: self.sponsorship_per_day_gas_cap_eth,
                 flashloan_providers: self.flashloan_providers.clone(),
                 aave_pool,
                 reserve_cache: reserve_cache.clone(),

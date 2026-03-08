@@ -11,4 +11,3 @@ pub mod seen_cache;
 pub use crate::app::logging as logger;
 pub use crate::domain::constants;
 pub use crate::domain::error;
-pub use crate::services::metrics;

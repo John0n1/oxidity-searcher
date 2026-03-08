@@ -1,5 +1,0 @@
-{
-  "name": "Oxidity Wallet",
-  "description": "Oxidity Wallet is a self-custody Ethereum wallet with private execution, selective sponsorship, and infrastructure for teams shipping production orderflow.",
-  "requestFramePermissions": []
-}
