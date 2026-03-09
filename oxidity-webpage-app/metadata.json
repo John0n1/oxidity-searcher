@@ -1,0 +1,5 @@
+{
+  "name": "Oxidity Wallet",
+  "description": "Landing page for Oxidity Wallet, a private execution wallet available as a Chrome extension, Android APK, and Web Wallet.",
+  "requestFramePermissions": []
+}

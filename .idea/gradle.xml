@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="GradleMigrationSettings" migrationVersion="1" />
+  <component name="GradleSettings">
+    <option name="linkedExternalProjectsSettings">
+      <GradleProjectSettings>
+        <option name="externalProjectPath" value="$PROJECT_DIR$/oxidity-wallet/android" />
+        <option name="gradleJvm" value="21" />
+        <option name="modules">
+          <set>
+            <option value="$PROJECT_DIR$/oxidity-wallet/android" />
+            <option value="$PROJECT_DIR$/oxidity-wallet/android/app" />
+            <option value="$PROJECT_DIR$/oxidity-wallet/android/capacitor-cordova-android-plugins" />
+            <option value="$PROJECT_DIR$/oxidity-wallet/node_modules/@aparajita/capacitor-biometric-auth/android" />
+            <option value="$PROJECT_DIR$/oxidity-wallet/node_modules/@aparajita/capacitor-secure-storage/android" />
+            <option value="$PROJECT_DIR$/oxidity-wallet/node_modules/@capacitor/android/capacitor" />
+            <option value="$PROJECT_DIR$/oxidity-wallet/node_modules/@capacitor/app/android" />
+            <option value="$PROJECT_DIR$/oxidity-wallet/node_modules/@capacitor/browser/android" />
+          </set>
+        </option>
+      </GradleProjectSettings>
+      <GradleProjectSettings>
+        <option name="externalProjectPath" value="$PROJECT_DIR$/oxidity-wallet/node_modules/@aparajita/capacitor-biometric-auth/android" />
+        <option name="gradleJvm" value="21 (2)" />
+      </GradleProjectSettings>
+      <GradleProjectSettings>
+        <option name="externalProjectPath" value="$PROJECT_DIR$/oxidity-wallet/node_modules/@aparajita/capacitor-secure-storage/android" />
+        <option name="gradleJvm" value="21 (3)" />
+      </GradleProjectSettings>
+      <GradleProjectSettings>
+        <option name="externalProjectPath" value="$PROJECT_DIR$/oxidity-wallet/node_modules/@capacitor/android/capacitor" />
+        <option name="gradleJvm" value="21 (5)" />
+        <option name="modules">
+          <set>
+            <option value="$PROJECT_DIR$/oxidity-wallet/node_modules/@capacitor/android/capacitor" />
+          </set>
+        </option>
+      </GradleProjectSettings>
+      <GradleProjectSettings>
+        <option name="externalProjectPath" value="$PROJECT_DIR$/oxidity-wallet/node_modules/@capacitor/app/android" />
+        <option name="gradleJvm" value="21 (4)" />
+      </GradleProjectSettings>
+    </option>
+  </component>
+</project>

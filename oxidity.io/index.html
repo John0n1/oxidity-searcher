@@ -3,47 +3,528 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Oxidity</title>
+    <title>Oxidity | Wallet Downloads</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Space+Grotesk:wght@500;700&display=swap"
+      rel="stylesheet"
+    />
     <style>
       :root {
         color-scheme: dark;
+        --bg: #050816;
+        --panel: rgba(8, 14, 33, 0.78);
+        --panel-strong: rgba(12, 19, 43, 0.96);
+        --line: rgba(255, 255, 255, 0.08);
+        --text: #f7f8fc;
+        --muted: rgba(247, 248, 252, 0.7);
+        --muted-soft: rgba(247, 248, 252, 0.48);
+        --brand: #7f8cff;
+        --brand-2: #1ce6b6;
+        --brand-3: #ffaf45;
       }
+
       * {
         box-sizing: border-box;
       }
+
       body {
         margin: 0;
         min-height: 100vh;
+        font-family: "Manrope", sans-serif;
+        background:
+          radial-gradient(circle at top left, rgba(127, 140, 255, 0.2), transparent 30%),
+          radial-gradient(circle at top right, rgba(28, 230, 182, 0.14), transparent 24%),
+          linear-gradient(180deg, #050816 0%, #040611 100%);
+        color: var(--text);
+      }
+
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+
+      .shell {
+        width: min(1180px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 28px 0 64px;
+      }
+
+      .nav {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 24px;
+        margin-bottom: 32px;
+      }
+
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 14px;
+        font-family: "Space Grotesk", sans-serif;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+      }
+
+      .brand-mark {
+        width: 44px;
+        height: 44px;
+        border-radius: 16px;
         display: grid;
         place-items: center;
-        background: #06080f;
-        color: #f5f7fb;
-        font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: linear-gradient(135deg, rgba(127, 140, 255, 0.24), rgba(28, 230, 182, 0.18));
+        border: 1px solid rgba(127, 140, 255, 0.3);
+        box-shadow: 0 20px 45px rgba(19, 26, 58, 0.45);
       }
-      main {
-        width: min(92vw, 640px);
-        padding: 48px 28px;
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 24px;
-        background: rgba(10, 15, 30, 0.88);
-        text-align: center;
-        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+
+      .brand-mark::before {
+        content: "O";
+        font-size: 1.1rem;
       }
+
+      .nav-links {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .nav-links a,
+      .cta-secondary {
+        padding: 12px 16px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.02);
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: 1.15fr 0.85fr;
+        gap: 24px;
+        align-items: stretch;
+      }
+
+      .hero-panel,
+      .card,
+      .network-panel,
+      .note-panel {
+        position: relative;
+        overflow: hidden;
+        border-radius: 32px;
+        border: 1px solid var(--line);
+        background: var(--panel);
+        backdrop-filter: blur(18px);
+        box-shadow: 0 30px 80px rgba(0, 0, 0, 0.28);
+      }
+
+      .hero-panel {
+        padding: 40px;
+      }
+
+      .hero-panel::before,
+      .network-panel::before {
+        content: "";
+        position: absolute;
+        inset: auto auto -32px -24px;
+        width: 180px;
+        height: 180px;
+        background: radial-gradient(circle, rgba(127, 140, 255, 0.26), transparent 70%);
+        pointer-events: none;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        background: rgba(127, 140, 255, 0.12);
+        border: 1px solid rgba(127, 140, 255, 0.24);
+        color: #b8c1ff;
+        font-size: 0.78rem;
+        text-transform: uppercase;
+        letter-spacing: 0.18em;
+      }
+
       h1 {
-        margin: 0 0 12px;
-        font-size: clamp(2rem, 5vw, 3rem);
+        font-family: "Space Grotesk", sans-serif;
+        font-size: clamp(3rem, 8vw, 5.3rem);
+        line-height: 0.92;
+        margin: 20px 0 16px;
+        max-width: 10ch;
       }
-      p {
-        margin: 0;
-        color: rgba(245, 247, 251, 0.78);
+
+      .hero-copy {
+        max-width: 56ch;
         font-size: 1.05rem;
+        line-height: 1.7;
+        color: var(--muted);
+      }
+
+      .hero-actions {
+        display: flex;
+        gap: 14px;
+        flex-wrap: wrap;
+        margin-top: 28px;
+      }
+
+      .cta-primary,
+      .download-link {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        min-height: 54px;
+        padding: 0 22px;
+        border-radius: 18px;
+        font-weight: 700;
+      }
+
+      .cta-primary {
+        background: linear-gradient(135deg, var(--brand), #5262ff);
+        color: white;
+        box-shadow: 0 16px 34px rgba(82, 98, 255, 0.35);
+      }
+
+      .cta-secondary {
+        color: var(--text);
+      }
+
+      .hero-meta {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+        margin-top: 28px;
+      }
+
+      .stat {
+        padding: 18px;
+        border-radius: 24px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .stat strong {
+        display: block;
+        font-size: 1.45rem;
+        margin-bottom: 4px;
+      }
+
+      .stat span {
+        color: var(--muted-soft);
+        font-size: 0.92rem;
+      }
+
+      .download-grid {
+        display: grid;
+        gap: 18px;
+      }
+
+      .card {
+        padding: 28px;
+      }
+
+      .platform {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 16px;
+        margin-bottom: 16px;
+      }
+
+      .platform h2 {
+        margin: 0;
+        font-size: 1.5rem;
+      }
+
+      .pill {
+        padding: 8px 12px;
+        border-radius: 999px;
+        font-size: 0.76rem;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+      }
+
+      .pill.chrome { background: rgba(127, 140, 255, 0.12); color: #b8c1ff; }
+      .pill.android { background: rgba(28, 230, 182, 0.12); color: #86f0d4; }
+      .pill.web { background: rgba(255, 175, 69, 0.12); color: #ffd29a; }
+
+      .card p {
+        margin: 0 0 20px;
+        line-height: 1.7;
+        color: var(--muted);
+      }
+
+      .download-link {
+        width: 100%;
+        background: var(--panel-strong);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+      }
+
+      .meta-row {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        margin-top: 14px;
+      }
+
+      .meta-row span {
+        padding: 8px 10px;
+        border-radius: 999px;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        color: var(--muted-soft);
+        font-size: 0.8rem;
+      }
+
+      .section {
+        margin-top: 28px;
+      }
+
+      .section-heading {
+        display: flex;
+        justify-content: space-between;
+        gap: 20px;
+        align-items: end;
+        margin-bottom: 18px;
+      }
+
+      .section-heading h3 {
+        margin: 0;
+        font-size: 1.35rem;
+      }
+
+      .section-heading p {
+        margin: 0;
+        color: var(--muted-soft);
+      }
+
+      .network-panel {
+        padding: 24px;
+      }
+
+      .network-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .network-list span {
+        padding: 10px 14px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+
+      .note-panel {
+        padding: 24px;
+        margin-top: 20px;
+      }
+
+      .note-panel strong {
+        display: block;
+        margin-bottom: 10px;
+      }
+
+      .note-panel p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.7;
+      }
+
+      footer {
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        flex-wrap: wrap;
+        margin-top: 28px;
+        color: var(--muted-soft);
+        font-size: 0.88rem;
+      }
+
+      @media (max-width: 960px) {
+        .hero {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @media (max-width: 640px) {
+        .shell {
+          width: min(100vw - 24px, 1180px);
+          padding-top: 18px;
+        }
+
+        .hero-panel,
+        .card,
+        .network-panel,
+        .note-panel {
+          border-radius: 26px;
+        }
+
+        .hero-panel {
+          padding: 28px 22px;
+        }
+
+        .hero-meta {
+          grid-template-columns: 1fr;
+        }
+
+        .nav {
+          align-items: start;
+          flex-direction: column;
+        }
       }
     </style>
   </head>
   <body>
-    <main>
-      <h1>Maintenance in progress</h1>
-      <p>Come back soon.</p>
+    <main class="shell">
+      <header class="nav">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span>Oxidity</span>
+        </div>
+        <nav class="nav-links">
+          <a href="https://wallet.oxidity.io/">Web Wallet</a>
+          <a href="/downloads/oxidity-wallet-extension.zip">Chrome Build</a>
+          <a href="/downloads/oxidity-wallet-debug.apk">Android APK</a>
+        </nav>
+      </header>
+
+      <section class="hero">
+        <article class="hero-panel">
+          <span class="eyebrow">Private Execution Wallet</span>
+          <h1>Install Oxidity where you actually trade.</h1>
+          <p class="hero-copy">
+            Oxidity Wallet ships as a Chrome extension, a native Android APK with biometric unlock,
+            and a hosted web wallet. The wallet UI is shared across all three surfaces while the
+            backend handles portfolio reads, activity, quoting, broadcasting, and market analysis.
+          </p>
+          <div class="hero-actions">
+            <a class="cta-primary" href="/downloads/oxidity-wallet-extension.zip">Download Chrome Build</a>
+            <a class="cta-secondary" href="/downloads/oxidity-wallet-debug.apk">Download Android APK</a>
+            <a class="cta-secondary" href="https://wallet.oxidity.io/">Open Web Wallet</a>
+          </div>
+          <div class="hero-meta">
+            <div class="stat">
+              <strong>13</strong>
+              <span>supported networks shipped in the backend</span>
+            </div>
+            <div class="stat">
+              <strong>Rust</strong>
+              <span>`axum` + `alloy` backend for EVM wallet operations</span>
+            </div>
+            <div class="stat">
+              <strong>Biometric</strong>
+              <span>fingerprint/device credential unlock on Android</span>
+            </div>
+          </div>
+        </article>
+
+        <aside class="download-grid">
+          <section class="card">
+            <div class="platform">
+              <div>
+                <h2>Chrome Extension</h2>
+              </div>
+              <span class="pill chrome">Extension</span>
+            </div>
+            <p>
+              Installs the current extension build for Chromium-based browsers. The internal runtime
+              opens as a `chrome-extension://.../home.html` page after install.
+            </p>
+            <a class="download-link" href="/downloads/oxidity-wallet-extension.zip">Get `oxidity-wallet-extension.zip`</a>
+            <div class="meta-row">
+              <span>Popup entry: `home.html`</span>
+              <span>Storage enabled</span>
+              <span>Wallet API ready</span>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="platform">
+              <div>
+                <h2>Android APK</h2>
+              </div>
+              <span class="pill android">APK</span>
+            </div>
+            <p>
+              Native Capacitor Android build with secure storage, biometric authentication, and the
+              same Oxidity wallet frontend packaged inside the app shell.
+            </p>
+            <a class="download-link" href="/downloads/oxidity-wallet-debug.apk">Get `oxidity-wallet-debug.apk`</a>
+            <div class="meta-row">
+              <span>Fingerprint unlock</span>
+              <span>Secure storage</span>
+              <span>Debug build ready</span>
+            </div>
+          </section>
+
+          <section class="card">
+            <div class="platform">
+              <div>
+                <h2>Hosted Wallet</h2>
+              </div>
+              <span class="pill web">Web</span>
+            </div>
+            <p>
+              Opens the same wallet frontend on `wallet.oxidity.io`, backed by the Oxidity wallet
+              API and the configured public RPC infrastructure.
+            </p>
+            <a class="download-link" href="https://wallet.oxidity.io/">Launch `wallet.oxidity.io`</a>
+            <div class="meta-row">
+              <span>Portfolio reads</span>
+              <span>Send flow</span>
+              <span>AI market assistant</span>
+            </div>
+          </section>
+        </aside>
+      </section>
+
+      <section class="section">
+        <div class="section-heading">
+          <div>
+            <h3>Supported Networks</h3>
+            <p>Backend endpoints are configured across EVM and non-EVM surfaces.</p>
+          </div>
+        </div>
+        <div class="network-panel">
+          <div class="network-list">
+            <span>Ethereum</span>
+            <span>BNB Smart Chain</span>
+            <span>Polygon</span>
+            <span>Base</span>
+            <span>Avalanche C-Chain</span>
+            <span>Optimism</span>
+            <span>Arbitrum One</span>
+            <span>PulseChain</span>
+            <span>Linea</span>
+            <span>Unichain</span>
+            <span>Solana</span>
+            <span>Sui</span>
+            <span>Cosmos</span>
+            <span>Bitcoin</span>
+          </div>
+        </div>
+        <div class="note-panel">
+          <strong>Operational note</strong>
+          <p>
+            The wallet backend exposes `/api/bootstrap`, `/api/portfolio`, `/api/send/prepare`,
+            `/api/send/broadcast`, `/api/activity`, `/api/catalog`, and `/api/ai/chat`. The current
+            Chrome artifact is a packaged extension build; once a Web Store listing exists, this page
+            should point to that stable install target instead of the raw zip.
+          </p>
+        </div>
+      </section>
+
+      <footer>
+        <span>Oxidity Wallet</span>
+        <span>Private execution. MEV-aware routing. Multi-surface delivery.</span>
+      </footer>
     </main>
   </body>
 </html>

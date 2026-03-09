@@ -1,0 +1,21 @@
+[Unit]
+Description=Oxidity Wallet Backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=john
+Group=john
+WorkingDirectory=/home/john/oxidity-searcher
+EnvironmentFile=-/home/john/oxidity-searcher/.env
+Environment=RUST_LOG=info
+Environment=OXIDITY_WALLET_BACKEND_BIND=127.0.0.1
+Environment=OXIDITY_WALLET_BACKEND_PORT=9555
+Environment=OXIDITY_WALLET_BACKEND_DB=sqlite:///home/john/oxidity-searcher/oxidity_wallet_backend.db
+ExecStart=/home/john/oxidity-searcher/target/release/oxidity_wallet_backend
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
