@@ -26,9 +26,33 @@ server {
     add_header Cross-Origin-Resource-Policy "same-origin" always;
     add_header Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; connect-src 'self' https://wallet.oxidity.io https://oxidity.io; img-src 'self' data: https:; font-src 'self' https://fonts.gstatic.com data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self' 'unsafe-inline'; upgrade-insecure-requests" always;
 
+    location = /downloads/oxidity-wallet-extension.zip {
+        return 301 https://oxidity.io/downloads/oxidity-wallet-extension.zip;
+    }
+
+    location = /downloads/oxidity-wallet-debug.apk {
+        return 301 https://oxidity.io/downloads/oxidity-wallet-debug.apk;
+    }
+
+    location = /downloads/oxidity-wallet-release.apk {
+        return 301 https://oxidity.io/downloads/oxidity-wallet-release.apk;
+    }
+
+    location = /oxidity-wallet-extension.zip {
+        return 301 https://oxidity.io/downloads/oxidity-wallet-extension.zip;
+    }
+
+    location = /oxidity-wallet-debug.apk {
+        return 301 https://oxidity.io/downloads/oxidity-wallet-debug.apk;
+    }
+
+    location = /oxidity-wallet-release.apk {
+        return 301 https://oxidity.io/downloads/oxidity-wallet-release.apk;
+    }
+
     location /api/ {
         limit_req zone=wallet_api_per_ip burst=10 nodelay;
-        proxy_pass http://__WALLET_API_UPSTREAM__/;
+        proxy_pass http://__WALLET_API_UPSTREAM__/api/;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;

@@ -1,20 +1,21 @@
-# Development build, config and artifacts
+# Build, runtime, and local editor state
 target/
 out/
 cache/
+artifacts/
 .vscode/
 .venv/
 tmp/
 config.toml
 .env
-.cargo
+.cargo/
 *.db
 *.ipc
-oxidity.io/
-wallet.oxidity.io/
-deploy/
-scripts/
-
+.idea/
+apps/*/node_modules/
+apps/*/dist/
+deploy/nginx/generated/*
+!deploy/nginx/generated/.gitkeep
 
 
 

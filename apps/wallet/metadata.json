@@ -1,0 +1,5 @@
+{
+  "name": "Oxidity Wallet",
+  "description": "A premium self-custody Ethereum wallet with a dark, modern, high-performance feel, featuring private execution and MEV protection.",
+  "requestFramePermissions": []
+}

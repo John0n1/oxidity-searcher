@@ -2655,8 +2655,8 @@ async fn api_bootstrap(
         version: "1.0.0".into(),
         wallet_app_url: "https://wallet.oxidity.io/".into(),
         downloads: DownloadLinks {
-            chrome_extension: "/downloads/oxidity-wallet-extension.zip".into(),
-            android_apk: "/downloads/oxidity-wallet-debug.apk".into(),
+            chrome_extension: "https://oxidity.io/downloads/oxidity-wallet-extension.zip".into(),
+            android_apk: "https://oxidity.io/downloads/oxidity-wallet-debug.apk".into(),
         },
         supported_networks,
         defaults: json!({
