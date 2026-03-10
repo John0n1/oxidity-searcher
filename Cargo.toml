@@ -62,6 +62,7 @@ axum = "0.8.8"
 tower-http = { version = "0.6.8", features = ["cors"] }
 base64 = "0.22.1"
 bs58 = "0.5.1"
+ed25519-dalek = "2.2.0"
 
 [dev-dependencies]
 regex = "1.12.3"

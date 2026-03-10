@@ -1,9 +1,15 @@
 import { lazy, Suspense, useEffect, type ComponentType } from 'react';
 import { Capacitor } from '@capacitor/core';
+import { App as CapacitorApp } from '@capacitor/app';
 import { AnimatePresence, MotionConfig } from 'motion/react';
 
 import { BackgroundAnimation } from './components/BackgroundAnimation';
+import { getBackgroundPreloadTokens } from './lib/walletDefaults';
+import { applyThemeMode, readThemeMode } from './lib/theme';
+import { preloadTokenLogos } from './lib/tokenLogos';
 import { useAppStore } from './store/appStore';
+
+const AUTO_LOCK_IDLE_MS = 5 * 60 * 1000;
 
 function lazyNamed<TModule extends Record<string, ComponentType<any>>, TKey extends keyof TModule>(
   loader: () => Promise<TModule>,
@@ -26,6 +32,10 @@ const TokenManagementView = lazyNamed(
   () => import('./views/TokenManagementView'),
   'TokenManagementView',
 );
+const TokenDetailsView = lazyNamed(
+  () => import('./views/TokenDetailsView'),
+  'TokenDetailsView',
+);
 const SendView = lazyNamed(() => import('./views/SendView'), 'SendView');
 const BuyView = lazyNamed(() => import('./views/BuyView'), 'BuyView');
 const LegalView = lazyNamed(() => import('./views/LegalView'), 'LegalView');
@@ -34,6 +44,7 @@ const AdvancedSettingsView = lazyNamed(
   () => import('./views/AdvancedSettingsView'),
   'AdvancedSettingsView',
 );
+const LicensesView = lazyNamed(() => import('./views/LicensesView'), 'LicensesView');
 const AIView = lazyNamed(() => import('./views/AIView'), 'AIView');
 const SubscriptionView = lazyNamed(() => import('./views/SubscriptionView'), 'SubscriptionView');
 const TransactionDetailsView = lazyNamed(
@@ -61,11 +72,13 @@ function AppView({ currentView }: { currentView: string }) {
       {currentView === 'import-wallet' && <ImportWalletView key="import" />}
       {currentView === 'walkthrough' && <WalkthroughView key="walk" />}
       {currentView === 'token-management' && <TokenManagementView key="token-management" />}
+      {currentView === 'token-details' && <TokenDetailsView key="token-details" />}
       {currentView === 'send' && <SendView key="send" />}
       {currentView === 'buy' && <BuyView key="buy" />}
       {currentView === 'legal' && <LegalView key="legal" />}
       {currentView === 'support' && <SupportView key="support" />}
       {currentView === 'advanced' && <AdvancedSettingsView key="advanced" />}
+      {currentView === 'licenses' && <LicensesView key="licenses" />}
       {currentView === 'ai' && <AIView key="ai" />}
       {currentView === 'subscription' && <SubscriptionView key="subscription" />}
       {currentView === 'transaction-details' && <TransactionDetailsView key="transaction-details" />}
@@ -81,8 +94,13 @@ export default function App() {
   const initialize = useAppStore((state) => state.initialize);
   const currentView = useAppStore((state) => state.currentView);
   const isLocked = useAppStore((state) => state.isLocked);
+  const walletCreated = useAppStore((state) => state.walletCreated);
+  const setIsLocked = useAppStore((state) => state.setIsLocked);
+  const customTokens = useAppStore((state) => state.customTokens);
+  const activeChainKey = useAppStore((state) => state.activeChainKey);
 
   useEffect(() => {
+    applyThemeMode(readThemeMode());
     void initialize();
   }, [initialize]);
 
@@ -91,6 +109,75 @@ export default function App() {
   useEffect(() => {
     document.documentElement.dataset.platform = isNativePlatform ? 'native' : 'web';
   }, [isNativePlatform]);
+
+  useEffect(() => {
+    void preloadTokenLogos(getBackgroundPreloadTokens(activeChainKey, customTokens));
+  }, [activeChainKey, customTokens]);
+
+  useEffect(() => {
+    if (!walletCreated) {
+      return;
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        setIsLocked(true);
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [setIsLocked, walletCreated]);
+
+  useEffect(() => {
+    if (!walletCreated || isLocked) {
+      return;
+    }
+
+    let timer = window.setTimeout(() => {
+      setIsLocked(true);
+    }, AUTO_LOCK_IDLE_MS);
+
+    const resetTimer = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        setIsLocked(true);
+      }, AUTO_LOCK_IDLE_MS);
+    };
+
+    const events: Array<keyof WindowEventMap> = ['pointerdown', 'keydown', 'scroll', 'focus'];
+    events.forEach((eventName) => {
+      window.addEventListener(eventName, resetTimer);
+    });
+
+    return () => {
+      window.clearTimeout(timer);
+      events.forEach((eventName) => {
+        window.removeEventListener(eventName, resetTimer);
+      });
+    };
+  }, [isLocked, setIsLocked, walletCreated]);
+
+  useEffect(() => {
+    if (!isNativePlatform || !walletCreated) {
+      return;
+    }
+
+    let listener: { remove: () => Promise<void> } | null = null;
+    void CapacitorApp.addListener('appStateChange', ({ isActive }) => {
+      if (!isActive) {
+        setIsLocked(true);
+      }
+    }).then((handle) => {
+      listener = handle;
+    });
+
+    return () => {
+      void listener?.remove();
+    };
+  }, [isNativePlatform, setIsLocked, walletCreated]);
 
   const showBackground =
     ['welcome', 'create-wallet', 'import-wallet', 'splash', 'walkthrough'].includes(currentView)

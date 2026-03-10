@@ -5,24 +5,60 @@ import { Shield, KeyRound, CheckCircle2, ChevronLeft, ArrowRight, Lock, EyeOff, 
 import { cn } from '../utils/cn';
 import { HDNodeWallet } from 'ethers';
 
+type VerificationChoice = {
+  id: string;
+  word: string;
+  seedIndex: number;
+};
+
+function shuffle<T>(items: T[]): T[] {
+  const next = [...items];
+  for (let index = next.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [next[index], next[swapIndex]] = [next[swapIndex], next[index]];
+  }
+  return next;
+}
+
+function randomSeedIndexes(total: number, count: number): number[] {
+  return shuffle(Array.from({ length: total }, (_, index) => index))
+    .slice(0, Math.min(total, count))
+    .sort((left, right) => left - right);
+}
+
 export function CreateWalletView() {
   const setView = useAppStore((state) => state.setView);
   const setBiometricsEnabled = useAppStore((state) => state.setBiometricsEnabled);
   const importWallet = useAppStore((state) => state.importWallet);
   const [step, setStep] = useState(1);
   const [passcode, setPasscode] = useState('');
-  const [confirmingWords, setConfirmingWords] = useState<string[]>([]);
+  const [selectedVerificationIds, setSelectedVerificationIds] = useState<string[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const seedPhrase = useMemo(() => {
     const wallet = HDNodeWallet.createRandom();
     return wallet.mnemonic?.phrase || '';
   }, []);
-  const seedWords = seedPhrase.split(' ').filter(Boolean);
-  const verificationPool = useMemo(
-    () => [...seedWords.slice(0, 6)].sort(() => Math.random() - 0.5),
-    [seedWords],
+  const seedWords = useMemo(() => seedPhrase.split(' ').filter(Boolean), [seedPhrase]);
+  const verificationIndexes = useMemo(() => randomSeedIndexes(seedWords.length, 3), [seedWords]);
+  const expectedVerificationIds = useMemo(
+    () => verificationIndexes.map((index) => `seed-${index}`),
+    [verificationIndexes],
   );
+  const verificationPool = useMemo<VerificationChoice[]>(() => {
+    const targetChoices = verificationIndexes.map((seedIndex) => ({
+      id: `seed-${seedIndex}`,
+      word: seedWords[seedIndex] || '',
+      seedIndex,
+    }));
+    const distractorChoices = shuffle(
+      seedWords
+        .map((word, seedIndex) => ({ id: `seed-${seedIndex}`, word, seedIndex }))
+        .filter((choice) => !expectedVerificationIds.includes(choice.id)),
+    ).slice(0, Math.min(6, Math.max(seedWords.length - targetChoices.length, 0)));
+
+    return shuffle([...targetChoices, ...distractorChoices]);
+  }, [expectedVerificationIds, seedWords, verificationIndexes]);
 
   const nextStep = () => setStep((s) => s + 1);
   const prevStep = () => {
@@ -40,15 +76,28 @@ export function CreateWalletView() {
     }
   };
 
-  const handleWordSelect = (word: string) => {
+  const handleWordSelect = (choice: VerificationChoice) => {
     setErrorMessage(null);
-    if (confirmingWords.includes(word)) {
-      setConfirmingWords(confirmingWords.filter((existingWord) => existingWord !== word));
-    } else if (confirmingWords.length < 3) {
-      const newWords = [...confirmingWords, word];
-      setConfirmingWords(newWords);
-      if (newWords.length === 3 && newWords.join(' ') === seedWords.slice(0, 3).join(' ')) {
-        setTimeout(nextStep, 500);
+    if (selectedVerificationIds.includes(choice.id)) {
+      setSelectedVerificationIds(
+        selectedVerificationIds.filter((existingChoiceId) => existingChoiceId !== choice.id),
+      );
+      return;
+    }
+    if (selectedVerificationIds.length >= expectedVerificationIds.length) {
+      return;
+    }
+
+    const nextSelection = [...selectedVerificationIds, choice.id];
+    setSelectedVerificationIds(nextSelection);
+    if (nextSelection.length === expectedVerificationIds.length) {
+      if (nextSelection.join(' ') === expectedVerificationIds.join(' ')) {
+        setTimeout(nextStep, 400);
+      } else {
+        window.setTimeout(() => {
+          setSelectedVerificationIds([]);
+          setErrorMessage('The selected words do not match the requested recovery phrase words.');
+        }, 350);
       }
     }
   };
@@ -277,42 +326,47 @@ export function CreateWalletView() {
               </div>
               <h2 className="text-3xl font-semibold tracking-tight mb-3">Verify Phrase</h2>
               <p className="text-zinc-400 leading-relaxed mb-8">
-                Select the first 3 words of your recovery phrase to confirm.
+                Select words{' '}
+                {verificationIndexes.map((index) => `#${index + 1}`).join(', ')} in that order.
+                This screen continues automatically when they are correct.
               </p>
               
               <div className="flex flex-wrap gap-2 mb-8">
-                {verificationPool.map((word, i) => (
+                {verificationPool.map((choice) => (
                   <button
-                    key={i}
-                    onClick={() => handleWordSelect(word)}
+                    key={choice.id}
+                    onClick={() => handleWordSelect(choice)}
                     className={cn(
                       "px-4 py-3 rounded-xl border transition-colors font-medium",
-                      confirmingWords.includes(word)
+                      selectedVerificationIds.includes(choice.id)
                         ? "bg-indigo-500/20 border-indigo-500 text-indigo-300"
                         : "bg-zinc-900 border-white/5 text-zinc-300 hover:bg-zinc-800"
                     )}
                   >
-                    {word}
+                    {choice.word}
                   </button>
                 ))}
               </div>
 
-              <div className="mt-auto">
-                <button
-                  disabled={confirmingWords.length < 3}
-                  onClick={() => {
-                    if (confirmingWords.join(' ') === seedWords.slice(0, 3).join(' ')) {
-                      nextStep();
-                      return;
-                    }
-                    setConfirmingWords([]);
-                    setErrorMessage('The selected words do not match your recovery phrase.');
-                  }}
-                  className="w-full bg-white text-black font-medium py-4 rounded-2xl hover:bg-zinc-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                >
-                  Verify
-                  <ArrowRight className="w-4 h-4" />
-                </button>
+              <div className="mt-auto rounded-2xl border border-white/5 bg-zinc-900/70 p-4">
+                <div className="text-xs uppercase tracking-[0.18em] text-zinc-500">Selected</div>
+                <div className="mt-3 flex min-h-11 flex-wrap gap-2">
+                  {selectedVerificationIds.length > 0 ? (
+                    selectedVerificationIds.map((choiceId) => {
+                      const choice = verificationPool.find((entry) => entry.id === choiceId);
+                      return choice ? (
+                        <div
+                          key={choiceId}
+                          className="rounded-full border border-indigo-500/30 bg-indigo-500/10 px-3 py-2 text-sm font-medium text-indigo-200"
+                        >
+                          #{choice.seedIndex + 1} {choice.word}
+                        </div>
+                      ) : null;
+                    })
+                  ) : (
+                    <div className="text-sm text-zinc-500">Tap the requested words to verify your backup.</div>
+                  )}
+                </div>
               </div>
             </motion.div>
           )}

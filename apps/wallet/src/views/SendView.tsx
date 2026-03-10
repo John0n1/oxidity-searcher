@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { motion, AnimatePresence } from 'motion/react';
 import { ArrowLeft, Search, User, ChevronDown, ShieldCheck, Info, Zap, Check, Plus, ExternalLink } from 'lucide-react';
@@ -9,6 +9,9 @@ import { openExternalUrl } from '../lib/external';
 import { useAppStore } from '../store/appStore';
 import { cn } from '../utils/cn';
 import { broadcastSignedSend, prepareNativeSend, type SendPrepareResponse } from '../lib/api';
+import { TokenLogo } from '../components/TokenLogo';
+import { getNativeAssetDescriptor } from '../lib/walletDefaults';
+import { preloadTokenLogos } from '../lib/tokenLogos';
 
 type Step = 'address' | 'amount' | 'review' | 'success';
 type Speed = 'slow' | 'standard' | 'fast';
@@ -55,6 +58,7 @@ export function SendView() {
   const nativeAsset = useAppStore((state) => state.nativeAsset);
   const exportActivePrivateKey = useAppStore((state) => state.exportActivePrivateKey);
   const exportActiveRecoveryPhrase = useAppStore((state) => state.exportActiveRecoveryPhrase);
+  const buildWalletAuth = useAppStore((state) => state.buildWalletAuth);
   const refreshWalletData = useAppStore((state) => state.refreshWalletData);
   const activeAccount = accounts.find((account) => account.id === activeAccountId);
   const [step, setStep] = useState<Step>('address');
@@ -70,7 +74,25 @@ export function SendView() {
   const [preparation, setPreparation] = useState<SendPrepareResponse | null>(null);
   const [explorerUrl, setExplorerUrl] = useState('');
 
-  const nativeSymbol = nativeAsset?.symbol || 'ETH';
+  const nativePlaceholder = useMemo(
+    () => getNativeAssetDescriptor(activeChainKey),
+    [activeChainKey],
+  );
+  const displayedNativeAsset = nativeAsset || (nativePlaceholder
+    ? {
+        id: `${nativePlaceholder.chainKey}:native`,
+        symbol: nativePlaceholder.symbol,
+        name: nativePlaceholder.name,
+        address: nativePlaceholder.address,
+        balance: '0',
+        fiatBalance: '0.00',
+        logo: nativePlaceholder.logo,
+        chainKey: nativePlaceholder.chainKey,
+        receiveAddress: activeAccount?.address || nativePlaceholder.address,
+        isNative: true,
+      }
+    : null);
+  const nativeSymbol = displayedNativeAsset?.symbol || 'ETH';
   const nativeBalance = nativeAsset?.rawBalance ?? activeAccount?.balance ?? 0;
   const nativePrice =
     nativeAsset && nativeAsset.rawBalance > 0
@@ -90,6 +112,14 @@ export function SendView() {
   const executionMode = preparation?.executionMode || 'direct';
   const isProtectedExecution = executionMode === 'protected';
   const chainAddressBook = addressBook.filter((entry) => entry.chainKey === activeChainKey);
+
+  useEffect(() => {
+    if (!displayedNativeAsset) {
+      return;
+    }
+
+    void preloadTokenLogos([displayedNativeAsset]);
+  }, [displayedNativeAsset]);
 
   const handleSaveAddress = () => {
     const value = resolvedAddress || address;
@@ -211,10 +241,15 @@ export function SendView() {
         });
       }
 
+      const auth = await buildWalletAuth('send_broadcast', {
+        walletAddress: activeAccount.address,
+        chainKey: activeChainKey,
+      });
       const response = await broadcastSignedSend({
         chainKey: activeChainKey,
         rawTransaction,
         walletAddress: activeAccount.address,
+        auth: auth || undefined,
         encoding,
         txType: 'send',
         title: `Send ${nativeSymbol}`,
@@ -359,9 +394,12 @@ export function SendView() {
             >
               <div className="flex flex-col items-center gap-4 py-8">
                 <div className="flex items-center gap-2 bg-zinc-900 border border-white/5 px-4 py-2 rounded-full">
-                  <div className="w-5 h-5 bg-blue-500 rounded-full flex items-center justify-center text-[10px] font-bold">
-                    {nativeSymbol.slice(0, 1)}
-                  </div>
+                  <TokenLogo
+                    symbol={nativeSymbol}
+                    logo={displayedNativeAsset?.logo}
+                    address={displayedNativeAsset?.address}
+                    className="h-5 w-5"
+                  />
                   <span className="font-semibold text-sm">{nativeSymbol}</span>
                   <ChevronDown className="w-4 h-4 text-zinc-500" />
                 </div>

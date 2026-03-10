@@ -1,15 +1,23 @@
 import { create } from 'zustand';
-import { getAddress } from 'ethers';
+import { Wallet, getAddress } from 'ethers';
+import { ed25519 } from '@noble/curves/ed25519';
 
-import { resolveAccountAddress, supportsChainAddress } from '../lib/chainAddresses';
+import {
+  deriveSolanaPrivateKeyFromMnemonic,
+  resolveAccountAddress,
+  supportsChainAddress,
+} from '../lib/chainAddresses';
+import { getDefaultWalletAvatarId, type WalletAvatarId } from '../lib/walletDefaults';
 import type { ApiActivityItem, ApiNft, ApiToken, NetworkHealth } from '../lib/api';
 import { getActivity, getNetworks, getPortfolio, resolveToken } from '../lib/api';
 import {
   addAccountFromVault,
   clearVault,
   createWallet as createWalletVault,
+  emptyVault,
   exportRecoveryPhrase,
   exportPrivateKey,
+  getAccountPrivateKeyFromVault,
   hydrateVaultChainAddresses,
   importWallet as importWalletVault,
   loadVault,
@@ -33,11 +41,13 @@ type View =
   | 'import-wallet'
   | 'walkthrough'
   | 'token-management'
+  | 'token-details'
   | 'send'
   | 'buy'
   | 'legal'
   | 'support'
   | 'advanced'
+  | 'licenses'
   | 'ai'
   | 'subscription'
   | 'transaction-details'
@@ -48,6 +58,15 @@ type View =
 
 type MainTab = 'home' | 'activity' | 'swap' | 'nfts' | 'insights' | 'settings';
 type SyncStatus = 'idle' | 'loading' | 'error';
+export type WalletAuthPurpose = 'activity' | 'portfolio_insights' | 'send_broadcast';
+
+export interface WalletAuthProof {
+  walletAddress: string;
+  chainKey: string;
+  purpose: WalletAuthPurpose;
+  timestamp: number;
+  signature: string;
+}
 
 export interface AddressBookEntry {
   id: string;
@@ -59,6 +78,7 @@ export interface AddressBookEntry {
 export interface Account {
   id: string;
   name: string;
+  avatarId: WalletAvatarId;
   address: string;
   balance: number;
   fiatBalance: number;
@@ -89,6 +109,8 @@ export interface Token {
   balance: string;
   fiatBalance: string;
   logo?: string;
+  priceUsd?: number;
+  priceSource?: string;
   chainKey?: string;
   receiveAddress?: string;
   isNative?: boolean;
@@ -135,6 +157,8 @@ interface AppState {
   firstMessageTimestamp: number | null;
 
   selectedTransaction: WalletActivityItem | null;
+  selectedAssetToken: Token | null;
+  selectedBuyToken: Token | null;
   selectedReceiveToken: Token | null;
 
   initialize: () => Promise<void>;
@@ -149,6 +173,8 @@ interface AppState {
   unlockWallet: (passcode: string) => Promise<boolean>;
   exportActivePrivateKey: () => Promise<string>;
   exportActiveRecoveryPhrase: () => Promise<string>;
+  exportActivePrivateKeyWithPasscode: (passcode: string) => Promise<string>;
+  exportActiveRecoveryPhraseWithPasscode: (passcode: string) => Promise<string>;
   changePasscode: (currentPasscode: string, nextPasscode: string) => Promise<void>;
 
   setView: (view: View) => void;
@@ -158,6 +184,7 @@ interface AppState {
 
   addAccount: (input?: { name?: string }) => Promise<void>;
   setActiveAccount: (id: string) => void;
+  setAccountAvatar: (id: string, avatarId: WalletAvatarId) => void;
   renameAccount: (id: string, name: string) => void;
   removeActiveAccount: () => void;
 
@@ -165,6 +192,8 @@ interface AppState {
   removeAddressBookEntry: (id: string) => void;
 
   setSelectedTransaction: (tx: WalletActivityItem | null) => void;
+  setSelectedAssetToken: (token: Token | null) => void;
+  setSelectedBuyToken: (token: Token | null) => void;
   setSelectedReceiveToken: (token: Token | null) => void;
 
   addCustomToken: (token: Token) => void;
@@ -174,6 +203,10 @@ interface AppState {
   setIsLocked: (locked: boolean) => void;
   setSubscribed: (subscribed: boolean) => void;
   setFirstMessageTimestamp: (timestamp: number | null) => void;
+  buildWalletAuth: (
+    purpose: WalletAuthPurpose,
+    options?: { walletAddress?: string; chainKey?: string },
+  ) => Promise<WalletAuthProof | null>;
 }
 
 const EMPTY_INSIGHTS: WalletInsights = {
@@ -184,12 +217,36 @@ const EMPTY_INSIGHTS: WalletInsights = {
   privateRoutingPct: 0,
 };
 
-const initialVault = loadVault();
+const initialVault = emptyVault();
+
+function walletAuthMessage(input: {
+  purpose: WalletAuthPurpose;
+  chainKey: string;
+  walletAddress: string;
+  timestamp: number;
+}): string {
+  return [
+    'Oxidity Wallet Authentication',
+    `purpose:${input.purpose}`,
+    `chain:${input.chainKey}`,
+    `wallet:${input.walletAddress}`,
+    `ts:${input.timestamp}`,
+  ].join('\n');
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  bytes.forEach((value) => {
+    binary += String.fromCharCode(value);
+  });
+  return btoa(binary);
+}
 
 function accountFromPersisted(account: PersistedWalletAccount, chainKey: string): Account {
   return {
     id: account.id,
     name: account.name,
+    avatarId: account.avatarId || getDefaultWalletAvatarId(),
     address: resolveAccountAddress(account, chainKey),
     balance: 0,
     fiatBalance: 0,
@@ -223,6 +280,8 @@ function mapApiToken(token: ApiToken): Token {
     balance: token.balance,
     fiatBalance: token.fiatBalance,
     logo: token.logo,
+    priceUsd: token.priceUsd,
+    priceSource: token.priceSource,
     chainKey: token.chainKey,
     receiveAddress: token.receiveAddress || token.address,
     isNative: token.isNative,
@@ -251,34 +310,33 @@ function mapApiNft(nft: ApiNft): NFT {
 
 function persistVaultUpdate(
   set: (partial: Partial<AppState> | ((state: AppState) => Partial<AppState>)) => void,
+  get: () => AppState,
   updater: (vault: PersistedVault) => PersistedVault,
 ) {
-  set((state) => {
-    const vault = updater(state.vault);
-    saveVault(vault);
-    return {
-      vault,
-      walletCreated: vault.walletCreated,
-      activeChainKey: vault.activeChainKey,
-      accounts: vault.accounts.map((account) => {
-        const current = state.accounts.find((existing) => existing.id === account.id);
-        return {
-          ...accountFromPersisted(account, vault.activeChainKey),
-          balance: current?.balance || 0,
-          fiatBalance: current?.fiatBalance || 0,
-        };
-      }),
-      activeAccountId:
-        vault.activeAccountId || vault.accounts[0]?.id || '',
-      addressBook: vault.addressBook,
-      biometricsEnabled: vault.biometricsEnabled,
-      isSubscribed: vault.isSubscribed,
-      firstMessageTimestamp: vault.firstMessageTimestamp,
-      customTokens: mapPersistedTokens(vault.customTokens).map((token) => {
-        const current = state.customTokens.find((existing) => existing.id === token.id);
-        return current ? { ...token, ...current } : token;
-      }),
-    };
+  const state = get();
+  const vault = updater(state.vault);
+  void saveVault(vault);
+  set({
+    vault,
+    walletCreated: vault.walletCreated,
+    activeChainKey: vault.activeChainKey,
+    accounts: vault.accounts.map((account) => {
+      const current = state.accounts.find((existing) => existing.id === account.id);
+      return {
+        ...accountFromPersisted(account, vault.activeChainKey),
+        balance: current?.balance || 0,
+        fiatBalance: current?.fiatBalance || 0,
+      };
+    }),
+    activeAccountId: vault.activeAccountId || vault.accounts[0]?.id || '',
+    addressBook: vault.addressBook,
+    biometricsEnabled: vault.biometricsEnabled,
+    isSubscribed: vault.isSubscribed,
+    firstMessageTimestamp: vault.firstMessageTimestamp,
+    customTokens: mapPersistedTokens(vault.customTokens).map((token) => {
+      const current = state.customTokens.find((existing) => existing.id === token.id);
+      return current ? { ...token, ...current } : token;
+    }),
   });
 }
 
@@ -311,10 +369,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   firstMessageTimestamp: initialVault.firstMessageTimestamp,
 
   selectedTransaction: null,
+  selectedAssetToken: null,
+  selectedBuyToken: null,
   selectedReceiveToken: null,
 
   async initialize() {
-    const vault = loadVault();
+    const { vault, errorMessage } = await loadVault();
     set({
       vault,
       isReady: true,
@@ -329,7 +389,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       customTokens: mapPersistedTokens(vault.customTokens),
       isLocked: vault.walletCreated,
       currentView: vault.walletCreated ? 'main' : 'splash',
-      errorMessage: null,
+      errorMessage,
+      selectedAssetToken: null,
+      selectedBuyToken: null,
+      selectedReceiveToken: null,
+      selectedTransaction: null,
     });
     void get().refreshNetworks();
     if (vault.walletCreated && vault.accounts.length > 0) {
@@ -371,14 +435,19 @@ export const useAppStore = create<AppState>((set, get) => ({
       const trackedTokens = state.vault.customTokens.filter(
         (token) => token.chainKey === state.activeChainKey,
       );
+      const [portfolioAuth, activityAuth] = await Promise.all([
+        get().buildWalletAuth('portfolio_insights'),
+        get().buildWalletAuth('activity'),
+      ]);
 
       const [portfolio, activity] = await Promise.all([
         getPortfolio({
           address: activeAccount.address,
           chainKey: state.activeChainKey,
           customTokens: trackedTokens,
+          auth: portfolioAuth || undefined,
         }),
-        getActivity(activeAccount.address, state.activeChainKey),
+        getActivity(activeAccount.address, state.activeChainKey, activityAuth || undefined),
       ]);
 
       const nativeAsset = mapApiToken(portfolio.nativeAsset);
@@ -439,7 +508,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       firstMessageTimestamp: current.firstMessageTimestamp,
     };
 
-    saveVault(vault);
+    await saveVault(vault);
     set({
       vault,
       walletCreated: true,
@@ -448,7 +517,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       activeAccountId: result.account.id,
       currentTab: 'home',
       isLocked: false,
-      customTokens: [],
+      customTokens: mapPersistedTokens(vault.customTokens),
       addressBook: [],
       activity: [],
       nativeAsset: null,
@@ -479,7 +548,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       firstMessageTimestamp: current.firstMessageTimestamp,
     };
 
-    saveVault(vault);
+    await saveVault(vault);
     set({
       vault,
       walletCreated: true,
@@ -488,7 +557,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       activeAccountId: result.account.id,
       currentTab: 'home',
       isLocked: false,
-      customTokens: [],
+      customTokens: mapPersistedTokens(vault.customTokens),
       addressBook: [],
       activity: [],
       nativeAsset: null,
@@ -510,7 +579,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     const hydratedVault = await hydrateVaultChainAddresses(get().vault, passcode);
-    saveVault(hydratedVault);
+    await saveVault(hydratedVault);
     set({
       vault: hydratedVault,
       sessionPasscode: passcode,
@@ -563,6 +632,64 @@ export const useAppStore = create<AppState>((set, get) => ({
     return exportRecoveryPhrase(account, state.sessionPasscode);
   },
 
+  async exportActivePrivateKeyWithPasscode(passcode) {
+    if (!/^\d{6}$/.test(passcode)) {
+      throw new Error('Passcode must be 6 digits');
+    }
+
+    const state = get();
+    if (!state.activeAccountId) {
+      throw new Error('No active account');
+    }
+    const account = state.vault.accounts.find(
+      (candidate) => candidate.id === state.activeAccountId,
+    );
+    if (!account) {
+      throw new Error('Active account not found');
+    }
+
+    try {
+      return await exportPrivateKey(account, passcode);
+    } catch (error) {
+      if (
+        error instanceof Error
+        && error.message === 'Recovery phrase export is only available for mnemonic wallets'
+      ) {
+        throw error;
+      }
+      throw new Error('Passcode is incorrect');
+    }
+  },
+
+  async exportActiveRecoveryPhraseWithPasscode(passcode) {
+    if (!/^\d{6}$/.test(passcode)) {
+      throw new Error('Passcode must be 6 digits');
+    }
+
+    const state = get();
+    if (!state.activeAccountId) {
+      throw new Error('No active account');
+    }
+    const account = state.vault.accounts.find(
+      (candidate) => candidate.id === state.activeAccountId,
+    );
+    if (!account) {
+      throw new Error('Active account not found');
+    }
+
+    try {
+      return await exportRecoveryPhrase(account, passcode);
+    } catch (error) {
+      if (
+        error instanceof Error
+        && error.message === 'Recovery phrase export is only available for mnemonic wallets'
+      ) {
+        throw error;
+      }
+      throw new Error('Passcode is incorrect');
+    }
+  },
+
   async changePasscode(currentPasscode, nextPasscode) {
     const state = get();
     if (!/^\d{6}$/.test(currentPasscode)) {
@@ -576,7 +703,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     const vault = await reencryptVaultSecrets(state.vault, currentPasscode, nextPasscode);
-    saveVault(vault);
+    await saveVault(vault);
     set({
       vault,
       sessionPasscode: nextPasscode,
@@ -596,7 +723,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
 
-    persistVaultUpdate(set, (vault) => ({
+    persistVaultUpdate(set, get, (vault) => ({
       ...vault,
       activeChainKey: chainKey,
     }));
@@ -607,11 +734,14 @@ export const useAppStore = create<AppState>((set, get) => ({
       nfts: [],
       activity: [],
       selectedTransaction: null,
+      selectedAssetToken: null,
+      selectedBuyToken: null,
+      selectedReceiveToken: null,
     });
     await get().refreshWalletData();
   },
   setWalletCreated: (created) => {
-    persistVaultUpdate(set, (vault) => ({
+    persistVaultUpdate(set, get, (vault) => ({
       ...vault,
       walletCreated: created,
     }));
@@ -625,7 +755,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     const name = input?.name || `Wallet ${state.accounts.length + 1}`;
     const result = await addAccountFromVault(state.vault, state.sessionPasscode, name);
-    saveVault(result.vault);
+    await saveVault(result.vault);
     set({
       vault: result.vault,
       accounts: result.vault.accounts.map((account) =>
@@ -639,15 +769,24 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   setActiveAccount: (id) => {
-    persistVaultUpdate(set, (vault) => ({
+    persistVaultUpdate(set, get, (vault) => ({
       ...vault,
       activeAccountId: id,
     }));
     void get().refreshWalletData();
   },
 
+  setAccountAvatar: (id, avatarId) => {
+    persistVaultUpdate(set, get, (vault) => ({
+      ...vault,
+      accounts: vault.accounts.map((account) =>
+        account.id === id ? { ...account, avatarId } : account,
+      ),
+    }));
+  },
+
   renameAccount: (id, name) => {
-    persistVaultUpdate(set, (vault) => ({
+    persistVaultUpdate(set, get, (vault) => ({
       ...vault,
       accounts: vault.accounts.map((account) =>
         account.id === id ? { ...account, name } : account,
@@ -662,15 +801,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     );
 
     if (remainingAccounts.length === 0) {
-      clearVault();
+      void clearVault();
       void removeSavedBiometricPasscode();
+      const empty = emptyVault();
       set({
-        vault: loadVault(),
+        vault: empty,
         walletCreated: false,
         accounts: [],
         activeAccountId: '',
         addressBook: [],
-        customTokens: [],
+        customTokens: mapPersistedTokens(empty.customTokens),
         nativeAsset: null,
         activity: [],
         insights: EMPTY_INSIGHTS,
@@ -678,6 +818,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         biometricsEnabled: false,
         isLocked: false,
         currentView: 'welcome',
+        selectedAssetToken: null,
+        selectedBuyToken: null,
+        selectedReceiveToken: null,
+        selectedTransaction: null,
       });
       return;
     }
@@ -687,7 +831,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       accounts: remainingAccounts,
       activeAccountId: remainingAccounts[0].id,
     };
-    saveVault(nextVault);
+    void saveVault(nextVault);
     set({
       vault: nextVault,
       accounts: nextVault.accounts.map((account) =>
@@ -695,6 +839,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       ),
       activeAccountId: nextVault.activeAccountId || '',
       currentView: 'main',
+      selectedAssetToken: null,
+      selectedBuyToken: null,
+      selectedReceiveToken: null,
+      selectedTransaction: null,
     });
     void get().refreshWalletData();
   },
@@ -714,7 +862,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     ) {
       throw new Error('Invalid Solana address');
     }
-    persistVaultUpdate(set, (vault) => ({
+    persistVaultUpdate(set, get, (vault) => ({
       ...vault,
       addressBook: vault.addressBook.some(
         (candidate) =>
@@ -735,17 +883,19 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   removeAddressBookEntry: (id) => {
-    persistVaultUpdate(set, (vault) => ({
+    persistVaultUpdate(set, get, (vault) => ({
       ...vault,
       addressBook: vault.addressBook.filter((entry) => entry.id !== id),
     }));
   },
 
   setSelectedTransaction: (tx) => set({ selectedTransaction: tx }),
+  setSelectedAssetToken: (token) => set({ selectedAssetToken: token }),
+  setSelectedBuyToken: (token) => set({ selectedBuyToken: token }),
   setSelectedReceiveToken: (token) => set({ selectedReceiveToken: token }),
 
   addCustomToken: (token) => {
-    persistVaultUpdate(set, (vault) => {
+    persistVaultUpdate(set, get, (vault) => {
       const nextToken: PersistedTrackedToken = {
         id: token.id,
         chainKey: token.chainKey || vault.activeChainKey,
@@ -787,7 +937,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   setBiometricsEnabled: (enabled) => {
-    persistVaultUpdate(set, (vault) => ({
+    persistVaultUpdate(set, get, (vault) => ({
       ...vault,
       biometricsEnabled: enabled,
     }));
@@ -809,16 +959,73 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   setSubscribed: (subscribed) => {
-    persistVaultUpdate(set, (vault) => ({
+    persistVaultUpdate(set, get, (vault) => ({
       ...vault,
       isSubscribed: subscribed,
     }));
   },
 
   setFirstMessageTimestamp: (timestamp) => {
-    persistVaultUpdate(set, (vault) => ({
+    persistVaultUpdate(set, get, (vault) => ({
       ...vault,
       firstMessageTimestamp: timestamp,
     }));
+  },
+
+  async buildWalletAuth(purpose, options) {
+    const state = get();
+    if (!state.sessionPasscode || !state.activeAccountId) {
+      return null;
+    }
+
+    const chainKey = options?.chainKey || state.activeChainKey;
+    const account = state.vault.accounts.find((candidate) => candidate.id === state.activeAccountId);
+    if (!account) {
+      return null;
+    }
+
+    const walletAddress = options?.walletAddress || resolveAccountAddress(account, chainKey);
+    if (!walletAddress) {
+      return null;
+    }
+
+    const timestamp = Date.now();
+    const message = walletAuthMessage({
+      purpose,
+      chainKey,
+      walletAddress,
+      timestamp,
+    });
+
+    if (chainKey === 'solana') {
+      if (account.secretType !== 'mnemonic') {
+        return null;
+      }
+
+      const phrase = await exportRecoveryPhrase(account, state.sessionPasscode);
+      const secretKey = deriveSolanaPrivateKeyFromMnemonic(phrase, account.derivationIndex || 0);
+      const signature = ed25519.sign(new TextEncoder().encode(message), secretKey);
+      return {
+        walletAddress,
+        chainKey,
+        purpose,
+        timestamp,
+        signature: bytesToBase64(signature),
+      };
+    }
+
+    const privateKey = await getAccountPrivateKeyFromVault(
+      state.vault,
+      account.id,
+      state.sessionPasscode,
+    );
+    const signature = await new Wallet(privateKey).signMessage(message);
+    return {
+      walletAddress,
+      chainKey,
+      purpose,
+      timestamp,
+      signature,
+    };
   },
 }));

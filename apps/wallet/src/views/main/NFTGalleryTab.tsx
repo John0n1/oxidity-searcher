@@ -18,6 +18,7 @@ export function NFTGalleryTab() {
   const accounts = useAppStore((state) => state.accounts);
   const activeAccountId = useAppStore((state) => state.activeAccountId);
   const exportActivePrivateKey = useAppStore((state) => state.exportActivePrivateKey);
+  const buildWalletAuth = useAppStore((state) => state.buildWalletAuth);
   const refreshWalletData = useAppStore((state) => state.refreshWalletData);
   const activeAccount = accounts.find((account) => account.id === activeAccountId);
 
@@ -78,10 +79,15 @@ export function NFTGalleryTab() {
         maxPriorityFeePerGas: BigInt(preparation.maxPriorityFeePerGas),
       });
 
+      const auth = await buildWalletAuth('send_broadcast', {
+        walletAddress: activeAccount.address,
+        chainKey: activeChainKey,
+      });
       const response = await broadcastSignedSend({
         chainKey: activeChainKey,
         rawTransaction,
         walletAddress: activeAccount.address,
+        auth: auth || undefined,
         txType: 'send',
         title: `Send ${selectedNFT.collection}`,
         amount: '-1 NFT',

@@ -3,23 +3,23 @@ import { motion, AnimatePresence } from 'motion/react';
 import {
   ChevronLeft,
   CreditCard,
-  Smartphone,
   ArrowRight,
   CheckCircle2,
   Info,
   TrendingUp,
   Zap,
   ShieldCheck,
+  Wallet,
 } from 'lucide-react';
 
 import { useAppStore } from '../store/appStore';
-import { getOnRampQuote, type OnRampProviderQuote, type OnRampQuoteResponse } from '../lib/api';
+import { getOnRampQuote, type OnRampQuoteResponse } from '../lib/api';
 import { openExternalUrl } from '../lib/external';
 
 function providerLogo(providerId: string): React.ReactNode {
   switch (providerId) {
     case 'ramp':
-      return <Smartphone className="w-6 h-6 text-blue-500" />;
+      return <Wallet className="w-6 h-6 text-emerald-400" />;
     case 'binance':
       return <TrendingUp className="w-6 h-6 text-yellow-400" />;
     default:
@@ -27,10 +27,22 @@ function providerLogo(providerId: string): React.ReactNode {
   }
 }
 
+function formatMarketPrice(value?: number): string {
+  if (!value || value <= 0) {
+    return 'Market price unavailable';
+  }
+
+  return `1 token = $${value.toLocaleString('en-US', {
+    minimumFractionDigits: value >= 1 ? 2 : 4,
+    maximumFractionDigits: value >= 1 ? 4 : 8,
+  })}`;
+}
+
 export const BuyView: React.FC = () => {
   const setView = useAppStore((state) => state.setView);
   const activeChainKey = useAppStore((state) => state.activeChainKey);
   const nativeAsset = useAppStore((state) => state.nativeAsset);
+  const selectedBuyToken = useAppStore((state) => state.selectedBuyToken);
   const accounts = useAppStore((state) => state.accounts);
   const activeAccountId = useAppStore((state) => state.activeAccountId);
   const activeAccount = accounts.find((account) => account.id === activeAccountId);
@@ -43,7 +55,7 @@ export const BuyView: React.FC = () => {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const numericAmount = parseFloat(amount) || 0;
-  const buyToken = nativeAsset?.symbol || 'ETH';
+  const buyToken = selectedBuyToken?.symbol || nativeAsset?.symbol || 'ETH';
 
   useEffect(() => {
     let cancelled = false;
@@ -122,14 +134,14 @@ export const BuyView: React.FC = () => {
         <button
           onClick={() =>
             step === 'amount'
-              ? setView('main')
+              ? setView(selectedBuyToken ? 'token-details' : 'main')
               : setStep(step === 'confirm' ? 'provider' : 'amount')
           }
           className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center hover:bg-white/10 transition-colors"
         >
           <ChevronLeft className="w-6 h-6" />
         </button>
-        <h2 className="text-xl font-semibold">Buy Crypto</h2>
+        <h2 className="text-xl font-semibold">Buy {buyToken}</h2>
         <div className="w-10" />
       </div>
 
@@ -158,7 +170,11 @@ export const BuyView: React.FC = () => {
                   />
                 </div>
                 <p className="text-emerald-400 text-sm font-medium">
-                  ≈ {isLoading ? 'Loading...' : `${(quote?.providers[0]?.receiveAmount || 0).toFixed(6)} ${quote?.buyToken || buyToken}`}
+                  {isLoading
+                    ? 'Loading provider estimates...'
+                    : (quote?.providers[0]?.receiveAmount || 0) > 0
+                      ? `≈ ${(quote?.providers[0]?.receiveAmount || 0).toFixed(6)} ${quote?.buyToken || buyToken}`
+                      : 'Estimate unavailable'}
                 </p>
               </div>
 
@@ -186,18 +202,14 @@ export const BuyView: React.FC = () => {
                     </div>
                     <div>
                       <p className="text-sm font-medium">Market Price</p>
-                      <p className="text-xs text-white/50">
-                        1 {quote?.buyToken || buyToken} = $
-                        {(quote?.marketPriceUsd || 0).toLocaleString('en-US', {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}
-                      </p>
+                      <p className="text-xs text-white/50">{formatMarketPrice(quote?.marketPriceUsd)}</p>
                     </div>
                   </div>
                   <div className="text-right">
                     <p className="text-sm font-medium text-emerald-400">
-                      {sortedProviders.length > 0 ? `${sortedProviders.length} live quotes` : 'Waiting'}
+                      {sortedProviders.length > 0
+                        ? `${sortedProviders.length} provider offer${sortedProviders.length > 1 ? 's' : ''}`
+                        : 'Waiting'}
                     </p>
                   </div>
                 </div>
@@ -253,14 +265,16 @@ export const BuyView: React.FC = () => {
                               {provider.trustScore}% Trust
                             </span>
                           </div>
+                          </div>
                         </div>
-                      </div>
-                      <div className="text-right">
-                        <p className="font-bold text-lg">
-                          {provider.receiveAmount.toFixed(6)} {quote?.buyToken || buyToken}
-                        </p>
-                        <p className="text-xs text-white/40">Fee: {provider.fee}%</p>
-                      </div>
+                        <div className="text-right">
+                          <p className="font-bold text-lg">
+                            {provider.receiveAmount > 0
+                              ? `${provider.receiveAmount.toFixed(6)} ${quote?.buyToken || buyToken}`
+                              : 'Estimate unavailable'}
+                          </p>
+                          <p className="text-xs text-white/40">Fee: {provider.fee}%</p>
+                        </div>
                     </div>
                   </button>
                 ))}
@@ -269,8 +283,8 @@ export const BuyView: React.FC = () => {
               <div className="bg-blue-500/10 border border-blue-500/20 rounded-2xl p-4 flex items-start space-x-3">
                 <Info className="w-5 h-5 text-blue-500 shrink-0 mt-0.5" />
                 <p className="text-xs text-blue-200/70 leading-relaxed">
-                  Quotes are refreshed live from the wallet backend. Final settlement still depends
-                  on provider KYC, card checks, and regional availability.
+                  Provider availability depends on region, payment rails, and the provider’s own
+                  onboarding checks. Oxidity passes through to the selected checkout flow.
                 </p>
               </div>
             </motion.div>
@@ -308,12 +322,20 @@ export const BuyView: React.FC = () => {
                     ${((numericAmount * selectedProviderData.fee) / 100).toFixed(2)}
                   </span>
                 </div>
+                <div className="flex justify-between items-center text-sm">
+                  <span className="text-white/50">Destination</span>
+                  <span className="font-medium">
+                    {activeAccount ? `${activeAccount.address.slice(0, 8)}...${activeAccount.address.slice(-6)}` : 'Unavailable'}
+                  </span>
+                </div>
                 <div className="h-px bg-white/10 my-2" />
                 <div className="flex justify-between items-center">
                   <span className="text-lg font-medium">Total Received</span>
                   <div className="text-right">
                     <p className="text-xl font-bold text-emerald-400">
-                      {selectedProviderData.receiveAmount.toFixed(6)} {quote?.buyToken || buyToken}
+                      {selectedProviderData.receiveAmount > 0
+                        ? `${selectedProviderData.receiveAmount.toFixed(6)} ${quote?.buyToken || buyToken}`
+                        : 'Estimate unavailable'}
                     </p>
                     <p className="text-xs text-white/40">≈ ${amount}</p>
                   </div>

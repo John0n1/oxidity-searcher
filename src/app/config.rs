@@ -283,6 +283,8 @@ pub struct GlobalSettings {
     pub coingecko_api_key: Option<String>,
     pub cryptocompare_api_key: Option<String>,
     pub etherscan_api_key: Option<String>,
+    pub massive_api_key: Option<String>,
+    pub masive_api_key: Option<String>,
 }
 
 // Defaults
@@ -677,6 +679,8 @@ fn is_passthrough_env_key(key: &str) -> bool {
         "COINMARKETCAP_API_KEY",
         "COINGECKO_API_KEY",
         "CRYPTOCOMPARE_API_KEY",
+        "MASSIVE_API_KEY",
+        "MASIVE_API_KEY",
         "PROFIT_FLOOR_ABS_ETH",
         "PROFIT_FLOOR_MULT_GAS",
         "PROFIT_FLOOR_MIN_USD",
@@ -861,6 +865,8 @@ fn redact_effective_config(value: &mut Value) {
         "coingecko_api_key",
         "cryptocompare_api_key",
         "etherscan_api_key",
+        "massive_api_key",
+        "masive_api_key",
     ];
     match value {
         Value::Object(map) => {
@@ -1702,6 +1708,10 @@ impl GlobalSettings {
             coingecko: self.coingecko_api_key.clone(),
             cryptocompare: self.cryptocompare_api_key.clone(),
             etherscan: self.etherscan_api_key.clone(),
+            massive: self
+                .massive_api_key
+                .clone()
+                .or_else(|| self.masive_api_key.clone()),
         }
     }
 }
@@ -2204,6 +2214,8 @@ mod tests {
             coingecko_api_key: None,
             cryptocompare_api_key: None,
             etherscan_api_key: None,
+            massive_api_key: None,
+            masive_api_key: None,
         }
     }
 

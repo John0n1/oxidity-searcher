@@ -1,26 +1,19 @@
-import { Capacitor } from '@capacitor/core';
 import {
   AndroidBiometryStrength,
   BiometricAuth,
   type CheckBiometryResult,
 } from '@aparajita/capacitor-biometric-auth';
-import { SecureStorage } from '@aparajita/capacitor-secure-storage';
+import {
+  isNativeSecureStoragePlatform,
+  secureStorageGetItem,
+  secureStorageRemoveItem,
+  secureStorageSetItem,
+} from './secureStorage';
 
-const PREFIX = 'oxidity_wallet_';
 const PASSCODE_KEY = 'unlock_passcode';
 
-let prefixReady = false;
-
-async function ensurePrefix(): Promise<void> {
-  if (prefixReady) {
-    return;
-  }
-  await SecureStorage.setKeyPrefix(PREFIX);
-  prefixReady = true;
-}
-
 export function isNativeBiometricPlatform(): boolean {
-  return Capacitor.isNativePlatform();
+  return isNativeSecureStoragePlatform();
 }
 
 export async function checkBiometrics(): Promise<CheckBiometryResult | null> {
@@ -38,16 +31,14 @@ export async function savePasscodeForBiometrics(passcode: string): Promise<void>
   if (!isNativeBiometricPlatform()) {
     return;
   }
-  await ensurePrefix();
-  await SecureStorage.setItem(PASSCODE_KEY, passcode);
+  await secureStorageSetItem(PASSCODE_KEY, passcode);
 }
 
 export async function removeSavedBiometricPasscode(): Promise<void> {
   if (!isNativeBiometricPlatform()) {
     return;
   }
-  await ensurePrefix();
-  await SecureStorage.removeItem(PASSCODE_KEY);
+  await secureStorageRemoveItem(PASSCODE_KEY);
 }
 
 export async function unlockWithBiometrics(): Promise<string | null> {
@@ -70,7 +61,6 @@ export async function unlockWithBiometrics(): Promise<string | null> {
     androidBiometryStrength: AndroidBiometryStrength.strong,
   });
 
-  await ensurePrefix();
-  const passcode = await SecureStorage.getItem(PASSCODE_KEY);
+  const passcode = await secureStorageGetItem(PASSCODE_KEY);
   return typeof passcode === 'string' && passcode.length > 0 ? passcode : null;
 }

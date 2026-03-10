@@ -1,25 +1,33 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
-use alloy::primitives::{Address, B256, Bytes, TxKind, U256, keccak256};
+use alloy::eips::Decodable2718;
+use alloy::primitives::{Address, B256, Bytes, Signature as PrimitiveSignature, TxKind, U256, keccak256};
 use alloy::providers::Provider;
 use alloy::rpc::types::eth::{TransactionInput, TransactionRequest};
 use alloy::sol;
+use alloy_consensus::transaction::SignerRecoverable;
+use alloy_consensus::{Transaction, TxEnvelope};
 use alloy_primitives::utils::{format_ether, format_units, parse_ether};
 use alloy_sol_types::SolCall;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::{DateTime, Duration, Local, Utc};
 use dashmap::DashMap;
+use ed25519_dalek::{Signature as Ed25519Signature, Verifier, VerifyingKey};
+use futures::future::join_all;
 use once_cell::sync::Lazy;
 use oxidity_searcher::app::config::GlobalSettings;
 use oxidity_searcher::domain::constants;
 use oxidity_searcher::domain::error::AppError;
 use oxidity_searcher::infrastructure::network::liquidity::reserves::ReserveCache;
 use oxidity_searcher::infrastructure::network::provider::{ConnectionFactory, HttpProvider};
+use oxidity_searcher::network::price_feed::{PriceFeed, PriceQuote};
 use oxidity_searcher::services::strategy::execution::executor::BundleSender;
 use oxidity_searcher::services::strategy::execution::strategy::StrategyStats;
 use oxidity_searcher::services::strategy::routers::{UniV2Router, registry_v2_router_candidates};
@@ -62,11 +70,6 @@ sol! {
 enum ChainProtocol {
     Evm,
     Solana,
-    Sui,
-    Bitcoin,
-    Cosmos,
-    AvalancheP,
-    AvalancheX,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -195,30 +198,6 @@ const CHAIN_CONFIGS: &[ChainConfig] = &[
         token_catalog: EMPTY_TOKEN_CATALOG,
     },
     ChainConfig {
-        key: "avalanche-p",
-        name: "Avalanche P-Chain",
-        protocol: ChainProtocol::AvalancheP,
-        native_symbol: "AVAX",
-        native_price_id: Some("avalanche-2"),
-        coingecko_platform: None,
-        explorer_tx_base_url: None,
-        http_rpc: Some("https://avalanche-p-chain-rpc.publicnode.com"),
-        ws_rpc: None,
-        token_catalog: EMPTY_TOKEN_CATALOG,
-    },
-    ChainConfig {
-        key: "avalanche-x",
-        name: "Avalanche X-Chain",
-        protocol: ChainProtocol::AvalancheX,
-        native_symbol: "AVAX",
-        native_price_id: Some("avalanche-2"),
-        coingecko_platform: None,
-        explorer_tx_base_url: None,
-        http_rpc: Some("https://avalanche-x-chain-rpc.publicnode.com"),
-        ws_rpc: None,
-        token_catalog: EMPTY_TOKEN_CATALOG,
-    },
-    ChainConfig {
         key: "optimism",
         name: "Optimism",
         protocol: ChainProtocol::Evm,
@@ -240,18 +219,6 @@ const CHAIN_CONFIGS: &[ChainConfig] = &[
         explorer_tx_base_url: Some("https://arbiscan.io/tx/"),
         http_rpc: None,
         ws_rpc: Some("wss://arbitrum-one-rpc.publicnode.com"),
-        token_catalog: EMPTY_TOKEN_CATALOG,
-    },
-    ChainConfig {
-        key: "sui",
-        name: "Sui",
-        protocol: ChainProtocol::Sui,
-        native_symbol: "SUI",
-        native_price_id: Some("sui"),
-        coingecko_platform: None,
-        explorer_tx_base_url: None,
-        http_rpc: Some("https://sui-rpc.publicnode.com"),
-        ws_rpc: None,
         token_catalog: EMPTY_TOKEN_CATALOG,
     },
     ChainConfig {
@@ -302,30 +269,6 @@ const CHAIN_CONFIGS: &[ChainConfig] = &[
         ws_rpc: Some("wss://unichain-rpc.publicnode.com"),
         token_catalog: EMPTY_TOKEN_CATALOG,
     },
-    ChainConfig {
-        key: "cosmos",
-        name: "Cosmos",
-        protocol: ChainProtocol::Cosmos,
-        native_symbol: "ATOM",
-        native_price_id: Some("cosmos"),
-        coingecko_platform: None,
-        explorer_tx_base_url: None,
-        http_rpc: None,
-        ws_rpc: Some("wss://cosmos-rpc.publicnode.com:443/websocket"),
-        token_catalog: EMPTY_TOKEN_CATALOG,
-    },
-    ChainConfig {
-        key: "bitcoin",
-        name: "Bitcoin",
-        protocol: ChainProtocol::Bitcoin,
-        native_symbol: "BTC",
-        native_price_id: Some("bitcoin"),
-        coingecko_platform: None,
-        explorer_tx_base_url: None,
-        http_rpc: Some("https://bitcoin-rpc.publicnode.com"),
-        ws_rpc: None,
-        token_catalog: EMPTY_TOKEN_CATALOG,
-    },
 ];
 
 static PROVIDER_CACHE: Lazy<DashMap<&'static str, HttpProvider>> = Lazy::new(DashMap::new);
@@ -336,6 +279,7 @@ struct EvmRuntime {
     chain_id: u64,
     wrapped_native: Address,
     reserve_cache: Arc<ReserveCache>,
+    price_feed: Arc<PriceFeed>,
     v2_routers: Vec<(String, Address)>,
     bundle_sender: Option<Arc<BundleSender>>,
     protected_execution: bool,
@@ -386,6 +330,13 @@ impl ApiError {
         }
     }
 
+    fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: message.into(),
+        }
+    }
+
     fn internal(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -431,6 +382,15 @@ struct ResolveTokenRequest {
     chain_key: Option<String>,
     address: String,
     wallet_address: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TokenDetailsRequest {
+    chain_key: Option<String>,
+    wallet_address: String,
+    address: Option<String>,
+    symbol: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -552,6 +512,8 @@ struct NativeAssetResponse {
     raw_balance: f64,
     fiat_balance: String,
     fiat_value: f64,
+    price_usd: f64,
+    price_source: String,
     receive_address: String,
     logo: Option<String>,
     is_native: bool,
@@ -570,10 +532,40 @@ struct TokenResponse {
     raw_balance: f64,
     fiat_balance: String,
     fiat_value: f64,
+    price_usd: f64,
+    price_source: String,
     receive_address: String,
     logo: Option<String>,
     is_native: bool,
     is_custom: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TokenChartPointResponse {
+    timestamp: i64,
+    price_usd: f64,
+    value_usd: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TokenChartSeriesResponse {
+    label: String,
+    source: String,
+    change_pct: f64,
+    points: Vec<TokenChartPointResponse>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TokenDetailsResponse {
+    token: TokenResponse,
+    market_price_usd: f64,
+    market_price_source: String,
+    chart_24h: TokenChartSeriesResponse,
+    chart_week: TokenChartSeriesResponse,
+    chart_month: TokenChartSeriesResponse,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -609,11 +601,16 @@ struct QuotePreviewResponse {
     chain_key: String,
     sell_token: String,
     buy_token: String,
+    router_name: Option<String>,
+    route_path: Vec<String>,
     sell_amount: f64,
     receive_amount: f64,
+    minimum_received: f64,
     rate: f64,
     sell_usd_value: f64,
     receive_usd_value: f64,
+    minimum_received_usd: f64,
+    price_impact_pct: f64,
     estimated_gas_usd: f64,
     estimated_gas_native: f64,
     speed_options: Value,
@@ -647,6 +644,7 @@ struct SwapPrepareResponse {
     chain_id: u64,
     network: String,
     router_name: String,
+    route_path: Vec<String>,
     router: String,
     to: String,
     data: String,
@@ -657,8 +655,14 @@ struct SwapPrepareResponse {
     max_priority_fee_per_gas: String,
     expected_out: String,
     min_out: String,
+    sell_symbol: String,
+    sell_amount_formatted: String,
     expected_out_formatted: String,
+    minimum_received_formatted: String,
     buy_symbol: String,
+    expected_out_usd: f64,
+    minimum_received_usd: f64,
+    price_impact_pct: f64,
     estimated_fee_native: f64,
     estimated_fee_usd: f64,
     explorer_tx_base_url: String,
@@ -770,7 +774,7 @@ struct GlobalTokenEntry {
     coingecko_id: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 struct ResolvedAsset {
     symbol: String,
     name: String,
@@ -779,6 +783,72 @@ struct ResolvedAsset {
     logo: Option<String>,
     coingecko_id: Option<String>,
     is_native: bool,
+}
+
+#[derive(Clone, Debug)]
+struct MarketQuote {
+    price: f64,
+    source: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ChartRange {
+    Day,
+    Week,
+    Month,
+}
+
+impl ChartRange {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Day => "24H",
+            Self::Week => "1W",
+            Self::Month => "1M",
+        }
+    }
+
+    fn duration_ms(self) -> i64 {
+        match self {
+            Self::Day => 24 * 60 * 60 * 1000,
+            Self::Week => 7 * 24 * 60 * 60 * 1000,
+            Self::Month => 30 * 24 * 60 * 60 * 1000,
+        }
+    }
+
+    fn coingecko_days(self) -> &'static str {
+        match self {
+            Self::Day => "1",
+            Self::Week => "7",
+            Self::Month => "30",
+        }
+    }
+
+    fn coingecko_interval(self) -> &'static str {
+        match self {
+            Self::Month => "daily",
+            Self::Day | Self::Week => "hourly",
+        }
+    }
+
+    fn binance_interval(self) -> &'static str {
+        match self {
+            Self::Day => "1h",
+            Self::Week => "4h",
+            Self::Month => "1d",
+        }
+    }
+
+    fn binance_limit(self) -> usize {
+        match self {
+            Self::Day => 24,
+            Self::Week => 42,
+            Self::Month => 30,
+        }
+    }
+
+    fn fallback_points(self) -> usize {
+        self.binance_limit()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -861,7 +931,7 @@ struct SolanaRpcContextValue<T> {
     value: T,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SolanaSignatureStatus {
     signature: String,
@@ -950,6 +1020,7 @@ async fn main() -> Result<(), AppError> {
         .route("/api/catalog", get(api_catalog))
         .route("/api/portfolio", post(api_portfolio))
         .route("/api/token/resolve", post(api_resolve_token))
+        .route("/api/token/details", post(api_token_details))
         .route("/api/quote-preview", post(api_quote_preview))
         .route("/api/swap/prepare", post(api_swap_prepare))
         .route("/api/send/prepare", post(api_send_prepare))
@@ -958,7 +1029,24 @@ async fn main() -> Result<(), AppError> {
         .route("/api/nft/send/prepare", post(api_nft_send_prepare))
         .route("/api/onramp/quote", post(api_onramp_quote))
         .route("/api/ai/chat", post(api_ai_chat))
-        .layer(CorsLayer::permissive())
+        .layer(
+            CorsLayer::new()
+                .allow_methods([Method::GET, Method::POST])
+                .allow_headers([
+                    header::CONTENT_TYPE,
+                    header::HeaderName::from_static("x-oxidity-wallet-auth-wallet"),
+                    header::HeaderName::from_static("x-oxidity-wallet-auth-chain"),
+                    header::HeaderName::from_static("x-oxidity-wallet-auth-purpose"),
+                    header::HeaderName::from_static("x-oxidity-wallet-auth-timestamp"),
+                    header::HeaderName::from_static("x-oxidity-wallet-auth-signature"),
+                ])
+                .allow_origin([
+                    HeaderValue::from_static("https://wallet.oxidity.io"),
+                    HeaderValue::from_static("https://oxidity.io"),
+                    HeaderValue::from_static("http://localhost:3000"),
+                    HeaderValue::from_static("http://127.0.0.1:3000"),
+                ]),
+        )
         .with_state(state);
 
     let address: SocketAddr = format!("{bind}:{port}")
@@ -1068,11 +1156,26 @@ async fn build_evm_runtime(
         None
     };
 
+    let chainlink_feeds = state
+        .settings
+        .chainlink_feeds_for_chain(chain_id)
+        .unwrap_or_default();
+    let price_feed = Arc::new(
+        PriceFeed::new(
+            provider.clone(),
+            chain_id,
+            chainlink_feeds.clone(),
+            state.settings.price_api_keys(),
+        )
+        .map_err(ApiError::from_app)?,
+    );
+
     Ok(Arc::new(EvmRuntime {
         provider,
         chain_id,
         wrapped_native: constants::wrapped_native_for_chain(chain_id),
         reserve_cache,
+        price_feed,
         v2_routers,
         protected_execution: bundle_sender.is_some(),
         bundle_sender,
@@ -1139,10 +1242,6 @@ fn parse_wallet_identifier(
     match chain.protocol {
         ChainProtocol::Evm => Ok(format!("{:#x}", parse_address(value, field)?)),
         ChainProtocol::Solana => parse_solana_address(value, field),
-        _ => Err(ApiError::bad_request(format!(
-            "{} wallet operations are not yet enabled",
-            chain.name
-        ))),
     }
 }
 
@@ -1174,15 +1273,16 @@ fn logo_for_symbol(symbol: &str) -> Option<&'static str> {
         "ETH" => Some("https://cryptologos.cc/logos/ethereum-eth-logo.png"),
         "USDC" => Some("https://cryptologos.cc/logos/usd-coin-usdc-logo.png"),
         "USDT" => Some("https://cryptologos.cc/logos/tether-usdt-logo.png"),
+        "DAI" => Some("https://cryptologos.cc/logos/multi-collateral-dai-dai-logo.png"),
         "WBTC" | "BTC" => Some("https://cryptologos.cc/logos/wrapped-bitcoin-wbtc-logo.png"),
         "LINK" => Some("https://cryptologos.cc/logos/chainlink-link-logo.png"),
         "UNI" => Some("https://cryptologos.cc/logos/uniswap-uni-logo.png"),
         "AAVE" => Some("https://cryptologos.cc/logos/aave-aave-logo.png"),
+        "SHIB" => Some("https://cryptologos.cc/logos/shiba-inu-shib-logo.png"),
+        "PEPE" => Some("https://cryptologos.cc/logos/pepe-pepe-logo.png"),
         "BNB" => Some("https://cryptologos.cc/logos/bnb-bnb-logo.png"),
         "AVAX" => Some("https://cryptologos.cc/logos/avalanche-avax-logo.png"),
         "SOL" => Some("https://cryptologos.cc/logos/solana-sol-logo.png"),
-        "ATOM" => Some("https://cryptologos.cc/logos/cosmos-atom-logo.png"),
-        "SUI" => Some("https://cryptologos.cc/logos/sui-sui-logo.png"),
         _ => None,
     }
 }
@@ -1293,6 +1393,152 @@ fn normalize_symbol(value: Option<&str>) -> String {
     value.unwrap_or_default().trim().to_uppercase()
 }
 
+const WALLET_AUTH_MAX_AGE_MS: i64 = 5 * 60 * 1000;
+static WALLET_APP_VERSION: Lazy<String> = Lazy::new(|| {
+    serde_json::from_str::<Value>(include_str!("../../apps/wallet/package.json"))
+        .ok()
+        .and_then(|package| {
+            package
+                .get("version")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "1.0.1".to_string())
+});
+
+fn wallet_app_version() -> &'static str {
+    WALLET_APP_VERSION.as_str()
+}
+
+fn wallet_android_download_url() -> String {
+    format!(
+        "https://oxidity.io/downloads/oxidity-wallet-release.apk?v={}",
+        wallet_app_version()
+    )
+}
+
+fn wallet_auth_message(
+    purpose: &str,
+    chain_key: &str,
+    wallet_address: &str,
+    timestamp: i64,
+) -> String {
+    [
+        "Oxidity Wallet Authentication".to_string(),
+        format!("purpose:{purpose}"),
+        format!("chain:{chain_key}"),
+        format!("wallet:{wallet_address}"),
+        format!("ts:{timestamp}"),
+    ]
+    .join("\n")
+}
+
+fn header_str<'a>(headers: &'a HeaderMap, key: &'static str) -> Result<Option<&'a str>, ApiError> {
+    headers
+        .get(key)
+        .map(|value| {
+            value
+                .to_str()
+                .map(str::trim)
+                .map_err(|_| ApiError::unauthorized(format!("Invalid {key} header")))
+        })
+        .transpose()
+}
+
+fn verify_wallet_auth(
+    headers: &HeaderMap,
+    purpose: &str,
+    chain: &'static ChainConfig,
+    wallet_address: &str,
+) -> Result<bool, ApiError> {
+    let Some(auth_wallet) = header_str(headers, "x-oxidity-wallet-auth-wallet")? else {
+        return Ok(false);
+    };
+    let auth_chain = header_str(headers, "x-oxidity-wallet-auth-chain")?
+        .ok_or_else(|| ApiError::unauthorized("Missing x-oxidity-wallet-auth-chain header"))?;
+    let auth_purpose = header_str(headers, "x-oxidity-wallet-auth-purpose")?
+        .ok_or_else(|| ApiError::unauthorized("Missing x-oxidity-wallet-auth-purpose header"))?;
+    let auth_timestamp = header_str(headers, "x-oxidity-wallet-auth-timestamp")?
+        .ok_or_else(|| ApiError::unauthorized("Missing x-oxidity-wallet-auth-timestamp header"))?;
+    let auth_signature = header_str(headers, "x-oxidity-wallet-auth-signature")?
+        .ok_or_else(|| ApiError::unauthorized("Missing x-oxidity-wallet-auth-signature header"))?;
+
+    if !auth_chain.eq_ignore_ascii_case(chain.key) {
+        return Err(ApiError::unauthorized("Wallet authentication chain does not match request"));
+    }
+    if auth_purpose != purpose {
+        return Err(ApiError::unauthorized("Wallet authentication purpose does not match request"));
+    }
+
+    let timestamp = auth_timestamp
+        .parse::<i64>()
+        .map_err(|_| ApiError::unauthorized("Wallet authentication timestamp is invalid"))?;
+    let now = Utc::now().timestamp_millis();
+    if (now - timestamp).abs() > WALLET_AUTH_MAX_AGE_MS {
+        return Err(ApiError::unauthorized("Wallet authentication proof expired"));
+    }
+
+    let message = wallet_auth_message(purpose, chain.key, wallet_address, timestamp);
+
+    match chain.protocol {
+        ChainProtocol::Solana => {
+            if !auth_wallet.eq(wallet_address) {
+                return Err(ApiError::unauthorized("Wallet authentication address does not match request"));
+            }
+            let address_bytes = bs58::decode(wallet_address)
+                .into_vec()
+                .map_err(|_| ApiError::unauthorized("Wallet authentication address is invalid"))?;
+            let address_bytes: [u8; 32] = address_bytes
+                .try_into()
+                .map_err(|_| ApiError::unauthorized("Wallet authentication address is invalid"))?;
+            let verifying_key = VerifyingKey::from_bytes(&address_bytes)
+                .map_err(|_| ApiError::unauthorized("Wallet authentication address is invalid"))?;
+            let signature_bytes = BASE64_STANDARD
+                .decode(auth_signature)
+                .map_err(|_| ApiError::unauthorized("Wallet authentication signature is invalid"))?;
+            let signature = Ed25519Signature::from_slice(&signature_bytes)
+                .map_err(|_| ApiError::unauthorized("Wallet authentication signature is invalid"))?;
+            verifying_key
+                .verify(message.as_bytes(), &signature)
+                .map_err(|_| ApiError::unauthorized("Wallet authentication signature verification failed"))?;
+        }
+        _ => {
+            let expected = parse_address(wallet_address, "wallet")?;
+            let declared =
+                parse_address(auth_wallet, "wallet authentication address")
+                    .map_err(|_| ApiError::unauthorized("Wallet authentication address is invalid"))?;
+            if declared != expected {
+                return Err(ApiError::unauthorized("Wallet authentication address does not match request"));
+            }
+            let recovered = PrimitiveSignature::from_str(auth_signature.trim_start_matches("0x"))
+                .map_err(|_| ApiError::unauthorized("Wallet authentication signature is invalid"))?
+                .recover_address_from_msg(&message)
+                .map_err(|_| ApiError::unauthorized("Wallet authentication signature verification failed"))?;
+            if recovered != expected {
+                return Err(ApiError::unauthorized("Wallet authentication address does not match request"));
+            }
+        }
+    }
+
+    Ok(true)
+}
+
+fn require_wallet_auth(
+    headers: &HeaderMap,
+    purpose: &str,
+    chain: &'static ChainConfig,
+    wallet_address: &str,
+) -> Result<(), ApiError> {
+    if verify_wallet_auth(headers, purpose, chain, wallet_address)? {
+        return Ok(());
+    }
+
+    Err(ApiError::unauthorized(
+        "Wallet authentication is required for this request",
+    ))
+}
+
 fn native_placeholder_address() -> &'static str {
     "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 }
@@ -1345,6 +1591,7 @@ fn u256_to_f64_units(value: U256, decimals: u8) -> f64 {
         .unwrap_or(0.0)
 }
 
+#[allow(dead_code)]
 fn short_address(value: &str) -> String {
     if value.len() <= 12 {
         value.to_string()
@@ -1626,6 +1873,7 @@ async fn maybe_json_rpc<T: DeserializeOwned>(
         .map_err(|err| ApiError::internal(format!("RPC decode failed: {err}")))
 }
 
+#[allow(dead_code)]
 async fn fetch_json_with_optional_key<T: DeserializeOwned>(
     state: &AppState,
     url: reqwest::Url,
@@ -1734,6 +1982,7 @@ async fn resolve_asset_reference(
     reference: Option<&str>,
     fallback_symbol: &str,
 ) -> Result<ResolvedAsset, ApiError> {
+    let raw_candidate = reference.unwrap_or_default().trim();
     let normalized = normalize_symbol(reference);
     let candidate = if normalized.is_empty() {
         fallback_symbol.to_string()
@@ -1755,8 +2004,8 @@ async fn resolve_asset_reference(
         });
     }
 
-    if candidate.starts_with("0x") {
-        let address = parse_address(&candidate, "token")?;
+    if raw_candidate.len() == 42 && raw_candidate[..2].eq_ignore_ascii_case("0x") {
+        let address = parse_address(raw_candidate, "token")?;
         if let Some(token) = lookup_catalog_token_by_address(state, runtime.chain_id, &address) {
             return Ok(ResolvedAsset {
                 symbol: token.symbol,
@@ -1911,7 +2160,279 @@ async fn build_swap_route_plan(
     })
 }
 
-async fn fetch_asset_market_price_usd(
+fn swap_route_symbols(
+    chain: &'static ChainConfig,
+    runtime: &EvmRuntime,
+    plan: &SwapRoutePlan,
+) -> Vec<String> {
+    plan.path
+        .iter()
+        .enumerate()
+        .map(|(index, address)| {
+            if index == 0 {
+                return plan.sell_asset.symbol.clone();
+            }
+            if index == plan.path.len() - 1 {
+                return plan.buy_asset.symbol.clone();
+            }
+            if *address == runtime.wrapped_native {
+                return chain.native_symbol.to_string();
+            }
+            format!("{address:#x}")
+        })
+        .collect()
+}
+
+fn calculate_price_impact_pct(
+    sell_amount: f64,
+    sell_price_usd: f64,
+    receive_amount: f64,
+    buy_price_usd: f64,
+) -> f64 {
+    if sell_amount <= 0.0 || sell_price_usd <= 0.0 || receive_amount <= 0.0 || buy_price_usd <= 0.0 {
+        return 0.0;
+    }
+    let sell_value = sell_amount * sell_price_usd;
+    let receive_value = receive_amount * buy_price_usd;
+    (((sell_value - receive_value) / sell_value) * 100.0).clamp(0.0, 100.0)
+}
+
+async fn any_evm_runtime(state: &AppState) -> Option<Arc<EvmRuntime>> {
+    if let Some(chain) = chain_by_key(DEFAULT_CHAIN_KEY)
+        && let Ok(runtime) = get_evm_runtime(state, chain).await
+    {
+        return Some(runtime);
+    }
+    for chain in CHAIN_CONFIGS.iter().filter(|chain| chain.protocol == ChainProtocol::Evm) {
+        if let Ok(runtime) = get_evm_runtime(state, chain).await {
+            return Some(runtime);
+        }
+    }
+    None
+}
+
+fn alias_market_symbol(symbol: &str) -> String {
+    match symbol.trim().to_uppercase().as_str() {
+        "WETH" => "ETH".into(),
+        "WBTC" => "BTC".into(),
+        "POL" => "MATIC".into(),
+        other => other.to_string(),
+    }
+}
+
+fn binance_symbol_candidates(symbol: &str) -> Vec<String> {
+    let base = alias_market_symbol(symbol);
+    if base.is_empty() {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+    for quote in ["USDT", "USDC", "BUSD"] {
+        if base != quote {
+            candidates.push(format!("{base}{quote}"));
+        }
+    }
+    candidates
+}
+
+fn build_chart_series(
+    range: ChartRange,
+    source: impl Into<String>,
+    balance: f64,
+    mut points: Vec<TokenChartPointResponse>,
+) -> TokenChartSeriesResponse {
+    points.sort_by_key(|point| point.timestamp);
+    points.dedup_by_key(|point| point.timestamp);
+
+    let change_pct = match (points.first(), points.last()) {
+        (Some(first), Some(last)) if first.price_usd > 0.0 => {
+            ((last.price_usd - first.price_usd) / first.price_usd) * 100.0
+        }
+        _ => 0.0,
+    };
+
+    let points = points
+        .into_iter()
+        .map(|point| TokenChartPointResponse {
+            value_usd: balance * point.price_usd,
+            ..point
+        })
+        .collect();
+
+    TokenChartSeriesResponse {
+        label: range.label().into(),
+        source: source.into(),
+        change_pct,
+        points,
+    }
+}
+
+fn build_flat_chart_series(
+    range: ChartRange,
+    quote: &MarketQuote,
+    balance: f64,
+) -> TokenChartSeriesResponse {
+    let now = Utc::now().timestamp_millis();
+    let steps = range.fallback_points().max(2) as i64;
+    let step_ms = (range.duration_ms() / (steps - 1)).max(1);
+    let mut points = Vec::new();
+
+    for index in 0..steps {
+        points.push(TokenChartPointResponse {
+            timestamp: now - range.duration_ms() + (index * step_ms),
+            price_usd: quote.price,
+            value_usd: balance * quote.price,
+        });
+    }
+
+    build_chart_series(range, format!("{} (flat)", quote.source), balance, points)
+}
+
+async fn fetch_binance_chart_series(
+    state: &AppState,
+    symbol: &str,
+    range: ChartRange,
+    balance: f64,
+) -> Result<Option<TokenChartSeriesResponse>, ApiError> {
+    let now = Utc::now().timestamp_millis();
+    let start_time = now - range.duration_ms();
+
+    for market_symbol in binance_symbol_candidates(symbol) {
+        let mut url = reqwest::Url::parse("https://api.binance.com/api/v3/klines")
+            .map_err(|err| ApiError::internal(format!("Binance chart URL build failed: {err}")))?;
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("symbol", &market_symbol);
+            query.append_pair("interval", range.binance_interval());
+            query.append_pair("limit", &range.binance_limit().to_string());
+            query.append_pair("startTime", &start_time.to_string());
+            query.append_pair("endTime", &now.to_string());
+        }
+
+        let response = match state
+            .http
+            .get(url)
+            .header("User-Agent", "OxidityWallet/1.0 (+https://oxidity.io)")
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => response,
+            _ => continue,
+        };
+
+        let rows = match response.json::<Vec<Vec<Value>>>().await {
+            Ok(rows) => rows,
+            Err(_) => continue,
+        };
+
+        let points = rows
+            .into_iter()
+            .filter_map(|row| {
+                let timestamp = row.first().and_then(Value::as_i64)?;
+                let price = row
+                    .get(4)
+                    .and_then(Value::as_str)
+                    .and_then(|value| value.parse::<f64>().ok())?;
+                Some(TokenChartPointResponse {
+                    timestamp,
+                    price_usd: price,
+                    value_usd: balance * price,
+                })
+            })
+            .collect::<Vec<_>>();
+        if points.len() > 1 {
+            return Ok(Some(build_chart_series(
+                range,
+                format!("binance:{market_symbol}"),
+                balance,
+                points,
+            )));
+        }
+    }
+
+    Ok(None)
+}
+
+async fn fetch_coingecko_chart_series(
+    state: &AppState,
+    chain: &'static ChainConfig,
+    asset: &ResolvedAsset,
+    range: ChartRange,
+    balance: f64,
+) -> Result<Option<TokenChartSeriesResponse>, ApiError> {
+    let market_id = if asset.is_native {
+        chain.native_price_id.map(str::to_string)
+    } else {
+        asset.coingecko_id.clone()
+    };
+    let Some(market_id) = market_id else {
+        return Ok(None);
+    };
+
+    let payload = match coingecko_json(
+        state,
+        &format!("/coins/{market_id}/market_chart"),
+        &[
+            ("vs_currency", "usd".into()),
+            ("days", range.coingecko_days().into()),
+            ("interval", range.coingecko_interval().into()),
+        ],
+    )
+    .await
+    {
+        Ok(payload) => payload,
+        Err(_) => return Ok(None),
+    };
+
+    let points = payload
+        .get("prices")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    let pair = row.as_array()?;
+                    let timestamp = pair.first().and_then(Value::as_i64)?;
+                    let price = pair.get(1).and_then(Value::as_f64)?;
+                    Some(TokenChartPointResponse {
+                        timestamp,
+                        price_usd: price,
+                        value_usd: balance * price,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if points.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(build_chart_series(
+        range,
+        format!("coingecko:{market_id}"),
+        balance,
+        points,
+    )))
+}
+
+async fn fetch_asset_chart_series(
+    state: &AppState,
+    chain: &'static ChainConfig,
+    asset: &ResolvedAsset,
+    range: ChartRange,
+    balance: f64,
+    quote: &MarketQuote,
+) -> Result<TokenChartSeriesResponse, ApiError> {
+    if let Some(series) = fetch_binance_chart_series(state, &asset.symbol, range, balance).await? {
+        return Ok(series);
+    }
+    if let Some(series) = fetch_coingecko_chart_series(state, chain, asset, range, balance).await? {
+        return Ok(series);
+    }
+    Ok(build_flat_chart_series(range, quote, balance))
+}
+
+async fn fetch_asset_market_price_usd_legacy(
     state: &AppState,
     chain: &'static ChainConfig,
     _runtime: &EvmRuntime,
@@ -1959,6 +2480,35 @@ async fn fetch_asset_market_price_usd(
         .ok()
         .and_then(|prices| prices.get(&asset.symbol.to_uppercase()).copied())
         .unwrap_or(0.0))
+}
+
+async fn fetch_asset_market_quote(
+    state: &AppState,
+    chain: &'static ChainConfig,
+    runtime: &EvmRuntime,
+    asset: &ResolvedAsset,
+) -> Result<MarketQuote, ApiError> {
+    let symbol = alias_market_symbol(&asset.symbol);
+    if !symbol.is_empty()
+        && let Ok(PriceQuote { price, source }) = runtime
+            .price_feed
+            .get_price_with_hints(&symbol, asset.coingecko_id.as_deref())
+            .await
+        && price.is_finite()
+        && price > 0.0
+    {
+        return Ok(MarketQuote { price, source });
+    }
+
+    let price = fetch_asset_market_price_usd_legacy(state, chain, runtime, asset).await?;
+    Ok(MarketQuote {
+        price,
+        source: if price > 0.0 {
+            "wallet_fallback".into()
+        } else {
+            "unavailable".into()
+        },
+    })
 }
 
 async fn fetch_explorer_entries(
@@ -2373,48 +2923,104 @@ async fn native_price_map(
     state: &AppState,
     chains: &[&'static ChainConfig],
 ) -> Result<BTreeMap<String, f64>, ApiError> {
-    let ids: BTreeSet<&str> = chains
-        .iter()
-        .filter_map(|chain| chain.native_price_id)
-        .collect();
-    if ids.is_empty() {
+    if chains.is_empty() {
         return Ok(BTreeMap::new());
     }
+
+    let mut ids: BTreeSet<&str> = BTreeSet::new();
+    let mut unresolved: Vec<&'static ChainConfig> = Vec::new();
     let mut map = BTreeMap::new();
-    if let Ok(payload) = coingecko_json(
-        state,
-        "/simple/price",
-        &[
-            ("ids", ids.into_iter().collect::<Vec<_>>().join(",")),
-            ("vs_currencies", "usd".into()),
-        ],
-    )
-    .await
+
+    let shared_runtime = any_evm_runtime(state).await;
+    for chain in chains {
+        let Some(price_id) = chain.native_price_id else {
+            continue;
+        };
+        let quote = if chain.protocol == ChainProtocol::Evm {
+            match get_evm_runtime(state, chain).await {
+                Ok(runtime) => runtime
+                    .price_feed
+                    .get_price_with_hints(&alias_market_symbol(chain.native_symbol), Some(price_id))
+                    .await
+                    .ok(),
+                Err(_) => None,
+            }
+        } else if let Some(runtime) = shared_runtime.as_ref() {
+            runtime
+                .price_feed
+                .get_price_with_hints(&alias_market_symbol(chain.native_symbol), Some(price_id))
+                .await
+                .ok()
+        } else {
+            None
+        };
+
+        if let Some(PriceQuote { price, .. }) = quote
+            && price.is_finite()
+            && price > 0.0
+        {
+            map.insert(price_id.to_string(), price);
+        } else {
+            ids.insert(price_id);
+            unresolved.push(chain);
+        }
+    }
+
+    if !ids.is_empty()
+        && let Ok(payload) = coingecko_json(
+            state,
+            "/simple/price",
+            &[
+                ("ids", ids.iter().copied().collect::<Vec<_>>().join(",")),
+                ("vs_currencies", "usd".into()),
+            ],
+        )
+        .await
+        && let Some(object) = payload.as_object()
     {
-        if let Some(object) = payload.as_object() {
-            for (id, value) in object {
-                if let Some(price) = value.get("usd").and_then(Value::as_f64) {
-                    map.insert(id.clone(), price);
-                }
+        for (id, value) in object {
+            if let Some(price) = value.get("usd").and_then(Value::as_f64) {
+                map.insert(id.clone(), price);
             }
         }
     }
 
-    let fallback_symbols = chains
+    let fallback_symbols = unresolved
         .iter()
-        .map(|chain| chain.native_symbol.to_string())
+        .filter_map(|chain| {
+            chain.native_price_id.and_then(|price_id| {
+                (!map.contains_key(price_id)).then_some(chain.native_symbol.to_string())
+            })
+        })
         .collect::<Vec<_>>();
     let fallback_prices = cryptocompare_price_map(state, &fallback_symbols)
         .await
         .unwrap_or_default();
-    for chain in chains {
+    for chain in unresolved {
         if let Some(price_id) = chain.native_price_id
             && !map.contains_key(price_id)
-            && let Some(price) = fallback_prices.get(&chain.native_symbol.to_uppercase())
+            && let Some(price) = fallback_prices.get(&alias_market_symbol(chain.native_symbol))
         {
             map.insert(price_id.to_string(), *price);
         }
     }
+
+    if let Some(runtime) = shared_runtime.as_ref() {
+        for chain in chains {
+            if let Some(price_id) = chain.native_price_id
+                && !map.contains_key(price_id)
+                && let Ok(PriceQuote { price, .. }) = runtime
+                    .price_feed
+                    .get_price_with_hints(&alias_market_symbol(chain.native_symbol), Some(price_id))
+                    .await
+                && price.is_finite()
+                && price > 0.0
+            {
+                map.insert(price_id.to_string(), price);
+            }
+        }
+    }
+
     Ok(map)
 }
 
@@ -2465,11 +3071,6 @@ async fn chain_health(state: &AppState, chain: &'static ChainConfig) -> NetworkH
     let protocol = match chain.protocol {
         ChainProtocol::Evm => "evm",
         ChainProtocol::Solana => "solana",
-        ChainProtocol::Sui => "sui",
-        ChainProtocol::Bitcoin => "bitcoin",
-        ChainProtocol::Cosmos => "cosmos",
-        ChainProtocol::AvalancheP => "avalanche-p",
-        ChainProtocol::AvalancheX => "avalanche-x",
     };
 
     match chain.protocol {
@@ -2527,71 +3128,6 @@ async fn chain_health(state: &AppState, chain: &'static ChainConfig) -> NetworkH
                 detail,
             }
         }
-        ChainProtocol::Sui => {
-            let detail = if let Some(url) = chain.http_rpc {
-                state
-                    .http
-                    .post(url)
-                    .json(&json!({
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "sui_getLatestCheckpointSequenceNumber",
-                        "params": [],
-                    }))
-                    .send()
-                    .await
-                    .ok()
-                    .map(|response| response.status().to_string())
-            } else {
-                None
-            };
-            NetworkHealth {
-                key: chain.key.into(),
-                name: chain.name.into(),
-                protocol: protocol.into(),
-                status: if detail.is_some() { "online".into() } else { "degraded".into() },
-                chain_id: None,
-                block_number: None,
-                detail,
-            }
-        }
-        ChainProtocol::Bitcoin => {
-            let detail = if let Some(url) = chain.http_rpc {
-                state
-                    .http
-                    .post(url)
-                    .json(&json!({
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "getblockcount",
-                        "params": [],
-                    }))
-                    .send()
-                    .await
-                    .ok()
-                    .map(|response| response.status().to_string())
-            } else {
-                None
-            };
-            NetworkHealth {
-                key: chain.key.into(),
-                name: chain.name.into(),
-                protocol: protocol.into(),
-                status: if detail.is_some() { "online".into() } else { "degraded".into() },
-                chain_id: None,
-                block_number: None,
-                detail,
-            }
-        }
-        _ => NetworkHealth {
-            key: chain.key.into(),
-            name: chain.name.into(),
-            protocol: protocol.into(),
-            status: "configured".into(),
-            chain_id: None,
-            block_number: None,
-            detail: None,
-        },
     }
 }
 
@@ -2618,6 +3154,16 @@ async fn wallet_insights(state: &AppState, wallet_address: &str) -> Result<Value
         "totalSavedUsd": rebates_usd + gas_saved_usd,
         "privateRoutingPct": private_routing_pct,
     }))
+}
+
+fn empty_wallet_insights() -> Value {
+    json!({
+        "protectedTxCount": 0,
+        "rebatesUsd": 0.0,
+        "gasSavedUsd": 0.0,
+        "totalSavedUsd": 0.0,
+        "privateRoutingPct": 0.0,
+    })
 }
 
 fn relative_activity_date(timestamp_ms: i64) -> String {
@@ -2652,11 +3198,11 @@ async fn api_bootstrap(
 
     Ok(Json(BootstrapResponse {
         app_name: "Oxidity Wallet".into(),
-        version: "1.0.0".into(),
+        version: wallet_app_version().into(),
         wallet_app_url: "https://wallet.oxidity.io/".into(),
         downloads: DownloadLinks {
             chrome_extension: "https://oxidity.io/downloads/oxidity-wallet-extension.zip".into(),
-            android_apk: "https://oxidity.io/downloads/oxidity-wallet-debug.apk".into(),
+            android_apk: wallet_android_download_url(),
         },
         supported_networks,
         defaults: json!({
@@ -2720,11 +3266,17 @@ async fn api_catalog(State(state): State<Arc<AppState>>) -> Json<Value> {
 
 async fn api_portfolio(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<PortfolioRequest>,
 ) -> Result<Json<PortfolioResponse>, ApiError> {
     let chain = resolve_chain(payload.chain_key.as_deref())?;
     if chain.protocol == ChainProtocol::Solana {
         let wallet_address = parse_wallet_identifier(chain, &payload.address, "wallet")?;
+        let insights = if verify_wallet_auth(&headers, "portfolio_insights", chain, &wallet_address)? {
+            wallet_insights(&state, &wallet_address).await?
+        } else {
+            empty_wallet_insights()
+        };
         let lamports = solana_balance_lamports(&state, chain, &wallet_address).await?;
         let native_balance = lamports as f64 / 1_000_000_000.0;
         let native_usd = native_price_map(&state, &[chain])
@@ -2733,7 +3285,6 @@ async fn api_portfolio(
             .copied()
             .unwrap_or(0.0);
         let native_fiat = native_balance * native_usd;
-        let insights = wallet_insights(&state, &wallet_address).await?;
 
         return Ok(Json(PortfolioResponse {
             network: json!({
@@ -2758,6 +3309,12 @@ async fn api_portfolio(
                 raw_balance: native_balance,
                 fiat_balance: format_usd(native_fiat),
                 fiat_value: native_fiat,
+                price_usd: native_usd,
+                price_source: if native_usd > 0.0 {
+                    "wallet_fallback".into()
+                } else {
+                    "unavailable".into()
+                },
                 receive_address: wallet_address.clone(),
                 logo: logo_for_symbol(chain.native_symbol).map(str::to_string),
                 is_native: true,
@@ -2774,6 +3331,16 @@ async fn api_portfolio(
         )));
     }
     let wallet_address = parse_address(&payload.address, "wallet")?;
+    let insights = if verify_wallet_auth(
+        &headers,
+        "portfolio_insights",
+        chain,
+        &format!("{wallet_address:#x}"),
+    )? {
+        wallet_insights(&state, &format!("{wallet_address:#x}")).await?
+    } else {
+        empty_wallet_insights()
+    };
     let runtime = get_evm_runtime(&state, chain).await?;
     let provider = runtime.provider.clone();
 
@@ -2789,12 +3356,31 @@ async fn api_portfolio(
     let native_prices = native_prices?;
 
     let native_balance = as_f64(&format_ether(native_balance_wei));
-    let native_usd = chain
+    let native_fallback_usd = chain
         .native_price_id
         .and_then(|id| native_prices.get(id))
         .map(|value| *value)
         .unwrap_or(0.0);
-    let native_fiat = native_balance * native_usd;
+    let native_asset_ref = ResolvedAsset {
+        symbol: chain.native_symbol.into(),
+        name: chain.name.into(),
+        address: runtime.wrapped_native,
+        decimals: 18,
+        logo: logo_for_symbol(chain.native_symbol).map(str::to_string),
+        coingecko_id: chain.native_price_id.map(str::to_string),
+        is_native: true,
+    };
+    let native_quote = fetch_asset_market_quote(&state, chain, &runtime, &native_asset_ref)
+        .await
+        .unwrap_or(MarketQuote {
+            price: native_fallback_usd,
+            source: if native_fallback_usd > 0.0 {
+                "wallet_fallback".into()
+            } else {
+                "unavailable".into()
+            },
+        });
+    let native_fiat = native_balance * native_quote.price;
 
     let mut tracked: BTreeMap<Address, CustomTokenInput> = BTreeMap::new();
     for token in chain.token_catalog {
@@ -2837,6 +3423,7 @@ async fn api_portfolio(
             name: None,
             logo: None,
         });
+        let catalog_metadata = lookup_catalog_token_by_address(&state, runtime.chain_id, &token_address);
         let contract = IERC20::new(token_address, provider.clone());
         let balance_call = contract.balanceOf(wallet_address).call().await;
         let symbol_call = contract.symbol().call().await;
@@ -2854,14 +3441,51 @@ async fn api_portfolio(
         let balance_string = format_units(balance, decimals)
             .unwrap_or_else(|_| "0".into());
         let raw_balance = as_f64(&balance_string);
-        let resolved_symbol = metadata.symbol.clone().unwrap_or_else(|| symbol.clone());
-        let usd_price = token_prices
+        let resolved_symbol = metadata
+            .symbol
+            .clone()
+            .or_else(|| catalog_metadata.as_ref().map(|token| token.symbol.clone()))
+            .unwrap_or_else(|| symbol.clone());
+        let resolved_name = metadata
+            .name
+            .clone()
+            .or_else(|| catalog_metadata.as_ref().map(|token| token.name.clone()))
+            .unwrap_or(name);
+        let resolved_logo = metadata
+            .logo
+            .clone()
+            .or_else(|| catalog_metadata.as_ref().and_then(|token| token.logo.clone()));
+        let fallback_price = token_prices
             .get(&format!("{token_address:#x}").to_lowercase())
             .copied()
             .or_else(|| fallback_symbol_prices.get(&resolved_symbol.to_uppercase()).copied())
             .unwrap_or(0.0);
+        let asset = ResolvedAsset {
+            symbol: resolved_symbol.clone(),
+            name: resolved_name.clone(),
+            address: token_address,
+            decimals,
+            logo: resolved_logo.clone(),
+            coingecko_id: catalog_metadata.as_ref().and_then(|token| token.coingecko_id.clone()),
+            is_native: false,
+        };
+        let market_quote = fetch_asset_market_quote(&state, chain, &runtime, &asset)
+            .await
+            .unwrap_or(MarketQuote {
+                price: fallback_price,
+                source: if fallback_price > 0.0 {
+                    "portfolio_fallback".into()
+                } else {
+                    "unavailable".into()
+                },
+            });
+        let usd_price = if market_quote.price > 0.0 {
+            market_quote.price
+        } else {
+            fallback_price
+        };
         let fiat_value = raw_balance * usd_price;
-        if raw_balance <= 0.0 && metadata.symbol.is_none() && metadata.name.is_none() {
+        if raw_balance <= 0.0 && resolved_symbol.is_empty() && resolved_name.is_empty() {
             continue;
         }
         total_fiat += fiat_value;
@@ -2869,21 +3493,22 @@ async fn api_portfolio(
             id: format!("{}:{}", chain.key, format!("{token_address:#x}").to_lowercase()),
             chain_key: chain.key.into(),
             symbol: resolved_symbol,
-            name: metadata.name.unwrap_or(name),
+            name: resolved_name,
             address: format!("{token_address:#x}"),
             decimals,
             balance: format_f64(raw_balance, 6),
             raw_balance,
             fiat_balance: format_usd(fiat_value),
             fiat_value,
+            price_usd: usd_price,
+            price_source: market_quote.source,
             receive_address: format!("{wallet_address:#x}"),
-            logo: metadata.logo,
+            logo: resolved_logo,
             is_native: false,
             is_custom: true,
         });
     }
 
-    let insights = wallet_insights(&state, &format!("{wallet_address:#x}")).await?;
     let nfts = fetch_evm_nfts(&state, chain, &runtime, wallet_address).await?;
 
     Ok(Json(PortfolioResponse {
@@ -2909,6 +3534,8 @@ async fn api_portfolio(
             raw_balance: native_balance,
             fiat_balance: format_usd(native_fiat),
             fiat_value: native_fiat,
+            price_usd: native_quote.price,
+            price_source: native_quote.source,
             receive_address: format!("{wallet_address:#x}"),
             logo: logo_for_symbol(chain.native_symbol).map(str::to_string),
             is_native: true,
@@ -2960,13 +3587,32 @@ async fn api_resolve_token(
     let prices = token_price_map(&state, chain, &[token_address]).await?;
     let balance_string = format_units(balance, decimals).unwrap_or_else(|_| "0".into());
     let raw_balance = as_f64(&balance_string);
-    let logo =
-        lookup_catalog_token_by_address(&state, runtime.chain_id, &token_address).and_then(|token| token.logo);
-    let fiat_value = raw_balance
-        * prices
-            .get(&format!("{token_address:#x}").to_lowercase())
-            .copied()
-            .unwrap_or(0.0);
+    let catalog_token = lookup_catalog_token_by_address(&state, runtime.chain_id, &token_address);
+    let logo = catalog_token.as_ref().and_then(|token| token.logo.clone());
+    let asset = ResolvedAsset {
+        symbol: symbol.clone(),
+        name: name.clone(),
+        address: token_address,
+        decimals,
+        logo: logo.clone(),
+        coingecko_id: catalog_token.and_then(|token| token.coingecko_id),
+        is_native: false,
+    };
+    let fallback_price = prices
+        .get(&format!("{token_address:#x}").to_lowercase())
+        .copied()
+        .unwrap_or(0.0);
+    let market_quote = fetch_asset_market_quote(&state, chain, &runtime, &asset)
+        .await
+        .unwrap_or(MarketQuote {
+            price: fallback_price,
+            source: if fallback_price > 0.0 {
+                "portfolio_fallback".into()
+            } else {
+                "unavailable".into()
+            },
+        });
+    let fiat_value = raw_balance * market_quote.price;
 
     Ok(Json(json!({
         "id": format!("{}:{}", chain.key, format!("{token_address:#x}").to_lowercase()),
@@ -2979,8 +3625,133 @@ async fn api_resolve_token(
         "rawBalance": raw_balance,
         "fiatBalance": format_usd(fiat_value),
         "fiatValue": fiat_value,
+        "priceUsd": market_quote.price,
+        "priceSource": market_quote.source,
         "logo": logo,
     })))
+}
+
+async fn load_wallet_asset_token_response(
+    state: &AppState,
+    chain: &'static ChainConfig,
+    runtime: &EvmRuntime,
+    wallet_address: Address,
+    asset: &ResolvedAsset,
+) -> Result<(TokenResponse, MarketQuote), ApiError> {
+    let (balance_display, raw_balance, address_display, is_native, is_custom) = if asset.is_native {
+        let balance_wei = runtime
+            .provider
+            .get_balance(wallet_address)
+            .await
+            .map_err(|err| ApiError::internal(format!("Native balance read failed: {err}")))?;
+        let balance_string = format_ether(balance_wei);
+        (
+            format_f64(as_f64(&balance_string), 6),
+            as_f64(&balance_string),
+            format!("{wallet_address:#x}"),
+            true,
+            false,
+        )
+    } else {
+        let contract = IERC20::new(asset.address, runtime.provider.clone());
+        let balance = contract
+            .balanceOf(wallet_address)
+            .call()
+            .await
+            .map_err(|err| ApiError::internal(format!("Token balance read failed: {err}")))?;
+        let balance_string = format_units(balance, asset.decimals).unwrap_or_else(|_| "0".into());
+        (
+            format_f64(as_f64(&balance_string), 6),
+            as_f64(&balance_string),
+            lower_hex_address(asset.address),
+            false,
+            true,
+        )
+    };
+
+    let market_quote = fetch_asset_market_quote(state, chain, runtime, asset).await?;
+    let fiat_value = raw_balance * market_quote.price;
+
+    Ok((
+        TokenResponse {
+            id: if is_native {
+                format!("{}:native", chain.key)
+            } else {
+                format!("{}:{}", chain.key, lower_hex_address(asset.address))
+            },
+            chain_key: chain.key.into(),
+            symbol: asset.symbol.clone(),
+            name: asset.name.clone(),
+            address: address_display,
+            decimals: asset.decimals,
+            balance: balance_display,
+            raw_balance,
+            fiat_balance: format_usd(fiat_value),
+            fiat_value,
+            price_usd: market_quote.price,
+            price_source: market_quote.source.clone(),
+            receive_address: format!("{wallet_address:#x}"),
+            logo: asset.logo.clone(),
+            is_native,
+            is_custom,
+        },
+        market_quote,
+    ))
+}
+
+async fn api_token_details(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<TokenDetailsRequest>,
+) -> Result<Json<TokenDetailsResponse>, ApiError> {
+    let chain = resolve_chain(payload.chain_key.as_deref())?;
+    if chain.protocol != ChainProtocol::Evm {
+        return Err(ApiError::bad_request(format!(
+            "{} token details are only available for EVM assets right now",
+            chain.name
+        )));
+    }
+
+    let wallet_address = parse_address(&payload.wallet_address, "wallet")?;
+    let runtime = get_evm_runtime(&state, chain).await?;
+    let reference = payload
+        .address
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| payload.symbol.as_deref().filter(|value| !value.trim().is_empty()));
+    let asset = resolve_asset_reference(&state, chain, &runtime, reference, chain.native_symbol).await?;
+    let (token, market_quote) =
+        load_wallet_asset_token_response(&state, chain, &runtime, wallet_address, &asset).await?;
+
+    let ranges = [ChartRange::Day, ChartRange::Week, ChartRange::Month];
+    let charts = join_all(
+        ranges
+            .into_iter()
+            .map(|range| fetch_asset_chart_series(&state, chain, &asset, range, token.raw_balance, &market_quote)),
+    )
+    .await;
+
+    let mut charts = charts.into_iter();
+    let chart_24h = charts
+        .next()
+        .transpose()?
+        .unwrap_or_else(|| build_flat_chart_series(ChartRange::Day, &market_quote, token.raw_balance));
+    let chart_week = charts
+        .next()
+        .transpose()?
+        .unwrap_or_else(|| build_flat_chart_series(ChartRange::Week, &market_quote, token.raw_balance));
+    let chart_month = charts
+        .next()
+        .transpose()?
+        .unwrap_or_else(|| build_flat_chart_series(ChartRange::Month, &market_quote, token.raw_balance));
+
+    Ok(Json(TokenDetailsResponse {
+        token,
+        market_price_usd: market_quote.price,
+        market_price_source: market_quote.source,
+        chart_24h,
+        chart_week,
+        chart_month,
+    }))
 }
 
 async fn api_quote_preview(
@@ -3012,9 +3783,21 @@ async fn api_quote_preview(
             100,
         )
         .await?;
-        let sell_price = fetch_asset_market_price_usd(&state, chain, &runtime, &plan.sell_asset).await?;
-        let buy_price = fetch_asset_market_price_usd(&state, chain, &runtime, &plan.buy_asset).await?;
-        let estimated_gas_native = 0.0016;
+        let sell_price = fetch_asset_market_quote(&state, chain, &runtime, &plan.sell_asset)
+            .await?
+            .price;
+        let buy_price = fetch_asset_market_quote(&state, chain, &runtime, &plan.buy_asset)
+            .await?
+            .price;
+        let estimated_gas_native = runtime
+            .provider
+            .estimate_eip1559_fees()
+            .await
+            .ok()
+            .map(|fees| {
+                as_f64(&format_ether(U256::from(fees.max_fee_per_gas) * U256::from(220_000u64)))
+            })
+            .unwrap_or(0.0);
         let estimated_gas_usd = estimated_gas_native
             * native_price_map(&state, &[chain])
                 .await?
@@ -3022,16 +3805,25 @@ async fn api_quote_preview(
                 .copied()
                 .unwrap_or(0.0);
         let receive_amount = u256_to_f64_units(plan.expected_out, plan.buy_asset.decimals);
+        let minimum_received = u256_to_f64_units(plan.min_out, plan.buy_asset.decimals);
+        let route_path = swap_route_symbols(chain, &runtime, &plan);
+        let price_impact_pct =
+            calculate_price_impact_pct(sell_amount, sell_price, receive_amount, buy_price);
 
         return Ok(Json(QuotePreviewResponse {
             chain_key: chain.key.into(),
             sell_token: plan.sell_asset.symbol.clone(),
             buy_token: plan.buy_asset.symbol.clone(),
+            router_name: Some(plan.router_name.clone()),
+            route_path,
             sell_amount,
             receive_amount,
+            minimum_received,
             rate: if sell_amount > 0.0 { receive_amount / sell_amount } else { 0.0 },
             sell_usd_value: sell_amount * sell_price,
             receive_usd_value: receive_amount * buy_price,
+            minimum_received_usd: minimum_received * buy_price,
+            price_impact_pct,
             estimated_gas_usd,
             estimated_gas_native,
             speed_options: json!({
@@ -3055,8 +3847,6 @@ async fn api_quote_preview(
         ("BNB", "binancecoin"),
         ("SOL", "solana"),
         ("AVAX", "avalanche-2"),
-        ("SUI", "sui"),
-        ("ATOM", "cosmos"),
     ]);
     let sell_id = ids
         .get(sell_token.as_str())
@@ -3091,10 +3881,13 @@ async fn api_quote_preview(
 
     Ok(Json(QuotePreviewResponse {
         chain_key: chain.key.into(),
-        sell_token,
-        buy_token,
+        sell_token: sell_token.clone(),
+        buy_token: buy_token.clone(),
+        router_name: None,
+        route_path: vec![sell_token.clone(), buy_token.clone()],
         sell_amount,
         receive_amount,
+        minimum_received: receive_amount,
         rate: if sell_price > 0.0 && buy_price > 0.0 {
             sell_price / buy_price
         } else {
@@ -3102,6 +3895,8 @@ async fn api_quote_preview(
         },
         sell_usd_value: sell_amount * sell_price,
         receive_usd_value: receive_amount * buy_price,
+        minimum_received_usd: receive_amount * buy_price,
+        price_impact_pct: 0.0,
         estimated_gas_usd: 0.0,
         estimated_gas_native: 0.0,
         speed_options: json!({
@@ -3183,12 +3978,25 @@ async fn api_swap_prepare(
         .and_then(|id| native_prices.get(id))
         .copied()
         .unwrap_or(0.0);
+    let sell_amount = u256_to_f64_units(plan.amount_in, plan.sell_asset.decimals);
+    let expected_out_amount = u256_to_f64_units(plan.expected_out, plan.buy_asset.decimals);
+    let minimum_received_amount = u256_to_f64_units(plan.min_out, plan.buy_asset.decimals);
+    let sell_price = fetch_asset_market_quote(&state, chain, &runtime, &plan.sell_asset)
+        .await?
+        .price;
+    let buy_price = fetch_asset_market_quote(&state, chain, &runtime, &plan.buy_asset)
+        .await?
+        .price;
+    let route_path = swap_route_symbols(chain, &runtime, &plan);
+    let price_impact_pct =
+        calculate_price_impact_pct(sell_amount, sell_price, expected_out_amount, buy_price);
 
     Ok(Json(SwapPrepareResponse {
         chain_key: chain.key.into(),
         chain_id: runtime.chain_id,
         network: chain.name.into(),
         router_name: plan.router_name,
+        route_path,
         router: format!("{:#x}", plan.router),
         to: format!("{:#x}", plan.router),
         data: format!("0x{}", hex::encode(calldata)),
@@ -3203,11 +4011,17 @@ async fn api_swap_prepare(
         max_priority_fee_per_gas: fees.max_priority_fee_per_gas.to_string(),
         expected_out: plan.expected_out.to_string(),
         min_out: plan.min_out.to_string(),
+        sell_symbol: plan.sell_asset.symbol.clone(),
+        sell_amount_formatted: format_f64(sell_amount, 6),
         expected_out_formatted: format_f64(
             u256_to_f64_units(plan.expected_out, plan.buy_asset.decimals),
             6,
         ),
+        minimum_received_formatted: format_f64(minimum_received_amount, 6),
         buy_symbol: plan.buy_asset.symbol,
+        expected_out_usd: expected_out_amount * buy_price,
+        minimum_received_usd: minimum_received_amount * buy_price,
+        price_impact_pct,
         estimated_fee_native,
         estimated_fee_usd: estimated_fee_native * native_usd,
         explorer_tx_base_url: chain.explorer_tx_base_url.unwrap_or("").into(),
@@ -3312,12 +4126,14 @@ async fn api_send_prepare(
 
 async fn api_send_broadcast(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<SendBroadcastRequest>,
 ) -> Result<Json<SendBroadcastResponse>, ApiError> {
     let chain = resolve_chain(payload.chain_key.as_deref())?;
     if chain.protocol == ChainProtocol::Solana {
         let wallet_address = parse_wallet_identifier(chain, &payload.wallet_address, "wallet")?;
-        let to_address = parse_wallet_identifier(chain, &payload.to, "to")?;
+        let _to_address = parse_wallet_identifier(chain, &payload.to, "to")?;
+        require_wallet_auth(&headers, "send_broadcast", chain, &wallet_address)?;
         let encoding = payload
             .encoding
             .as_deref()
@@ -3345,24 +4161,6 @@ async fn api_send_broadcast(
         )
         .await?;
 
-        insert_activity_row(
-            &state,
-            &wallet_address,
-            chain,
-            &payload.tx_type,
-            &payload.title,
-            &payload.amount,
-            &payload.fiat_amount,
-            &payload.asset,
-            &to_address,
-            &signature,
-            &to_address,
-            &payload.fee,
-            "Pending",
-            false,
-        )
-        .await?;
-
         return Ok(Json(SendBroadcastResponse {
             hash: signature.clone(),
             status: "pending".into(),
@@ -3373,8 +4171,52 @@ async fn api_send_broadcast(
     let runtime = get_evm_runtime(&state, chain).await?;
     let provider = runtime.provider.clone();
     let wallet_address = parse_address(&payload.wallet_address, "wallet")?;
+    require_wallet_auth(
+        &headers,
+        "send_broadcast",
+        chain,
+        &format!("{wallet_address:#x}"),
+    )?;
     let raw = hex::decode(payload.raw_transaction.trim_start_matches("0x"))
         .map_err(|_| ApiError::bad_request("Invalid raw transaction hex"))?;
+    let envelope = TxEnvelope::decode_2718_exact(raw.as_slice())
+        .map_err(|_| ApiError::bad_request("Invalid raw transaction encoding"))?;
+    let signer = envelope
+        .recover_signer()
+        .map_err(|_| ApiError::bad_request("Could not recover raw transaction signer"))?;
+    if signer != wallet_address {
+        return Err(ApiError::unauthorized(
+            "Raw transaction signer does not match the authenticated wallet",
+        ));
+    }
+    if let Some(tx_chain_id) = envelope.chain_id() {
+        if tx_chain_id != runtime.chain_id {
+            return Err(ApiError::bad_request(format!(
+                "Raw transaction chainId {tx_chain_id} does not match {}",
+                runtime.chain_id
+            )));
+        }
+    }
+
+    let tx_target = envelope
+        .to()
+        .map(|address| format!("{address:#x}"))
+        .unwrap_or_else(|| payload.to.clone());
+    let is_simple_native_send = envelope.kind() != TxKind::Create && envelope.input().is_empty();
+    let (activity_title, activity_amount, activity_asset) = if is_simple_native_send {
+        let value_native = as_f64(&format_ether(envelope.value()));
+        (
+            format!("Send {}", chain.native_symbol),
+            format!("-{} {}", format_f64(value_native, 6), chain.native_symbol),
+            chain.native_symbol.to_string(),
+        )
+    } else {
+        (
+            payload.title.clone(),
+            payload.amount.clone(),
+            payload.asset.clone(),
+        )
+    };
     let hash = keccak256(&raw);
     let hash_hex = format!("{hash:#x}");
     let is_protected = runtime.protected_execution;
@@ -3398,13 +4240,13 @@ async fn api_send_broadcast(
         &format!("{wallet_address:#x}"),
         chain,
         &payload.tx_type,
-        &payload.title,
-        &payload.amount,
+        &activity_title,
+        &activity_amount,
         &payload.fiat_amount,
-        &payload.asset,
-        &payload.to,
+        &activity_asset,
+        &tx_target,
         &hash_hex,
-        &payload.to,
+        &tx_target,
         &payload.fee,
         "Pending",
         is_protected,
@@ -3426,10 +4268,12 @@ async fn api_send_broadcast(
 
 async fn api_activity(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(payload): Json<ActivityRequest>,
 ) -> Result<Json<Vec<Value>>, ApiError> {
     let chain = resolve_chain(payload.chain_key.as_deref())?;
     let wallet_identifier = parse_wallet_identifier(chain, &payload.address, "wallet")?;
+    require_wallet_auth(&headers, "activity", chain, &wallet_identifier)?;
     let rows = load_activity_rows(&state, &wallet_identifier, Some(chain.key)).await?;
 
     let mut activity_by_id: HashMap<String, Value> = rows
@@ -3738,6 +4582,103 @@ async fn api_nft_send_prepare(
     }))
 }
 
+fn ramp_asset_code(chain_key: &str, symbol: &str) -> Option<&'static str> {
+    match (chain_key, symbol.trim().to_uppercase().as_str()) {
+        ("ethereum", "ETH") => Some("ETH_ETH"),
+        ("ethereum", "USDC") => Some("ETH_USDC"),
+        ("ethereum", "USDT") => Some("ETH_USDT"),
+        ("ethereum", "DAI") => Some("ETH_DAI"),
+        ("ethereum", "LINK") => Some("ETH_LINK"),
+        ("base", "ETH") => Some("BASE_ETH"),
+        ("base", "USDC") => Some("BASE_USDC"),
+        _ => None,
+    }
+}
+
+fn ramp_checkout_url(
+    chain_key: &str,
+    symbol: &str,
+    wallet_address: &str,
+    amount_usd: f64,
+) -> Option<String> {
+    let host_api_key = std::env::var("RAMP_HOST_API_KEY")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| std::env::var("RAMP_API_KEY").ok().filter(|value| !value.trim().is_empty()))?;
+    let host_logo_url = std::env::var("RAMP_LOGO_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            std::env::var("WALLET_SERVICE_LOGO_URL")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })?;
+    let asset_code = ramp_asset_code(chain_key, symbol)?;
+    let host_app_name =
+        std::env::var("RAMP_HOST_APP_NAME").unwrap_or_else(|_| "Oxidity Wallet".into());
+
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.append_pair("hostApiKey", host_api_key.trim());
+    serializer.append_pair("hostAppName", host_app_name.trim());
+    serializer.append_pair("hostLogoUrl", host_logo_url.trim());
+    serializer.append_pair("swapAsset", asset_code);
+    serializer.append_pair("defaultAsset", asset_code);
+    serializer.append_pair("fiatCurrency", "USD");
+    serializer.append_pair("fiatValue", &format!("{amount_usd:.2}"));
+    serializer.append_pair("userAddress", wallet_address);
+    Some(format!("https://app.ramp.network/?{}", serializer.finish()))
+}
+
+fn build_onramp_providers(
+    chain_key: &str,
+    buy_symbol: &str,
+    wallet_address: &str,
+    amount_usd: f64,
+    market_price_usd: f64,
+) -> Vec<OnRampProviderQuote> {
+    let receive_base = if market_price_usd > 0.0 {
+        amount_usd / market_price_usd
+    } else {
+        0.0
+    };
+    let mut providers = Vec::new();
+
+    if let Some(checkout_url) = ramp_checkout_url(chain_key, buy_symbol, wallet_address, amount_usd) {
+        providers.push(OnRampProviderQuote {
+            id: "ramp".into(),
+            name: "Ramp".into(),
+            rate: if amount_usd > 0.0 { receive_base / amount_usd } else { 0.0 },
+            fee: 2.49,
+            delivery_time: "1-5 mins".into(),
+            trust_score: 95,
+            receive_amount: receive_base * 0.9751,
+            checkout_url,
+        });
+    }
+
+    providers.push(OnRampProviderQuote {
+        id: "binance".into(),
+        name: "Binance".into(),
+        rate: if amount_usd > 0.0 { receive_base / amount_usd } else { 0.0 },
+        fee: 1.80,
+        delivery_time: "Instant".into(),
+        trust_score: 90,
+        receive_amount: receive_base * 0.982,
+        checkout_url: format!(
+            "https://www.binance.com/en/buy-sell-crypto?fiat=USD&crypto={}&amount={amount_usd:.2}",
+            buy_symbol.to_uppercase()
+        ),
+    });
+
+    providers.sort_by(|left, right| {
+        right
+            .receive_amount
+            .partial_cmp(&left.receive_amount)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    providers
+}
+
 async fn api_onramp_quote(
     State(state): State<Arc<AppState>>,
     Json(payload): Json<OnRampQuoteRequest>,
@@ -3758,7 +4699,9 @@ async fn api_onramp_quote(
             chain.native_symbol,
         )
         .await?;
-        let price = fetch_asset_market_price_usd(&state, chain, &runtime, &asset).await?;
+        let price = fetch_asset_market_quote(&state, chain, &runtime, &asset)
+            .await?
+            .price;
         (asset.symbol, price)
     } else {
         let price = native_price_map(&state, &[chain])
@@ -3779,52 +4722,14 @@ async fn api_onramp_quote(
             price,
         )
     };
-    let market_price_usd = if market_price_usd > 0.0 {
-        market_price_usd
-    } else {
-        return Err(ApiError::internal("Unable to price the selected asset"));
-    };
-    let receive_base = amount_usd / market_price_usd;
-    let buy_code = buy_symbol.to_lowercase();
     let wallet_address = payload.wallet_address.trim();
-    let providers = vec![
-        OnRampProviderQuote {
-            id: "ramp".into(),
-            name: "Ramp".into(),
-            rate: receive_base / amount_usd,
-            fee: 2.49,
-            delivery_time: "1-5 mins".into(),
-            trust_score: 95,
-            receive_amount: receive_base * 0.9751,
-            checkout_url: format!(
-                "https://buy.ramp.network/?swapAsset={buy_code}&fiatCurrency=USD&fiatValue={amount_usd:.2}&userAddress={wallet_address}"
-            ),
-        },
-        OnRampProviderQuote {
-            id: "moonpay".into(),
-            name: "MoonPay".into(),
-            rate: receive_base / amount_usd,
-            fee: 3.49,
-            delivery_time: "2-10 mins".into(),
-            trust_score: 92,
-            receive_amount: receive_base * 0.9651,
-            checkout_url: format!(
-                "https://buy.moonpay.com/?currencyCode={buy_code}&baseCurrencyCode=usd&baseCurrencyAmount={amount_usd:.2}&walletAddress={wallet_address}"
-            ),
-        },
-        OnRampProviderQuote {
-            id: "binance".into(),
-            name: "Binance".into(),
-            rate: receive_base / amount_usd,
-            fee: 1.80,
-            delivery_time: "Instant".into(),
-            trust_score: 90,
-            receive_amount: receive_base * 0.982,
-            checkout_url: format!(
-                "https://www.binance.com/en/buy-sell-crypto?fiat=USD&crypto={buy_code}&amount={amount_usd:.2}"
-            ),
-        },
-    ];
+    let providers = build_onramp_providers(
+        chain.key,
+        &buy_symbol,
+        wallet_address,
+        amount_usd,
+        market_price_usd,
+    );
 
     Ok(Json(OnRampQuoteResponse {
         chain_key: chain.key.into(),
@@ -3862,12 +4767,10 @@ async fn api_ai_chat(
         ("bitcoin", ("bitcoin", "BTC", "Bitcoin")),
         ("sol", ("solana", "SOL", "Solana")),
         ("solana", ("solana", "SOL", "Solana")),
-        ("sui", ("sui", "SUI", "Sui")),
         ("usdc", ("usd-coin", "USDC", "USD Coin")),
         ("link", ("chainlink", "LINK", "Chainlink")),
         ("uni", ("uniswap", "UNI", "Uniswap")),
         ("aave", ("aave", "AAVE", "Aave")),
-        ("atom", ("cosmos", "ATOM", "Cosmos")),
     ]);
 
     let asset = if let Some(asset) = known.get(lookup.as_str()) {

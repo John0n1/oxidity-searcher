@@ -53,6 +53,13 @@ function formatAmount(value: number | string): string {
   return rendered.length > 0 ? rendered : '0';
 }
 
+function formatMarketValue(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) {
+    return 'Market price unavailable';
+  }
+  return `$${formatUsd(value)}`;
+}
+
 function scaleWei(value: string, multiplier: bigint): bigint {
   return (BigInt(value) * multiplier + 99n) / 100n;
 }
@@ -67,7 +74,9 @@ export function SwapTab() {
   const accounts = useAppStore((state) => state.accounts);
   const activeAccountId = useAppStore((state) => state.activeAccountId);
   const nativeAsset = useAppStore((state) => state.nativeAsset);
+  const customTokens = useAppStore((state) => state.customTokens);
   const exportActivePrivateKey = useAppStore((state) => state.exportActivePrivateKey);
+  const buildWalletAuth = useAppStore((state) => state.buildWalletAuth);
   const refreshWalletData = useAppStore((state) => state.refreshWalletData);
 
   const activeAccount = accounts.find((account) => account.id === activeAccountId);
@@ -124,6 +133,21 @@ export function SwapTab() {
         );
       });
   }, [availableBuyTokens, nativeSymbol, tokenSearch]);
+  const buyTokenBalance = useMemo(
+    () =>
+      customTokens.find(
+        (token) =>
+          token.chainKey === activeChainKey
+          && token.symbol.toUpperCase() === buyToken.symbol.toUpperCase(),
+      ),
+    [activeChainKey, buyToken.symbol, customTokens],
+  );
+  const activeRoutePath = swapPreparation?.routePath ?? quote?.routePath ?? [nativeSymbol, buyToken.symbol];
+  const minimumReceivedLabel =
+    swapPreparation?.minimumReceivedFormatted ?? formatAmount(quote?.minimumReceived ?? 0);
+  const expectedOutUsd = swapPreparation?.expectedOutUsd ?? quote?.receiveUsdValue ?? 0;
+  const minimumReceivedUsd = swapPreparation?.minimumReceivedUsd ?? quote?.minimumReceivedUsd ?? 0;
+  const priceImpactPct = swapPreparation?.priceImpactPct ?? quote?.priceImpactPct ?? 0;
 
   useEffect(() => {
     let cancelled = false;
@@ -268,10 +292,15 @@ export function SwapTab() {
         maxPriorityFeePerGas,
       });
 
+      const auth = await buildWalletAuth('send_broadcast', {
+        walletAddress: activeAccount.address,
+        chainKey: activeChainKey,
+      });
       const response = await broadcastSignedSend({
         chainKey: activeChainKey,
         rawTransaction,
         walletAddress: activeAccount.address,
+        auth: auth || undefined,
         txType: 'swap',
         title: `Swap ${nativeSymbol} to ${swapPreparation.buySymbol}`,
         amount: `-${formatAmount(amountValue)} ${nativeSymbol}`,
@@ -388,7 +417,7 @@ export function SwapTab() {
                   </button>
                 </div>
                 <div className="text-sm text-zinc-500 mt-2">
-                  ${formatUsd(Number.isFinite(amountValue) ? amountValue * nativePrice : 0)}
+                  {formatMarketValue(Number.isFinite(amountValue) ? amountValue * nativePrice : 0)}
                 </div>
               </div>
 
@@ -404,7 +433,9 @@ export function SwapTab() {
               <div className="bg-zinc-900 border border-white/5 rounded-3xl p-5 hover:border-white/10 transition-colors">
                 <div className="flex justify-between mb-2">
                   <span className="text-sm font-medium text-zinc-500">You receive</span>
-                  <span className="text-sm font-medium text-zinc-500">Balance: 0.00</span>
+                  <span className="text-sm font-medium text-zinc-500">
+                    Balance: {formatAmount(buyTokenBalance?.rawBalance || 0)}
+                  </span>
                 </div>
                 <div className="flex items-center justify-between gap-4">
                   <input
@@ -429,7 +460,46 @@ export function SwapTab() {
                   </button>
                 </div>
                 <div className="text-sm text-zinc-500 mt-2">
-                  ${formatUsd(quote?.receiveUsdValue || 0)}
+                  {formatMarketValue(quote?.receiveUsdValue || 0)}
+                </div>
+              </div>
+
+              <div className="mt-4 rounded-3xl border border-white/5 bg-zinc-900 p-5">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium text-white">Quote summary</div>
+                    <div className="text-xs text-zinc-500">
+                      {quote?.routerName ? `${quote.routerName} route` : 'Waiting for a live route'}
+                    </div>
+                  </div>
+                  <div className={`rounded-full px-3 py-1 text-[11px] font-medium ${
+                    priceImpactPct >= 2 ? 'bg-amber-500/10 text-amber-300' : 'bg-emerald-500/10 text-emerald-300'
+                  }`}>
+                    Impact {priceImpactPct.toFixed(2)}%
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div className="rounded-2xl bg-zinc-950 p-4">
+                    <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Rate</div>
+                    <div className="mt-2 font-medium text-white">
+                      1 {nativeSymbol} = {formatAmount(quote?.receiveAmount || 0)} {buyToken.symbol}
+                    </div>
+                  </div>
+                  <div className="rounded-2xl bg-zinc-950 p-4">
+                    <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Min Received</div>
+                    <div className="mt-2 font-medium text-white">
+                      {minimumReceivedLabel} {buyToken.symbol}
+                    </div>
+                    <div className="mt-1 text-xs text-zinc-500">{formatMarketValue(minimumReceivedUsd)}</div>
+                  </div>
+                </div>
+
+                <div className="mt-4 rounded-2xl bg-zinc-950 p-4">
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Route</div>
+                  <div className="mt-2 text-sm font-medium text-white">
+                    {activeRoutePath.join(' -> ')}
+                  </div>
                 </div>
               </div>
 
@@ -486,7 +556,7 @@ export function SwapTab() {
 
               <button
                 onClick={() => void handleSwap()}
-                disabled={!amountIn || isPreparing}
+                disabled={!amountIn || isPreparing || (!quote && !errorMessage)}
                 className="w-full bg-white text-black font-semibold py-4 rounded-2xl hover:bg-zinc-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isPreparing ? 'Preparing...' : 'Review Swap'}
@@ -516,7 +586,7 @@ export function SwapTab() {
                     <div>
                       <div className="font-semibold text-lg">{amountIn || '0'} {nativeSymbol}</div>
                       <div className="text-sm text-zinc-500">
-                        ~${formatUsd(amountValue * nativePrice)}
+                        {formatMarketValue(amountValue * nativePrice)}
                       </div>
                     </div>
                   </div>
@@ -525,7 +595,7 @@ export function SwapTab() {
                     <div>
                       <div className="font-semibold text-lg">{amountOut || '0'} {activeBuyToken}</div>
                       <div className="text-sm text-zinc-500">
-                        ~${formatUsd(quote?.receiveUsdValue || 0)}
+                        {formatMarketValue(expectedOutUsd)}
                       </div>
                     </div>
                     <TokenLogo
@@ -543,8 +613,29 @@ export function SwapTab() {
                     </span>
                   </div>
                   <div className="flex justify-between text-sm">
+                    <span className="text-zinc-400">Minimum Received</span>
+                    <div className="text-right">
+                      <div className="font-medium text-zinc-300">
+                        {minimumReceivedLabel} {activeBuyToken}
+                      </div>
+                      <div className="text-[10px] text-zinc-500 uppercase tracking-wider">
+                        {formatMarketValue(minimumReceivedUsd)}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex justify-between text-sm">
                     <span className="text-zinc-400">Router</span>
                     <span className="font-medium">{swapPreparation?.routerName || 'V2 Router'}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-zinc-400">Route</span>
+                    <span className="font-medium">{activeRoutePath.join(' -> ')}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-zinc-400">Price Impact</span>
+                    <span className={`font-medium ${priceImpactPct >= 2 ? 'text-amber-300' : 'text-emerald-300'}`}>
+                      {priceImpactPct.toFixed(2)}%
+                    </span>
                   </div>
                   <div className="flex justify-between text-sm">
                     <span className="text-zinc-400">Slippage</span>

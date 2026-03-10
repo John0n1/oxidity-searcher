@@ -23,7 +23,9 @@ const CHAINLINK_STALENESS_SECS_MAINNET_CRITICAL_STABLE: u64 = 86_400;
 const STALE_CACHE_GRACE_SECS: u64 = 900; // Accept up to 15m old cache on failures
 const PROVIDER_WINDOW_SECS: u64 = 60; // per-provider RPM window
 const SOURCE_CRYPTOCOMPARE: &str = "cryptocompare";
+#[allow(dead_code)]
 const SOURCE_CRYPTOCOMPARE_PUBLIC_BTC: &str = "cryptocompare_public_btc";
+const SOURCE_MASSIVE: &str = "massive";
 const MAINNET_CHAIN_ID: u64 = 1;
 
 fn is_mainnet_critical_symbol(symbol: &str) -> bool {
@@ -55,6 +57,7 @@ struct NormalizedSymbols {
     cache_key: String,
     chainlink_symbol: String,
     binance_symbols: Vec<String>,
+    coingecko_ids: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -101,6 +104,7 @@ pub struct PriceApiKeys {
     pub coinmarketcap: Option<String>,
     pub cryptocompare: Option<String>,
     pub etherscan: Option<String>,
+    pub massive: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -313,9 +317,16 @@ impl PriceFeed {
         Ok(())
     }
 
-    /// Get price from Binance (e.g., symbol = "ETHUSDT")
     pub async fn get_price(&self, symbol: &str) -> Result<PriceQuote, AppError> {
-        let normalized = normalize_symbol(symbol);
+        self.get_price_with_hints(symbol, None).await
+    }
+
+    pub async fn get_price_with_hints(
+        &self,
+        symbol: &str,
+        coingecko_id: Option<&str>,
+    ) -> Result<PriceQuote, AppError> {
+        let normalized = normalize_symbol_with_hint(symbol, coingecko_id);
         if normalized.chainlink_symbol.is_empty() {
             return Err(AppError::Config(format!(
                 "Invalid price symbol '{}': normalized symbol is empty",
@@ -338,43 +349,7 @@ impl PriceFeed {
             return Ok(price);
         }
 
-        // 2b. Etherscan stats fallback for ETHUSD
-        if let Some(price) = self.try_etherscan(&normalized.chainlink_symbol).await? {
-            self.store_cache(&normalized.cache_key, price.clone()).await;
-            return Ok(price);
-        }
-
-        // 3. Binance (with API key if provided; then anonymous)
-        if let Some(price) = self
-            .try_provider_step("binance", &normalized.cache_key, |_| async {
-                self.try_binance(&normalized).await
-            })
-            .await?
-        {
-            return Ok(price);
-        }
-
-        // 3b. OKX public ticker
-        if let Some(price) = self
-            .try_provider_step("okx", &normalized.cache_key, |_| async {
-                self.try_okx(&normalized).await
-            })
-            .await?
-        {
-            return Ok(price);
-        }
-
-        // 4. CoinMarketCap (API key)
-        if let Some(price) = self
-            .try_provider_step("coinmarketcap", &normalized.cache_key, |_| async {
-                self.try_coinmarketcap(&normalized).await
-            })
-            .await?
-        {
-            return Ok(price);
-        }
-
-        // 5. CoinGecko (API key or keyless)
+        // 3. CoinGecko
         if let Some(price) = self
             .try_provider_step("coingecko", &normalized.cache_key, |_| async {
                 self.try_coingecko(&normalized).await
@@ -384,7 +359,7 @@ impl PriceFeed {
             return Ok(price);
         }
 
-        // 6. CryptoCompare (API key)
+        // 4. CryptoCompare
         if let Some(price) = self
             .try_provider_step(SOURCE_CRYPTOCOMPARE, &normalized.cache_key, |_| async {
                 self.try_cryptocompare(&normalized).await
@@ -394,25 +369,38 @@ impl PriceFeed {
             return Ok(price);
         }
 
-        // 7. CoinPaprika (keyless)
+        // 5. Binance (with API key if provided; then anonymous)
         if let Some(price) = self
-            .try_provider_step("coinpaprika", &normalized.cache_key, |_| async {
-                self.try_coinpaprika(&normalized).await
+            .try_provider_step("binance", &normalized.cache_key, |_| async {
+                self.try_binance(&normalized).await
             })
             .await?
         {
             return Ok(price);
         }
 
-        // 8. CryptoCompare public BTC fallback
-        if normalized.chainlink_symbol == "BTC"
-            && let Some(price) = self
-                .try_provider_step(
-                    SOURCE_CRYPTOCOMPARE_PUBLIC_BTC,
-                    &normalized.cache_key,
-                    |_| async { self.try_cryptocompare_btc_public().await },
-                )
-                .await?
+        // 6. CoinMarketCap (API key)
+        if let Some(price) = self
+            .try_provider_step("coinmarketcap", &normalized.cache_key, |_| async {
+                self.try_coinmarketcap(&normalized).await
+            })
+            .await?
+        {
+            return Ok(price);
+        }
+
+        // 7. Etherscan stats fallback for ETHUSD
+        if let Some(price) = self.try_etherscan(&normalized.chainlink_symbol).await? {
+            self.store_cache(&normalized.cache_key, price.clone()).await;
+            return Ok(price);
+        }
+
+        // 8. Massive market data
+        if let Some(price) = self
+            .try_provider_step(SOURCE_MASSIVE, &normalized.cache_key, |_| async {
+                self.try_massive(&normalized).await
+            })
+            .await?
         {
             return Ok(price);
         }
@@ -493,6 +481,7 @@ impl PriceFeed {
         Ok(None)
     }
 
+    #[allow(dead_code)]
     async fn try_okx(
         &self,
         normalized: &NormalizedSymbols,
@@ -609,43 +598,39 @@ impl PriceFeed {
         &self,
         normalized: &NormalizedSymbols,
     ) -> Result<Option<PriceQuote>, AppError> {
-        let id = match normalized.chainlink_symbol.as_str() {
-            "ETH" => "ethereum",
-            "BTC" => "bitcoin",
-            "BNB" => "binancecoin",
-            "ARB" => "arbitrum",
-            "OP" => "optimism",
-            _ => return Ok(None),
-        };
-        let url =
-            format!("https://api.coingecko.com/api/v3/simple/price?ids={id}&vs_currencies=usd");
         if !self.allow("coingecko", 30).await {
             return Ok(None);
         }
-        let mut req = self.client.get(&url);
-        if let Some(key) = &self.api_keys.coingecko {
-            req = req.header("x-cg-pro-api-key", key);
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| AppError::Connection(format!("CoinGecko request failed: {}", e)))?;
-        if !resp.status().is_success() {
-            return Ok(None);
-        }
-        let parsed: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| AppError::Initialization(format!("CoinGecko decode failed: {}", e)))?;
-        if let Some(price) = parsed
-            .get(id)
-            .and_then(|v| v.get("usd"))
-            .and_then(|v| v.as_f64())
-        {
-            return Ok(Some(PriceQuote {
-                price,
-                source: "coingecko".into(),
-            }));
+
+        for id in &normalized.coingecko_ids {
+            let url = format!(
+                "https://api.coingecko.com/api/v3/simple/price?ids={id}&vs_currencies=usd"
+            );
+            let mut req = self.client.get(&url);
+            if let Some(key) = &self.api_keys.coingecko {
+                req = req.header("x-cg-pro-api-key", key);
+            }
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| AppError::Connection(format!("CoinGecko request failed: {}", e)))?;
+            if !resp.status().is_success() {
+                continue;
+            }
+            let parsed: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| AppError::Initialization(format!("CoinGecko decode failed: {}", e)))?;
+            if let Some(price) = parsed
+                .get(id)
+                .and_then(|v| v.get("usd"))
+                .and_then(|v| v.as_f64())
+            {
+                return Ok(Some(PriceQuote {
+                    price,
+                    source: "coingecko".into(),
+                }));
+            }
         }
         Ok(None)
     }
@@ -684,6 +669,7 @@ impl PriceFeed {
         Ok(None)
     }
 
+    #[allow(dead_code)]
     async fn try_coinpaprika(
         &self,
         normalized: &NormalizedSymbols,
@@ -725,6 +711,7 @@ impl PriceFeed {
         Ok(None)
     }
 
+    #[allow(dead_code)]
     async fn try_cryptocompare_btc_public(&self) -> Result<Option<PriceQuote>, AppError> {
         if !self.allow("cryptocompare_public", 30).await {
             return Ok(None);
@@ -753,6 +740,60 @@ impl PriceFeed {
             }));
         }
         Ok(None)
+    }
+
+    async fn try_massive(
+        &self,
+        normalized: &NormalizedSymbols,
+    ) -> Result<Option<PriceQuote>, AppError> {
+        let Some(api_key) = self
+            .api_keys
+            .massive
+            .as_ref()
+            .map(|key| key.trim())
+            .filter(|key| !key.is_empty())
+        else {
+            return Ok(None);
+        };
+        if !self.allow(SOURCE_MASSIVE, 10).await {
+            return Ok(None);
+        }
+
+        let url = format!(
+            "https://api.massive.com/v1/last/crypto/{}/USD?apiKey={}",
+            normalized.chainlink_symbol, api_key
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| AppError::Connection(format!("Massive request failed: {}", e)))?;
+        if !resp.status().is_success() {
+            return Ok(None);
+        }
+        let parsed: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| AppError::Initialization(format!("Massive decode failed: {}", e)))?;
+
+        let price = parsed
+            .get("last")
+            .and_then(|value| value.get("price"))
+            .and_then(|value| value.as_f64())
+            .or_else(|| {
+                parsed
+                    .get("results")
+                    .and_then(|value| value.get("p"))
+                    .and_then(|value| value.as_f64())
+            });
+
+        Ok(price
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .map(|price| PriceQuote {
+                price,
+                source: SOURCE_MASSIVE.into(),
+            }))
     }
 
     async fn allow(&self, provider: &'static str, rpm: u32) -> bool {
@@ -1115,7 +1156,12 @@ struct EtherscanPriceResult {
     ethusd_timestamp: Option<String>,
 }
 
+#[cfg(test)]
 fn normalize_symbol(symbol: &str) -> NormalizedSymbols {
+    normalize_symbol_with_hint(symbol, None)
+}
+
+fn normalize_symbol_with_hint(symbol: &str, coingecko_id: Option<&str>) -> NormalizedSymbols {
     let cleaned: String = symbol
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
@@ -1138,10 +1184,45 @@ fn normalize_symbol(symbol: &str) -> NormalizedSymbols {
     let mut seen = HashSet::new();
     binance_symbols.retain(|s| seen.insert(s.clone()));
 
+    let mut coingecko_ids = Vec::new();
+    if let Some(id) = coingecko_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        coingecko_ids.push(id.to_string());
+    }
+    coingecko_ids.extend(default_coingecko_ids(&chainlink_symbol));
+    let mut seen_ids = HashSet::new();
+    coingecko_ids.retain(|id| seen_ids.insert(id.clone()));
+
     NormalizedSymbols {
         cache_key: chainlink_symbol.clone(),
         chainlink_symbol,
         binance_symbols,
+        coingecko_ids,
+    }
+}
+
+fn default_coingecko_ids(symbol: &str) -> Vec<String> {
+    match symbol {
+        "ETH" => vec!["ethereum".into()],
+        "BTC" => vec!["bitcoin".into()],
+        "BNB" => vec!["binancecoin".into()],
+        "ARB" => vec!["arbitrum".into()],
+        "OP" => vec!["optimism".into()],
+        "USDC" => vec!["usd-coin".into()],
+        "USDT" => vec!["tether".into()],
+        "DAI" => vec!["dai".into()],
+        "LINK" => vec!["chainlink".into()],
+        "UNI" => vec!["uniswap".into()],
+        "AAVE" => vec!["aave".into()],
+        "SOL" => vec!["solana".into()],
+        "AVAX" => vec!["avalanche-2".into()],
+        "SHIB" => vec!["shiba-inu".into()],
+        "PEPE" => vec!["pepe".into()],
+        "MATIC" => vec!["matic-network".into()],
+        "PLS" => vec!["pulsechain".into()],
+        _ => Vec::new(),
     }
 }
 
@@ -1159,6 +1240,7 @@ fn alias_base(base: &str) -> String {
     match base {
         "WETH" => "ETH".into(),
         "WBTC" => "BTC".into(),
+        "POL" => "MATIC".into(),
         _ => base.to_string(),
     }
 }
@@ -1173,6 +1255,7 @@ mod tests {
         assert_eq!(normalized.cache_key, "ETH");
         assert_eq!(normalized.chainlink_symbol, "ETH");
         assert!(normalized.binance_symbols.contains(&"ETHUSDT".to_string()));
+        assert!(normalized.coingecko_ids.contains(&"ethereum".to_string()));
     }
 
     #[test]

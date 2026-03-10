@@ -16,7 +16,45 @@
   }
 
   :root[data-oxidity-theme='midnight'] body {
-    background-color: #000000;
+    background:
+      radial-gradient(circle at top, rgba(56, 189, 248, 0.14), transparent 35%),
+      linear-gradient(180deg, #020617 0%, #020617 100%);
+  }
+
+  :root[data-oxidity-theme='midnight'] [class*='bg-zinc-950'] {
+    background-color: #020617 !important;
+  }
+
+  :root[data-oxidity-theme='midnight'] [class*='bg-zinc-900'] {
+    background-color: #0f172a !important;
+  }
+
+  :root[data-oxidity-theme='midnight'] [class*='bg-zinc-800'] {
+    background-color: #162033 !important;
+  }
+
+  :root[data-oxidity-theme='midnight'] [class*='border-white/5'] {
+    border-color: rgba(148, 163, 184, 0.16) !important;
+  }
+
+  :root[data-oxidity-theme='midnight'] [class*='border-white/10'] {
+    border-color: rgba(148, 163, 184, 0.22) !important;
+  }
+
+  :root[data-oxidity-theme='midnight'] [class*='text-zinc-600'] {
+    color: #64748b !important;
+  }
+
+  :root[data-oxidity-theme='midnight'] [class*='text-zinc-500'] {
+    color: #94a3b8 !important;
+  }
+
+  :root[data-oxidity-theme='midnight'] [class*='text-zinc-400'] {
+    color: #cbd5e1 !important;
+  }
+
+  :root[data-oxidity-theme='midnight'] [class*='shadow-indigo-500/10'] {
+    box-shadow: 0 25px 60px rgba(37, 99, 235, 0.22) !important;
   }
 
   :root[data-platform='native'] {

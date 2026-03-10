@@ -5,6 +5,7 @@ import { Logo } from '../components/Logo';
 
 export function WelcomeView() {
   const setView = useAppStore((state) => state.setView);
+  const errorMessage = useAppStore((state) => state.errorMessage);
 
   return (
     <motion.div
@@ -28,6 +29,12 @@ export function WelcomeView() {
         <p className="text-zinc-400 text-base max-w-[280px] leading-relaxed">
           Private execution, MEV protection, and smarter transaction outcomes.
         </p>
+
+        {errorMessage ? (
+          <div className="mt-6 w-full rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-left">
+            <p className="text-sm text-red-300">{errorMessage}</p>
+          </div>
+        ) : null}
 
         <div className="mt-12 w-full space-y-3">
           <button

@@ -8,6 +8,7 @@ import {
   Cpu,
   Database,
   EyeOff,
+  Fingerprint,
   Key,
   Lock,
   RefreshCw,
@@ -15,7 +16,8 @@ import {
   Trash2,
 } from 'lucide-react';
 
-import { checkBiometrics } from '../lib/nativeAuth';
+import { checkBiometrics, unlockWithBiometrics } from '../lib/nativeAuth';
+import { applyThemeMode } from '../lib/theme';
 import { useAppStore } from '../store/appStore';
 import { cn } from '../utils/cn';
 import { Logo } from '../components/Logo';
@@ -28,6 +30,8 @@ type SectionItem = {
   color?: string;
   onClick?: () => void;
 };
+
+type SensitiveExportTarget = 'private-key' | 'recovery-phrase';
 
 function formatAccountAddress(address?: string): string {
   if (!address) {
@@ -89,11 +93,16 @@ function SectionRow({
 
 export function AdvancedSettingsView() {
   const setView = useAppStore((state) => state.setView);
-  const exportActivePrivateKey = useAppStore((state) => state.exportActivePrivateKey);
-  const exportActiveRecoveryPhrase = useAppStore((state) => state.exportActiveRecoveryPhrase);
+  const exportActivePrivateKeyWithPasscode = useAppStore(
+    (state) => state.exportActivePrivateKeyWithPasscode,
+  );
+  const exportActiveRecoveryPhraseWithPasscode = useAppStore(
+    (state) => state.exportActiveRecoveryPhraseWithPasscode,
+  );
   const changePasscode = useAppStore((state) => state.changePasscode);
   const removeActiveAccount = useAppStore((state) => state.removeActiveAccount);
   const refreshWalletData = useAppStore((state) => state.refreshWalletData);
+  const biometricsEnabled = useAppStore((state) => state.biometricsEnabled);
   const activeAccountId = useAppStore((state) => state.activeAccountId);
   const accounts = useAppStore((state) => state.accounts);
   const activeAccount = accounts.find((account) => account.id === activeAccountId);
@@ -116,6 +125,11 @@ export function AdvancedSettingsView() {
   const [hardwareStatus, setHardwareStatus] = useState('Checking…');
   const [hardwareStatusColor, setHardwareStatusColor] = useState('text-zinc-500');
   const [showEncryptionDetails, setShowEncryptionDetails] = useState(false);
+  const [showSensitiveAuthSheet, setShowSensitiveAuthSheet] = useState(false);
+  const [sensitiveTarget, setSensitiveTarget] = useState<SensitiveExportTarget | null>(null);
+  const [sensitivePasscode, setSensitivePasscode] = useState('');
+  const [isSensitiveAuthLoading, setIsSensitiveAuthLoading] = useState(false);
+  const [sensitiveBiometricsAvailable, setSensitiveBiometricsAvailable] = useState(false);
 
   const localDatabaseKb = useMemo(
     () =>
@@ -131,64 +145,56 @@ export function AdvancedSettingsView() {
     if (!result) {
       setHardwareStatus('Browser vault');
       setHardwareStatusColor('text-zinc-400');
+      setSensitiveBiometricsAvailable(false);
       return;
     }
     if (result.isAvailable) {
       setHardwareStatus('Fingerprint ready');
       setHardwareStatusColor('text-emerald-400');
+      setSensitiveBiometricsAvailable(biometricsEnabled);
       return;
     }
     if (result.deviceIsSecure) {
       setHardwareStatus('Device secure');
       setHardwareStatusColor('text-amber-400');
+      setSensitiveBiometricsAvailable(biometricsEnabled);
       return;
     }
     setHardwareStatus('Unavailable');
     setHardwareStatusColor('text-red-400');
+    setSensitiveBiometricsAvailable(false);
   };
 
   useEffect(() => {
     void refreshHardwareStatus();
-  }, []);
+  }, [biometricsEnabled]);
 
   const handleTogglePrivateKey = async () => {
     if (showPrivateKey) {
       setShowPrivateKey(false);
+      setPrivateKey('');
       return;
     }
 
-    setIsLoadingPrivateKey(true);
+    setSensitiveTarget('private-key');
+    setSensitivePasscode('');
+    setShowSensitiveAuthSheet(true);
     setErrorMessage(null);
     setStatusMessage(null);
-    try {
-      const key = await exportActivePrivateKey();
-      setPrivateKey(key);
-      setShowPrivateKey(true);
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Failed to load private key');
-    } finally {
-      setIsLoadingPrivateKey(false);
-    }
   };
 
   const handleToggleRecoveryPhrase = async () => {
     if (showRecoveryPhrase) {
       setShowRecoveryPhrase(false);
+      setRecoveryPhrase('');
       return;
     }
 
-    setIsLoadingRecoveryPhrase(true);
+    setSensitiveTarget('recovery-phrase');
+    setSensitivePasscode('');
+    setShowSensitiveAuthSheet(true);
     setErrorMessage(null);
     setStatusMessage(null);
-    try {
-      const phrase = await exportActiveRecoveryPhrase();
-      setRecoveryPhrase(phrase);
-      setShowRecoveryPhrase(true);
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Failed to load recovery phrase');
-    } finally {
-      setIsLoadingRecoveryPhrase(false);
-    }
   };
 
   const handleCopy = async (value: string, successLabel: string) => {
@@ -231,6 +237,77 @@ export function AdvancedSettingsView() {
     }
   };
 
+  const closeSensitiveAuthSheet = () => {
+    setShowSensitiveAuthSheet(false);
+    setSensitiveTarget(null);
+    setSensitivePasscode('');
+    setIsSensitiveAuthLoading(false);
+  };
+
+  const handleSensitiveSecretReveal = async (passcode: string) => {
+    if (!sensitiveTarget) {
+      return;
+    }
+
+    setIsSensitiveAuthLoading(true);
+    setErrorMessage(null);
+    setStatusMessage(null);
+
+    try {
+      if (sensitiveTarget === 'private-key') {
+        setIsLoadingPrivateKey(true);
+        const key = await exportActivePrivateKeyWithPasscode(passcode);
+        setPrivateKey(key);
+        setShowPrivateKey(true);
+        setShowRecoveryPhrase(false);
+        setRecoveryPhrase('');
+      } else {
+        setIsLoadingRecoveryPhrase(true);
+        const phrase = await exportActiveRecoveryPhraseWithPasscode(passcode);
+        setRecoveryPhrase(phrase);
+        setShowRecoveryPhrase(true);
+        setShowPrivateKey(false);
+        setPrivateKey('');
+      }
+
+      closeSensitiveAuthSheet();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Authentication failed');
+    } finally {
+      setIsSensitiveAuthLoading(false);
+      setIsLoadingPrivateKey(false);
+      setIsLoadingRecoveryPhrase(false);
+    }
+  };
+
+  const handleSensitivePasscodeSubmit = async () => {
+    if (!/^\d{6}$/.test(sensitivePasscode)) {
+      setErrorMessage('Passcode must be 6 digits');
+      return;
+    }
+
+    await handleSensitiveSecretReveal(sensitivePasscode);
+  };
+
+  const handleSensitiveBiometricAuth = async () => {
+    setIsSensitiveAuthLoading(true);
+    setErrorMessage(null);
+
+    try {
+      const passcode = await unlockWithBiometrics();
+      if (!passcode) {
+        throw new Error('Biometric unlock is not available');
+      }
+
+      await handleSensitiveSecretReveal(passcode);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Biometric authentication failed');
+      setIsSensitiveAuthLoading(false);
+      setIsLoadingPrivateKey(false);
+      setIsLoadingRecoveryPhrase(false);
+    }
+  };
+
   const handleClearCache = async () => {
     setIsClearingCache(true);
     setErrorMessage(null);
@@ -238,7 +315,7 @@ export function AdvancedSettingsView() {
     try {
       localStorage.removeItem('oxidity.notifications.enabled');
       localStorage.removeItem('oxidity.theme.mode');
-      document.documentElement.dataset.oxidityTheme = 'dark';
+      applyThemeMode('dark');
       await refreshWalletData();
       setStatusMessage('Local UI cache cleared');
     } catch (error) {
@@ -548,6 +625,65 @@ export function AdvancedSettingsView() {
                 className="flex-1 rounded-2xl bg-indigo-500 py-3 font-medium text-white transition-colors hover:bg-indigo-600 disabled:opacity-60"
               >
                 {isChangingPasscode ? 'Updating…' : 'Update Passcode'}
+              </button>
+            </div>
+          </div>
+        </>
+      ) : null}
+
+      {showSensitiveAuthSheet ? (
+        <>
+          <button
+            onClick={closeSensitiveAuthSheet}
+            className="fixed inset-0 z-[60] bg-black/80 backdrop-blur-sm"
+            aria-label="Close authentication sheet"
+          />
+          <div className="fixed inset-x-4 bottom-6 z-[61] rounded-[32px] border border-white/10 bg-zinc-950 p-6">
+            <div className="mb-6">
+              <h3 className="text-xl font-semibold">
+                Authenticate to view {sensitiveTarget === 'private-key' ? 'private key' : 'recovery phrase'}
+              </h3>
+              <p className="text-sm text-zinc-500">
+                Confirm with your passcode or biometrics before this secret is revealed.
+              </p>
+            </div>
+
+            {sensitiveBiometricsAvailable ? (
+              <button
+                onClick={() => void handleSensitiveBiometricAuth()}
+                disabled={isSensitiveAuthLoading}
+                className="mb-4 flex w-full items-center justify-center gap-2 rounded-2xl border border-indigo-500/20 bg-indigo-500/10 py-3 font-medium text-indigo-300 transition-colors hover:bg-indigo-500/20 disabled:opacity-60"
+              >
+                <Fingerprint className="h-4 w-4" />
+                {isSensitiveAuthLoading ? 'Authenticating…' : 'Use Fingerprint'}
+              </button>
+            ) : null}
+
+            <label className="block">
+              <span className="mb-2 block text-xs font-bold uppercase tracking-widest text-zinc-500">Passcode</span>
+              <input
+                inputMode="numeric"
+                maxLength={6}
+                type="password"
+                value={sensitivePasscode}
+                onChange={(event) => setSensitivePasscode(event.target.value.replace(/\D/g, '').slice(0, 6))}
+                className="w-full rounded-2xl border border-white/10 bg-zinc-900 px-4 py-3 text-white focus:border-indigo-500/50 focus:outline-none"
+              />
+            </label>
+
+            <div className="mt-6 flex gap-3">
+              <button
+                onClick={closeSensitiveAuthSheet}
+                className="flex-1 rounded-2xl bg-zinc-900 py-3 font-medium text-white transition-colors hover:bg-zinc-800"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void handleSensitivePasscodeSubmit()}
+                disabled={isSensitiveAuthLoading}
+                className="flex-1 rounded-2xl bg-indigo-500 py-3 font-medium text-white transition-colors hover:bg-indigo-600 disabled:opacity-60"
+              >
+                {isSensitiveAuthLoading ? 'Checking…' : 'Continue'}
               </button>
             </div>
           </div>

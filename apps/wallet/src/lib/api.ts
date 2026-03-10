@@ -11,10 +11,34 @@ export interface ApiToken {
   rawBalance: number;
   fiatBalance: string;
   fiatValue: number;
+  priceUsd: number;
+  priceSource: string;
   receiveAddress?: string;
   logo?: string;
   isNative?: boolean;
   isCustom?: boolean;
+}
+
+export interface ApiTokenChartPoint {
+  timestamp: number;
+  priceUsd: number;
+  valueUsd: number;
+}
+
+export interface ApiTokenChartSeries {
+  label: string;
+  source: string;
+  changePct: number;
+  points: ApiTokenChartPoint[];
+}
+
+export interface ApiTokenDetailsResponse {
+  token: ApiToken;
+  marketPriceUsd: number;
+  marketPriceSource: string;
+  chart24h: ApiTokenChartSeries;
+  chartWeek: ApiTokenChartSeries;
+  chartMonth: ApiTokenChartSeries;
 }
 
 export interface ApiNft {
@@ -81,11 +105,16 @@ export interface QuotePreviewResponse {
   chainKey: string;
   sellToken: string;
   buyToken: string;
+  routerName?: string | null;
+  routePath: string[];
   sellAmount: number;
   receiveAmount: number;
+  minimumReceived: number;
   rate: number;
   sellUsdValue: number;
   receiveUsdValue: number;
+  minimumReceivedUsd: number;
+  priceImpactPct: number;
   estimatedGasUsd: number;
   estimatedGasNative: number;
   speedOptions: Record<string, { label: string; eta: string; gasUsd: number }>;
@@ -122,6 +151,7 @@ export interface SwapPrepareResponse {
   chainId: number;
   network: string;
   routerName: string;
+  routePath: string[];
   router: string;
   to: string;
   data: string;
@@ -132,8 +162,14 @@ export interface SwapPrepareResponse {
   maxPriorityFeePerGas: string;
   expectedOut: string;
   minOut: string;
+  sellSymbol: string;
+  sellAmountFormatted: string;
   expectedOutFormatted: string;
+  minimumReceivedFormatted: string;
   buySymbol: string;
+  expectedOutUsd: number;
+  minimumReceivedUsd: number;
+  priceImpactPct: number;
   estimatedFeeNative: number;
   estimatedFeeUsd: number;
   explorerTxBaseUrl: string;
@@ -207,6 +243,14 @@ export interface BootstrapResponse {
   };
 }
 
+export interface WalletAuthProof {
+  walletAddress: string;
+  chainKey: string;
+  purpose: string;
+  timestamp: number;
+  signature: string;
+}
+
 const fallbackApiBaseUrl = (() => {
   if (typeof window === 'undefined') {
     return 'http://127.0.0.1:9555';
@@ -229,11 +273,29 @@ const fallbackApiBaseUrl = (() => {
 const apiBaseUrl =
   import.meta.env.VITE_WALLET_API_BASE_URL?.replace(/\/$/, '') || fallbackApiBaseUrl;
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+function withWalletAuthHeaders(
+  headers: HeadersInit | undefined,
+  auth: WalletAuthProof | undefined,
+): HeadersInit | undefined {
+  if (!auth) {
+    return headers;
+  }
+
+  return {
+    ...(headers || {}),
+    'x-oxidity-wallet-auth-wallet': auth.walletAddress,
+    'x-oxidity-wallet-auth-chain': auth.chainKey,
+    'x-oxidity-wallet-auth-purpose': auth.purpose,
+    'x-oxidity-wallet-auth-timestamp': String(auth.timestamp),
+    'x-oxidity-wallet-auth-signature': auth.signature,
+  };
+}
+
+async function request<T>(path: string, init?: RequestInit, auth?: WalletAuthProof): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`, {
     headers: {
       'content-type': 'application/json',
-      ...(init?.headers || {}),
+      ...withWalletAuthHeaders(init?.headers, auth),
     },
     ...init,
   });
@@ -281,11 +343,16 @@ export function getPortfolio(input: {
   address: string;
   chainKey: string;
   customTokens: Array<{ address: string; symbol?: string; name?: string; logo?: string }>;
+  auth?: WalletAuthProof;
 }): Promise<PortfolioResponse> {
   return request<PortfolioResponse>('/api/portfolio', {
     method: 'POST',
-    body: JSON.stringify(input),
-  });
+    body: JSON.stringify({
+      address: input.address,
+      chainKey: input.chainKey,
+      customTokens: input.customTokens,
+    }),
+  }, input.auth);
 }
 
 export function resolveToken(input: {
@@ -294,6 +361,18 @@ export function resolveToken(input: {
   walletAddress?: string;
 }): Promise<ApiToken> {
   return request<ApiToken>('/api/token/resolve', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export function getTokenDetails(input: {
+  chainKey: string;
+  walletAddress: string;
+  address?: string;
+  symbol?: string;
+}): Promise<ApiTokenDetailsResponse> {
+  return request<ApiTokenDetailsResponse>('/api/token/details', {
     method: 'POST',
     body: JSON.stringify(input),
   });
@@ -354,6 +433,7 @@ export function broadcastSignedSend(input: {
   chainKey: string;
   rawTransaction: string;
   walletAddress: string;
+  auth?: WalletAuthProof;
   encoding?: string;
   txType: string;
   title: string;
@@ -365,15 +445,31 @@ export function broadcastSignedSend(input: {
 }): Promise<SendBroadcastResponse> {
   return request<SendBroadcastResponse>('/api/send/broadcast', {
     method: 'POST',
-    body: JSON.stringify(input),
-  });
+    body: JSON.stringify({
+      chainKey: input.chainKey,
+      rawTransaction: input.rawTransaction,
+      walletAddress: input.walletAddress,
+      encoding: input.encoding,
+      txType: input.txType,
+      title: input.title,
+      amount: input.amount,
+      fiatAmount: input.fiatAmount,
+      asset: input.asset,
+      to: input.to,
+      fee: input.fee,
+    }),
+  }, input.auth);
 }
 
-export function getActivity(address: string, chainKey?: string): Promise<ApiActivityItem[]> {
+export function getActivity(
+  address: string,
+  chainKey?: string,
+  auth?: WalletAuthProof,
+): Promise<ApiActivityItem[]> {
   return request<ApiActivityItem[]>('/api/activity', {
     method: 'POST',
     body: JSON.stringify({ address, chainKey }),
-  });
+  }, auth);
 }
 
 export function getOnRampQuote(input: {

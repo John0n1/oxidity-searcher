@@ -5,16 +5,31 @@ import {
   resolveAccountAddress,
   type ChainAddressMap,
 } from './chainAddresses';
+import {
+  cloneDefaultTrackedTokens,
+  ensureDefaultTrackedTokens,
+  getDefaultWalletAvatarId,
+  isWalletAvatarId,
+  type WalletAvatarId,
+} from './walletDefaults';
+import {
+  isNativeSecureStoragePlatform,
+  secureStorageGetItem,
+  secureStorageRemoveItem,
+  secureStorageSetItem,
+} from './secureStorage';
 
 export type SecretType = 'mnemonic' | 'privateKey';
 
 export interface PersistedWalletAccount {
   id: string;
   name: string;
+  avatarId: WalletAvatarId;
   address: string;
   addresses: ChainAddressMap;
   secretType: SecretType;
   derivationIndex: number;
+  kdfIterations: number;
   encryptedSecret: string;
   salt: string;
   iv: string;
@@ -63,9 +78,17 @@ export interface ImportedWalletResult {
   privateKey: string;
 }
 
-const VAULT_STORAGE_KEY = 'oxidity_wallet_vault_v2';
+export interface VaultLoadResult {
+  vault: PersistedVault;
+  errorMessage: string | null;
+}
+
+const LEGACY_LOCAL_VAULT_STORAGE_KEY = 'oxidity_wallet_vault_v2';
+const SECURE_VAULT_STORAGE_KEY = 'wallet_vault_v3';
+const CORRUPT_VAULT_STORAGE_PREFIX = 'wallet_vault_corrupt_';
 const DEFAULT_CHAIN_KEY = 'ethereum';
-const PBKDF2_ITERATIONS = 250_000;
+const LEGACY_PBKDF2_ITERATIONS = 250_000;
+const CURRENT_PBKDF2_ITERATIONS = 600_000;
 
 function randomId(): string {
   return crypto.randomUUID();
@@ -88,7 +111,11 @@ function fromBase64(value: string): Uint8Array {
   return bytes;
 }
 
-async function deriveKey(passcode: string, salt: Uint8Array): Promise<CryptoKey> {
+async function deriveKey(
+  passcode: string,
+  salt: Uint8Array,
+  iterations: number,
+): Promise<CryptoKey> {
   const normalizedSalt = Uint8Array.from(salt);
   const baseKey = await crypto.subtle.importKey(
     'raw',
@@ -102,7 +129,7 @@ async function deriveKey(passcode: string, salt: Uint8Array): Promise<CryptoKey>
     {
       name: 'PBKDF2',
       salt: normalizedSalt,
-      iterations: PBKDF2_ITERATIONS,
+      iterations,
       hash: 'SHA-256',
     },
     baseKey,
@@ -115,10 +142,10 @@ async function deriveKey(passcode: string, salt: Uint8Array): Promise<CryptoKey>
 async function encryptSecret(
   secret: string,
   passcode: string,
-): Promise<{ encryptedSecret: string; salt: string; iv: string }> {
+): Promise<{ encryptedSecret: string; salt: string; iv: string; kdfIterations: number }> {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const key = await deriveKey(passcode, salt);
+  const key = await deriveKey(passcode, salt, CURRENT_PBKDF2_ITERATIONS);
   const encrypted = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv },
     key,
@@ -129,17 +156,22 @@ async function encryptSecret(
     encryptedSecret: toBase64(new Uint8Array(encrypted)),
     salt: toBase64(salt),
     iv: toBase64(iv),
+    kdfIterations: CURRENT_PBKDF2_ITERATIONS,
   };
 }
 
 export async function decryptSecret(
-  account: Pick<PersistedWalletAccount, 'encryptedSecret' | 'salt' | 'iv'>,
+  account: Pick<PersistedWalletAccount, 'encryptedSecret' | 'salt' | 'iv' | 'kdfIterations'>,
   passcode: string,
 ): Promise<string> {
   const salt = fromBase64(account.salt);
   const iv = Uint8Array.from(fromBase64(account.iv));
   const encrypted = Uint8Array.from(fromBase64(account.encryptedSecret));
-  const key = await deriveKey(passcode, salt);
+  const key = await deriveKey(
+    passcode,
+    salt,
+    account.kdfIterations || LEGACY_PBKDF2_ITERATIONS,
+  );
   const decrypted = await crypto.subtle.decrypt(
     { name: 'AES-GCM', iv },
     key,
@@ -148,9 +180,9 @@ export async function decryptSecret(
   return new TextDecoder().decode(decrypted);
 }
 
-function emptyVault(): PersistedVault {
+export function emptyVault(): PersistedVault {
   return {
-    version: 2,
+    version: 3,
     walletCreated: false,
     activeAccountId: null,
     activeChainKey: DEFAULT_CHAIN_KEY,
@@ -159,39 +191,105 @@ function emptyVault(): PersistedVault {
     biometricsEnabled: false,
     isSubscribed: false,
     firstMessageTimestamp: null,
-    customTokens: [],
+    customTokens: cloneDefaultTrackedTokens(),
   };
 }
 
-export function loadVault(): PersistedVault {
-  const raw = localStorage.getItem(VAULT_STORAGE_KEY);
+async function readStoredVaultRaw(): Promise<string | null> {
+  if (isNativeSecureStoragePlatform()) {
+    const secureRaw = await secureStorageGetItem(SECURE_VAULT_STORAGE_KEY);
+    if (secureRaw) {
+      return secureRaw;
+    }
+  }
+
+  const legacyRaw = localStorage.getItem(LEGACY_LOCAL_VAULT_STORAGE_KEY);
+  if (!legacyRaw) {
+    return null;
+  }
+
+  if (isNativeSecureStoragePlatform()) {
+    await secureStorageSetItem(SECURE_VAULT_STORAGE_KEY, legacyRaw);
+    localStorage.removeItem(LEGACY_LOCAL_VAULT_STORAGE_KEY);
+  }
+
+  return legacyRaw;
+}
+
+async function writeStoredVaultRaw(raw: string): Promise<void> {
+  if (isNativeSecureStoragePlatform()) {
+    await secureStorageSetItem(SECURE_VAULT_STORAGE_KEY, raw);
+    localStorage.removeItem(LEGACY_LOCAL_VAULT_STORAGE_KEY);
+    return;
+  }
+
+  localStorage.setItem(LEGACY_LOCAL_VAULT_STORAGE_KEY, raw);
+}
+
+async function backupCorruptVaultRaw(raw: string): Promise<void> {
+  const backupKey = `${CORRUPT_VAULT_STORAGE_PREFIX}${Date.now()}`;
+  if (isNativeSecureStoragePlatform()) {
+    await secureStorageSetItem(backupKey, raw);
+  } else {
+    localStorage.setItem(backupKey, raw);
+  }
+}
+
+async function removeStoredVaultRaw(): Promise<void> {
+  if (isNativeSecureStoragePlatform()) {
+    await secureStorageRemoveItem(SECURE_VAULT_STORAGE_KEY);
+  }
+  localStorage.removeItem(LEGACY_LOCAL_VAULT_STORAGE_KEY);
+}
+
+export async function loadVault(): Promise<VaultLoadResult> {
+  const raw = await readStoredVaultRaw();
   if (!raw) {
-    return emptyVault();
+    return {
+      vault: emptyVault(),
+      errorMessage: null,
+    };
   }
 
   try {
     const parsed = JSON.parse(raw) as PersistedVault;
     return {
-      ...emptyVault(),
-      ...parsed,
-      accounts: (parsed.accounts || []).map((account) => ({
-        ...account,
-        address: getAddress(account.address),
-        addresses: account.addresses || legacyAddressMap(account.address),
-      })),
-      addressBook: (parsed.addressBook || []).map((entry) => ({
-        ...entry,
-        chainKey: entry.chainKey || DEFAULT_CHAIN_KEY,
-      })),
-      customTokens: parsed.customTokens || [],
+      vault: {
+        ...emptyVault(),
+        ...parsed,
+        accounts: (parsed.accounts || []).map((account, index) => ({
+          ...account,
+          avatarId: isWalletAvatarId(account.avatarId)
+            ? account.avatarId
+            : getDefaultWalletAvatarId(index),
+          address: getAddress(account.address),
+          addresses: account.addresses || legacyAddressMap(account.address),
+          kdfIterations:
+            typeof account.kdfIterations === 'number' && account.kdfIterations > 0
+              ? account.kdfIterations
+              : LEGACY_PBKDF2_ITERATIONS,
+        })),
+        addressBook: (parsed.addressBook || []).map((entry) => ({
+          ...entry,
+          chainKey: entry.chainKey || DEFAULT_CHAIN_KEY,
+        })),
+        customTokens: ensureDefaultTrackedTokens(parsed.customTokens || []),
+      },
+      errorMessage: null,
     };
   } catch {
-    return emptyVault();
+    await backupCorruptVaultRaw(raw);
+    await removeStoredVaultRaw();
+    return {
+      vault: emptyVault(),
+      errorMessage:
+        'Stored wallet data could not be read. Oxidity preserved a local backup and will not silently reuse the broken vault.',
+    };
   }
 }
 
-export function saveVault(vault: PersistedVault): void {
-  localStorage.setItem(VAULT_STORAGE_KEY, JSON.stringify(vault));
+export async function saveVault(vault: PersistedVault): Promise<void> {
+  await writeStoredVaultRaw(JSON.stringify(vault));
 }
 
 function normalizePrivateKey(value: string): string {
@@ -209,10 +307,12 @@ function buildMnemonicWallet(phrase: string, index: number): HDNodeWallet {
 
 function newPersistedAccount(input: {
   name: string;
+  avatarId: WalletAvatarId;
   address: string;
   addresses: ChainAddressMap;
   secretType: SecretType;
   derivationIndex: number;
+  kdfIterations: number;
   encryptedSecret: string;
   salt: string;
   iv: string;
@@ -220,10 +320,12 @@ function newPersistedAccount(input: {
   return {
     id: randomId(),
     name: input.name,
+    avatarId: input.avatarId,
     address: getAddress(input.address),
     addresses: input.addresses,
     secretType: input.secretType,
     derivationIndex: input.derivationIndex,
+    kdfIterations: input.kdfIterations,
     encryptedSecret: input.encryptedSecret,
     salt: input.salt,
     iv: input.iv,
@@ -241,6 +343,7 @@ export async function createWallet(passcode: string, name = 'Main Wallet'): Prom
   const encryption = await encryptSecret(phrase, passcode);
   const account = newPersistedAccount({
     name,
+    avatarId: getDefaultWalletAvatarId(0),
     address: wallet.address,
     addresses: deriveChainAddresses({
       secret: phrase,
@@ -294,6 +397,7 @@ export async function importWallet(input: {
   const encryption = await encryptSecret(normalizedSecret, input.passcode);
   const account = newPersistedAccount({
     name: input.name || 'Main Wallet',
+    avatarId: getDefaultWalletAvatarId(0),
     address: accountAddress,
     addresses: deriveChainAddresses({
       secret: normalizedSecret,
@@ -377,6 +481,7 @@ export async function addAccountFromVault(
     const encryption = await encryptSecret(phrase, passcode);
     account = newPersistedAccount({
       name,
+      avatarId: getDefaultWalletAvatarId(vault.accounts.length),
       address: wallet.address,
       addresses: deriveChainAddresses({
         secret: phrase,
@@ -392,6 +497,7 @@ export async function addAccountFromVault(
     const encryption = await encryptSecret(wallet.privateKey, passcode);
     account = newPersistedAccount({
       name,
+      avatarId: getDefaultWalletAvatarId(vault.accounts.length),
       address: wallet.address,
       addresses: deriveChainAddresses({
         secret: wallet.privateKey,
@@ -450,8 +556,8 @@ export async function reencryptVaultSecrets(
   };
 }
 
-export function clearVault(): void {
-  localStorage.removeItem(VAULT_STORAGE_KEY);
+export async function clearVault(): Promise<void> {
+  await removeStoredVaultRaw();
 }
 
 export async function hydrateVaultChainAddresses(

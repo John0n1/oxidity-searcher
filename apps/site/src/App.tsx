@@ -30,16 +30,13 @@ const networks = [
   { name: 'Optimism', icon: 'https://cryptologos.cc/logos/optimism-ethereum-op-logo.svg?v=029' },
   { name: 'Arbitrum', icon: 'https://cryptologos.cc/logos/arbitrum-arb-logo.svg?v=029' },
   { name: 'Solana', icon: 'https://cryptologos.cc/logos/solana-sol-logo.svg?v=029' },
-  { name: 'Sui', icon: 'https://cryptologos.cc/logos/sui-sui-logo.svg?v=029' },
   { name: 'PulseChain', icon: 'https://cryptologos.cc/logos/pulsechain-pls-logo.png' },
   { name: 'Linea', icon: 'https://raw.githubusercontent.com/Consensys/linea-brand-kit/main/logo/logomark/linea-logomark-black.svg' },
   { name: 'Unichain', icon: 'https://cryptologos.cc/logos/uniswap-uni-logo.png' },
-  { name: 'Cosmos', icon: 'https://cryptologos.cc/logos/cosmos-atom-logo.svg?v=029' },
-  { name: 'Bitcoin', icon: 'https://cryptologos.cc/logos/bitcoin-btc-logo.svg?v=029' },
 ];
 
 const CHROME_EXTENSION_URL = '/downloads/oxidity-wallet-extension.zip';
-const ANDROID_APK_URL = '/downloads/oxidity-wallet-debug.apk';
+const ANDROID_APK_URL = `/downloads/oxidity-wallet-release.apk?v=${__OXIDITY_WALLET_VERSION__}`;
 const WEB_WALLET_URL = 'https://wallet.oxidity.io';
 
 const ChainIcon = ({ name, src }: { name: string; src?: string }) => {
@@ -286,8 +283,8 @@ const Home = () => {
             <div className="w-12 h-12 rounded-full bg-[var(--color-oxidity-card)] border border-[var(--color-oxidity-border)] flex items-center justify-center mb-4">
               <Network className="w-6 h-6 text-[var(--color-oxidity-accent)]" />
             </div>
-            <div className="text-4xl font-bold font-mono mb-2">16</div>
-            <p className="text-sm text-[var(--color-oxidity-muted)]">configured RPC surfaces across EVM and non-EVM chains</p>
+            <div className="text-4xl font-bold font-mono mb-2">11</div>
+            <p className="text-sm text-[var(--color-oxidity-muted)]">supported wallet networks across EVM and Solana</p>
           </div>
           
           <div className="flex flex-col items-center text-center md:px-8 pt-8 md:pt-0">
@@ -383,7 +380,7 @@ const Home = () => {
                 </div>
                 <div className="flex items-center gap-3 text-sm">
                   <CheckCircle2 className="w-4 h-4 text-[var(--color-oxidity-accent)]" />
-                  <span>Debug build ready</span>
+                  <span>Release build ready</span>
                 </div>
               </div>
               
@@ -392,7 +389,7 @@ const Home = () => {
                 className="w-full flex items-center justify-center gap-2 py-3 rounded-lg bg-[var(--color-oxidity-card)] border border-[var(--color-oxidity-border)] hover:bg-[var(--color-oxidity-border)] transition-colors relative z-10"
               >
                 <Download className="w-4 h-4" />
-                <span className="font-mono text-xs">Get oxidity-wallet-debug.apk</span>
+                <span className="font-mono text-xs">Get oxidity-wallet-release.apk</span>
               </a>
             </div>
 
@@ -445,7 +442,7 @@ const Home = () => {
         <div className="max-w-7xl mx-auto">
           <div className="text-center mb-12">
             <h2 className="text-3xl font-bold tracking-tight mb-4">Supported Networks</h2>
-            <p className="text-[var(--color-oxidity-muted)]">Backend endpoints are configured across EVM and non-EVM surfaces.</p>
+            <p className="text-[var(--color-oxidity-muted)]">Oxidity Wallet currently supports EVM networks plus Solana.</p>
           </div>
           
           <div className="marquee-container py-8">
@@ -634,7 +631,7 @@ const Support = () => (
           />
           <FaqItem 
             question="Can I import my existing wallet?" 
-            answer="Yes, you can import any existing EVM or supported non-EVM wallet using your 12 or 24-word seed phrase, or by importing a private key directly." 
+            answer="Yes. You can import any existing EVM wallet or a Solana wallet derived from your seed phrase, and you can also import an EVM private key directly." 
           />
         </div>
       </div>
