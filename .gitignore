@@ -1,8 +1,6 @@
 # Build, runtime, and local editor state
 target/
 out/
-cache/
-artifacts/
 .vscode/
 .venv/
 tmp/
@@ -12,11 +10,6 @@ config.toml
 *.db
 *.ipc
 .idea/
-apps/*/node_modules/
-apps/*/dist/
-deploy/nginx/generated/*
-!deploy/nginx/generated/.gitkeep
-
 
 
 

@@ -598,38 +598,58 @@ impl PriceFeed {
         &self,
         normalized: &NormalizedSymbols,
     ) -> Result<Option<PriceQuote>, AppError> {
+        #[derive(Clone, Copy)]
+        enum CoinGeckoAuthMode {
+            None,
+            Demo,
+            Pro,
+        }
+
         if !self.allow("coingecko", 30).await {
             return Ok(None);
         }
 
+        let attempts: Vec<(&str, CoinGeckoAuthMode)> = if self.api_keys.coingecko.is_some() {
+            vec![
+                ("https://api.coingecko.com/api/v3", CoinGeckoAuthMode::Demo),
+                ("https://pro-api.coingecko.com/api/v3", CoinGeckoAuthMode::Pro),
+                ("https://api.coingecko.com/api/v3", CoinGeckoAuthMode::None),
+            ]
+        } else {
+            vec![("https://api.coingecko.com/api/v3", CoinGeckoAuthMode::None)]
+        };
+
         for id in &normalized.coingecko_ids {
-            let url = format!(
-                "https://api.coingecko.com/api/v3/simple/price?ids={id}&vs_currencies=usd"
-            );
-            let mut req = self.client.get(&url);
-            if let Some(key) = &self.api_keys.coingecko {
-                req = req.header("x-cg-pro-api-key", key);
-            }
-            let resp = req
-                .send()
-                .await
-                .map_err(|e| AppError::Connection(format!("CoinGecko request failed: {}", e)))?;
-            if !resp.status().is_success() {
-                continue;
-            }
-            let parsed: serde_json::Value = resp
-                .json()
-                .await
-                .map_err(|e| AppError::Initialization(format!("CoinGecko decode failed: {}", e)))?;
-            if let Some(price) = parsed
-                .get(id)
-                .and_then(|v| v.get("usd"))
-                .and_then(|v| v.as_f64())
-            {
-                return Ok(Some(PriceQuote {
-                    price,
-                    source: "coingecko".into(),
-                }));
+            for (base, auth_mode) in &attempts {
+                let url = format!("{base}/simple/price?ids={id}&vs_currencies=usd");
+                let mut req = self.client.get(&url);
+                if let Some(key) = &self.api_keys.coingecko {
+                    req = match auth_mode {
+                        CoinGeckoAuthMode::Demo => req.header("x-cg-demo-api-key", key),
+                        CoinGeckoAuthMode::Pro => req.header("x-cg-pro-api-key", key),
+                        CoinGeckoAuthMode::None => req,
+                    };
+                }
+                let resp =
+                    req.send().await.map_err(|e| {
+                        AppError::Connection(format!("CoinGecko request failed: {}", e))
+                    })?;
+                if !resp.status().is_success() {
+                    continue;
+                }
+                let parsed: serde_json::Value = resp.json().await.map_err(|e| {
+                    AppError::Initialization(format!("CoinGecko decode failed: {}", e))
+                })?;
+                if let Some(price) = parsed
+                    .get(id)
+                    .and_then(|v| v.get("usd"))
+                    .and_then(|v| v.as_f64())
+                {
+                    return Ok(Some(PriceQuote {
+                        price,
+                        source: "coingecko".into(),
+                    }));
+                }
             }
         }
         Ok(None)
