@@ -527,7 +527,6 @@ mod tests {
         assert_eq!(format!("{:#x}", top[0].0), unresolved);
         assert_eq!(top[0].1, 15);
     }
-
 }
 
 #[cfg(test)]

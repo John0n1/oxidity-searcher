@@ -612,7 +612,10 @@ impl PriceFeed {
         let attempts: Vec<(&str, CoinGeckoAuthMode)> = if self.api_keys.coingecko.is_some() {
             vec![
                 ("https://api.coingecko.com/api/v3", CoinGeckoAuthMode::Demo),
-                ("https://pro-api.coingecko.com/api/v3", CoinGeckoAuthMode::Pro),
+                (
+                    "https://pro-api.coingecko.com/api/v3",
+                    CoinGeckoAuthMode::Pro,
+                ),
                 ("https://api.coingecko.com/api/v3", CoinGeckoAuthMode::None),
             ]
         } else {
@@ -630,10 +633,9 @@ impl PriceFeed {
                         CoinGeckoAuthMode::None => req,
                     };
                 }
-                let resp =
-                    req.send().await.map_err(|e| {
-                        AppError::Connection(format!("CoinGecko request failed: {}", e))
-                    })?;
+                let resp = req.send().await.map_err(|e| {
+                    AppError::Connection(format!("CoinGecko request failed: {}", e))
+                })?;
                 if !resp.status().is_success() {
                     continue;
                 }
@@ -1205,10 +1207,7 @@ fn normalize_symbol_with_hint(symbol: &str, coingecko_id: Option<&str>) -> Norma
     binance_symbols.retain(|s| seen.insert(s.clone()));
 
     let mut coingecko_ids = Vec::new();
-    if let Some(id) = coingecko_id
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-    {
+    if let Some(id) = coingecko_id.map(str::trim).filter(|id| !id.is_empty()) {
         coingecko_ids.push(id.to_string());
     }
     coingecko_ids.extend(default_coingecko_ids(&chainlink_symbol));
