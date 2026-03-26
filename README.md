@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/John0n1/oxidity-searcher/actions/workflows/ci.yml/badge.svg)](https://github.com/John0n1/oxidity-searcher/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-emerald.svg)](https://github.com/John0n1/oxidity-searcher/blob/master/LICENSE)
-[![Rust](https://img.shields.io/badge/Rust-00000?logo=rust&logoColor=white)](https://doc.rust-lang.org/edition-guide/rust-2024/index.html)
+[![Rust](https://img.shields.io/badge/Rust-00000?logo=rust&logoColor=white&color=white)](https://doc.rust-lang.org/edition-guide/rust-2024/index.html)
 ![Static Badge](https://img.shields.io/badge/Mainnet-00000?style=flat&logo=ethereum&logoColor=blue&labelColor=white&color=white)
 
 
