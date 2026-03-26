@@ -13,6 +13,9 @@ This README is written for developers who need to understand how the codebase is
 │   ├── main.rs                 # Binary entrypoint; wires config, data, network, and engine
 │   ├── lib.rs                  # Library exports and stable module aliases used in tests
 │   ├── app/                    # Configuration loading and logging bootstrap
+│   ├── bin/
+│   │   ├── historical_replay.rs        # Historical block-window replay harness
+│   │   └── router_discovery_review.rs  # Router discovery review/approval utility
 │   ├── common/                 # Small reusable utilities (retry, parsing, data-path resolution)
 │   ├── domain/                 # Errors, constants, protocol/static metadata
 │   ├── infrastructure/
