@@ -245,9 +245,9 @@ If you are changing…
 
 ## Recent maintenance improvement
 
-This repository now correctly honors both legal forms of the HTTP `Retry-After` header in the MEV-Share client:
+This repository now correctly honors the two most common representations of the HTTP `Retry-After` header in the MEV-Share client:
 
 - delta-seconds (`Retry-After: 120`)
-- HTTP-date (`Retry-After: Wed, 26 Mar 2026 11:00:45 GMT`)
+- HTTP-date in RFC 1123 / IMF-fixdate form only (for example, `Retry-After: Wed, 26 Mar 2026 11:00:45 GMT`)
 
-That matters because relays are allowed to send either representation. Ignoring the date form would skip requested backoff and could lead to avoidable reconnect churn.
+Note: obsolete HTTP-date forms (such as RFC 850 or `asctime`-style dates) are not currently parsed. Relays using either supported representation will still have their requested backoff respected, which helps avoid unnecessary reconnect churn.
