@@ -1,5 +1,9 @@
 # Oxidity Searcher
 
+[![CI](https://github.com/John0n1/oxidity-searcher/actions/workflows/ci.yml/badge.svg)](https://github.com/John0n1/oxidity-searcher/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/John0n1/oxidity-searcher/blob/master/LICENSE)
+[![Rust 2024 Edition](https://img.shields.io/badge/Rust-2024%20Edition-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/index.html)
+
 Oxidity Searcher is an async Rust MEV searcher focused on Ethereum mainnet-style execution flows. The project combines on-chain data ingestion, router-aware decoding, route planning, risk gating, simulation, bundle construction, and execution against Flashbots / MEV-Share style relays.
 
 This README is written for developers who need to understand how the codebase is structured, how the runtime is assembled, and where to make changes safely.
