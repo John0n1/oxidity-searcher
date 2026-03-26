@@ -3,7 +3,7 @@
 [![CI](https://github.com/John0n1/oxidity-searcher/actions/workflows/ci.yml/badge.svg)](https://github.com/John0n1/oxidity-searcher/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-emerald.svg)](https://github.com/John0n1/oxidity-searcher/blob/master/LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-00000?logo=rust&logoColor=white)](https://doc.rust-lang.org/edition-guide/rust-2024/index.html)
-[![Chain: Mainnet](https://img.shields.io/badge/Ethereum-00000?logo=ethereum&logoColor=blue)
+[![Chain: Mainnet](https://img.shields.io/badge/Ethereum-00000?logo=ethereum&logoColor=blue])
 
 Oxidity Searcher is an async Rust MEV searcher focused on Ethereum mainnet-style execution flows. The project combines on-chain data ingestion, router-aware decoding, route planning, risk gating, simulation, bundle construction, and execution against Flashbots / MEV-Share style relays.
 
