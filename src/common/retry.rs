@@ -20,7 +20,7 @@ where
     loop {
         match op(attempt).await {
             Ok(v) => return Ok(v),
-            Err(e) if attempt < attempts => {
+            Err(_) if attempt < attempts => {
                 sleep(delay).await;
                 delay = delay.saturating_mul(2);
                 attempt += 1;
@@ -51,5 +51,22 @@ mod tests {
 
         assert_eq!(res.unwrap(), 7);
         assert!(counter.load(Ordering::Relaxed) >= 3);
+    }
+
+    #[tokio::test]
+    async fn single_attempt_returns_error_without_retrying() {
+        let counter = AtomicUsize::new(0);
+        let res: Result<(), &'static str> = retry_async(
+            |_| {
+                counter.fetch_add(1, Ordering::Relaxed);
+                async { Err("boom") }
+            },
+            1,
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert_eq!(res, Err("boom"));
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
     }
 }

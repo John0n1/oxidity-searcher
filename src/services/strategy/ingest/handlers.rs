@@ -19,10 +19,10 @@ use crate::services::strategy::planning::{
     ApproveTx, BackrunTx, ExecutionPlanner, FrontRunTx, PlanType, PlannerInput,
 };
 use crate::services::strategy::routers::registry_v2_router_addresses;
+use crate::services::strategy::strategy::PerBlockInputs;
 use crate::services::strategy::strategy::{
     AllowlistCategory, ReceiptStatus, SkipReason, StrategyExecutor, StrategyWork,
 };
-use crate::services::strategy::strategy::PerBlockInputs;
 use alloy::consensus::Transaction as ConsensusTx;
 use alloy::eips::eip2718::Encodable2718;
 use alloy::network::TransactionResponse;
@@ -489,8 +489,7 @@ impl StrategyExecutor {
                 &profit,
             )
             .await?;
-           
-            
+
             tracing::info!(
                 target: "strategy",
                 strategy = if liquidation_signal { "liquidation" } else { "atomic_arb" },

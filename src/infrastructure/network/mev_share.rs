@@ -8,6 +8,7 @@ use crate::common::parsing::{
 };
 use crate::common::seen_cache::remember_with_bounded_order;
 use alloy::primitives::{Address, B256, U256};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use dashmap::DashSet;
 use futures::StreamExt;
 use reqwest::Client;
@@ -400,8 +401,42 @@ fn retry_after_delay(resp: &reqwest::Response) -> Option<Duration> {
     resp.headers()
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|h| h.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-        .map(Duration::from_secs)
+        .and_then(parse_retry_after_value)
+}
+
+fn parse_retry_after_value(raw: &str) -> Option<Duration> {
+    parse_retry_after_value_at(raw, Utc::now())
+}
+
+fn parse_http_date(raw: &str) -> Option<DateTime<Utc>> {
+    let raw = raw.trim();
+    DateTime::parse_from_rfc2822(raw)
+        .map(|retry_at| retry_at.with_timezone(&Utc))
+        .ok()
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(raw, "%A, %d-%b-%y %H:%M:%S GMT")
+                .ok()
+                .map(|retry_at| retry_at.and_utc())
+        })
+        .or_else(|| {
+            NaiveDateTime::parse_from_str(raw, "%a %b %e %H:%M:%S %Y")
+                .ok()
+                .map(|retry_at| retry_at.and_utc())
+        })
+}
+
+fn parse_retry_after_value_at(raw: &str, now: DateTime<Utc>) -> Option<Duration> {
+    if let Ok(delay_secs) = raw.trim().parse::<u64>() {
+        return Some(Duration::from_secs(delay_secs));
+    }
+
+    let retry_at = parse_http_date(raw)?;
+    let delay = retry_at.signed_duration_since(now);
+    if delay <= chrono::Duration::zero() {
+        Some(Duration::ZERO)
+    } else {
+        delay.to_std().ok()
+    }
 }
 
 fn next_sse_event_boundary(buffer: &str) -> Option<(usize, usize)> {
@@ -419,6 +454,7 @@ fn next_sse_event_boundary(buffer: &str) -> Option<(usize, usize)> {
 mod tests {
     use super::*;
     use crate::services::strategy::execution::work_queue::WorkQueue;
+    use chrono::TimeZone;
 
     #[test]
     fn parses_null_txs_hint() {
@@ -431,6 +467,75 @@ mod tests {
     fn parses_null_event_payload() {
         let evt: Option<RawEvent> = serde_json::from_str("null").expect("parse");
         assert!(evt.is_none());
+    }
+
+    #[test]
+    fn retry_after_accepts_delta_seconds() {
+        assert_eq!(
+            parse_retry_after_value("120"),
+            Some(Duration::from_secs(120))
+        );
+    }
+
+    #[test]
+    fn retry_after_accepts_imf_fixdate() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 3, 26, 11, 0, 0)
+            .single()
+            .unwrap();
+        let retry_at = now + chrono::Duration::seconds(45);
+        let header = retry_at.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        assert_eq!(
+            parse_retry_after_value_at(&header, now),
+            Some(Duration::from_secs(45))
+        );
+    }
+
+    #[test]
+    fn retry_after_accepts_rfc850_date() {
+        let now = Utc
+            .with_ymd_and_hms(1994, 11, 6, 8, 48, 52)
+            .single()
+            .unwrap();
+        let retry_at = now + chrono::Duration::seconds(45);
+        let header = retry_at.format("%A, %d-%b-%y %H:%M:%S GMT").to_string();
+        assert_eq!(
+            parse_retry_after_value_at(&header, now),
+            Some(Duration::from_secs(45))
+        );
+    }
+
+    #[test]
+    fn retry_after_accepts_asctime_date() {
+        let now = Utc
+            .with_ymd_and_hms(1994, 11, 6, 8, 48, 52)
+            .single()
+            .unwrap();
+        let retry_at = now + chrono::Duration::seconds(45);
+        let header = retry_at.format("%a %b %e %H:%M:%S %Y").to_string();
+        assert_eq!(
+            parse_retry_after_value_at(&header, now),
+            Some(Duration::from_secs(45))
+        );
+    }
+
+    #[test]
+    fn retry_after_treats_past_http_date_as_immediate_retry() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 3, 26, 11, 0, 0)
+            .single()
+            .unwrap();
+        let retry_at = now - chrono::Duration::seconds(1);
+        let header = retry_at.format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        assert_eq!(
+            parse_retry_after_value_at(&header, now),
+            Some(Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn retry_after_rejects_invalid_values() {
+        assert_eq!(parse_retry_after_value("not-a-delay"), None);
     }
 
     fn test_client(chain_id: u64) -> MevShareClient {
