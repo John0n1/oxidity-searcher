@@ -55,7 +55,7 @@ async-trait = "0.1.89"
 lazy_static = "1.5.0"
 url = "2.5.8"
 hex = "0.4.3"
-once_cell = "1.21.3"
+once_cell = "1.21.4"
 clap = { version = "4.6.0", features = ["derive"] }
 ipnet = "2.12.0"
 axum = "0.8.8"
