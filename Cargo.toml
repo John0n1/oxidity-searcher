@@ -45,7 +45,7 @@ alloy-json-abi = "1.5.7"
 alloy-sol-types = { version = "1.5.7"}
 alloy-rpc-client = "1.7.3"
 alloy-rpc-types-engine = "1.7.3"
-alloy-transport-http = { version = "1.7.3", features = ["jwt-auth"] }
+alloy-transport-http = { version = "2.0.1", features = ["jwt-auth"] }
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-native-tls", "sqlite", "chrono", "migrate"] }
 chrono = { version = "0.4.44", features = ["serde"] }
 dashmap = "6.1.0" # Concurrent HashMap
