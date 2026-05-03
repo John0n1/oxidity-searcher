@@ -56,7 +56,7 @@ lazy_static = "1.5.0"
 url = "2.5.8"
 hex = "0.4.3"
 once_cell = "1.21.4"
-clap = { version = "4.6.0", features = ["derive"] }
+clap = { version = "4.6.1", features = ["derive"] }
 ipnet = "2.12.0"
 axum = "0.8.9"
 tower-http = { version = "0.6.8", features = ["cors"] }
