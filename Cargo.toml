@@ -39,7 +39,7 @@ alloy = { version = "1.8.3", default-features = false, features = [
     "signer-local",
     "sol-types",
 ] }
-alloy-consensus = { version = "2.0.1", features = ["serde", "k256"] } 
+alloy-consensus = { version = "2.0.4", features = ["serde", "k256"] } 
 alloy-primitives = { version = "1.5.7", features = ["serde"] } 
 alloy-json-abi = "1.5.7" 
 alloy-sol-types = { version = "1.5.7"}
