@@ -58,7 +58,7 @@ chrono = { version = "0.4.44", features = ["serde"] }
 
 dashmap = "6.1.0"
 futures = "0.3.32"
-reqwest = { version = "0.13.3", features = ["json", "stream"] }
+reqwest = { version = "0.13.4", features = ["json", "stream"] }
 async-trait = "0.1.89"
 lazy_static = "1.5.0"
 url = "2.5.8"
