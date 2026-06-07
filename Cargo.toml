@@ -54,7 +54,7 @@ alloy-rpc-types-engine = "2.0.4"
 alloy-transport-http = { version = "2.0.4", features = ["jwt-auth"] }
 
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-native-tls", "sqlite", "chrono", "migrate"] }
-chrono = { version = "0.4.44", features = ["serde"] }
+chrono = { version = "0.4.45", features = ["serde"] }
 
 dashmap = "6.1.0"
 futures = "0.3.32"
