@@ -1181,10 +1181,12 @@ mod tests {
             return_data: Bytes::new(),
             logs: Vec::new(),
             gas_used: 42_000,
+            max_used_gas: None,
             status: false,
             error: Some(SimulateError {
                 code: -32000,
                 message: "execution reverted".to_string(),
+                data: None,
             }),
         };
         let outcome = sim_call_result_to_outcome(&call);
