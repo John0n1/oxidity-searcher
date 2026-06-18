@@ -20,19 +20,13 @@ use support::{ExecutorHarnessOptions, build_strategy_executor};
 async fn mev_share_v3_pipeline_manual() {
     use std::env;
 
-    let rpc = match env::var("HTTP_PROVIDER_1") {
-        Ok(v) => v,
-        Err(_) => {
-            eprintln!("skip: set HTTP_PROVIDER_1 and WEBSOCKET_PROVIDER_1 (Nethermind/Anvil)");
-            return;
-        }
+    let rpc = if let Ok(v) = env::var("HTTP_PROVIDER_1") { v } else {
+        eprintln!("skip: set HTTP_PROVIDER_1 and WEBSOCKET_PROVIDER_1 (Nethermind/Anvil)");
+        return;
     };
-    let _ws = match env::var("WEBSOCKET_PROVIDER_1") {
-        Ok(v) => v,
-        Err(_) => {
-            eprintln!("skip: set WEBSOCKET_PROVIDER_1 (Nethermind/Anvil)");
-            return;
-        }
+    let _ws = if let Ok(v) = env::var("WEBSOCKET_PROVIDER_1") { v } else {
+        eprintln!("skip: set WEBSOCKET_PROVIDER_1 (Nethermind/Anvil)");
+        return;
     };
     let wallet_key = env::var("OXIDITY_WALLET_PRIVATE_KEY").unwrap_or_else(|_| {
         // dev key funded by most test nodes; change via env for production‑like runs.

@@ -35,7 +35,7 @@ struct Cli {
     #[arg(long)]
     end_block: Option<u64>,
 
-    /// Lookback blocks when start_block is omitted.
+    /// Lookback blocks when `start_block` is omitted.
     #[arg(long, default_value_t = 20_000)]
     lookback_blocks: u64,
 
@@ -47,7 +47,7 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     include_unknown_routers: bool,
 
-    /// Enable historical trace simulation (debug_traceCall at block-1).
+    /// Enable historical trace simulation (`debug_traceCall` at block-1).
     #[arg(long, default_value_t = false)]
     trace_sim: bool,
 
@@ -55,7 +55,7 @@ struct Cli {
     #[arg(long, default_value_t = 24)]
     trace_sim_sample_per_window: usize,
 
-    /// Fallback to eth_call(block-1) when debug_traceCall is unavailable.
+    /// Fallback to eth_call(block-1) when `debug_traceCall` is unavailable.
     #[arg(long, default_value_t = true)]
     trace_sim_fallback_eth_call: bool,
 
@@ -75,7 +75,7 @@ enum ReplayStressProfile {
 }
 
 impl ReplayStressProfile {
-    fn as_str(&self) -> &'static str {
+    const fn as_str(&self) -> &'static str {
         match self {
             Self::UltraLow => "ultra_low",
             Self::Low => "low",
@@ -977,11 +977,11 @@ fn tx_to_call_object(tx: &RpcTx) -> serde_json::Value {
     }
     obj.insert(
         "value".into(),
-        serde_json::Value::String(tx.value.to_string()),
+        serde_json::Value::String(tx.value.clone()),
     );
     obj.insert(
         "data".into(),
-        serde_json::Value::String(tx.input.to_string()),
+        serde_json::Value::String(tx.input.clone()),
     );
     serde_json::Value::Object(obj)
 }

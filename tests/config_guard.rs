@@ -14,7 +14,7 @@ fn git_ls_files() -> Option<Vec<String>> {
         return None;
     }
     let body = String::from_utf8_lossy(&out.stdout);
-    Some(body.lines().map(|s| s.to_string()).collect())
+    Some(body.lines().map(std::string::ToString::to_string).collect())
 }
 
 fn is_git_tracked(path: &Path) -> bool {
@@ -92,14 +92,10 @@ fn no_committed_hex_keys_in_configs() {
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            if re.is_match(trimmed) {
-                panic!("Secret-looking hex in {} at line {}", file, idx + 1);
-            }
+            assert!(!re.is_match(trimmed), "Secret-looking hex in {} at line {}", file, idx + 1);
             if let Some(caps) = key_re.captures(trimmed) {
                 let value = caps.get(2).map(|m| m.as_str()).unwrap_or_default();
-                if !is_placeholder_secret(value) {
-                    panic!("Secret-looking assignment in {} at line {}", file, idx + 1);
-                }
+                assert!(is_placeholder_secret(value), "Secret-looking assignment in {} at line {}", file, idx + 1)
             }
         }
     }
@@ -116,7 +112,6 @@ fn no_tracked_dotenv_files_except_example() {
         .collect();
     assert!(
         offenders.is_empty(),
-        "Tracked dotenv files are not allowed (except .env.example): {:?}",
-        offenders
+        "Tracked dotenv files are not allowed (except .env.example): {offenders:?}"
     );
 }

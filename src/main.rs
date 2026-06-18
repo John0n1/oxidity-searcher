@@ -167,7 +167,7 @@ async fn main() -> Result<(), AppError> {
     let db = Database::new(&database_url).await?;
 
     let wallet_signer = PrivateKeySigner::from_str(&settings.wallet_key)
-        .map_err(|e| AppError::Config(format!("Invalid wallet key: {}", e)))?;
+        .map_err(|e| AppError::Config(format!("Invalid wallet key: {e}")))?;
     let wallet_address = wallet_signer.address();
     if wallet_address != settings.wallet_address {
         return Err(AppError::Config(format!(
@@ -198,7 +198,7 @@ async fn main() -> Result<(), AppError> {
 
     let relay_url = settings.flashbots_relay_url();
     let bundle_signer = PrivateKeySigner::from_str(&settings.bundle_signer_key())
-        .map_err(|e| AppError::Config(format!("Invalid bundle signer key: {}", e)))?;
+        .map_err(|e| AppError::Config(format!("Invalid bundle signer key: {e}")))?;
     let slippage_bps = cli.slippage_bps.unwrap_or(settings.slippage_bps);
     let strategy_enabled_flag =
         !cli.no_strategy && cli.strategy_enabled && settings.strategy_enabled;
@@ -221,8 +221,7 @@ async fn main() -> Result<(), AppError> {
     let token_manager = if let Some(path) = tokenlist_path.as_deref() {
         Arc::new(TokenManager::load_from_file(path).map_err(|e| {
             AppError::Config(format!(
-                "TokenManager failed to load tokenlist from {}: {}",
-                path, e
+                "TokenManager failed to load tokenlist from {path}: {e}"
             ))
         })?)
     } else {

@@ -32,12 +32,9 @@ fn env_var(key: &str) -> Option<String> {
 }
 
 fn staging_rpc_url() -> Option<Url> {
-    let raw = match env_var("OXIDITY_STAGING_MAINNET_RPC_URL") {
-        Some(value) => value,
-        None => {
-            eprintln!("skip: set OXIDITY_STAGING_MAINNET_RPC_URL for ignored staging smoke tests");
-            return None;
-        }
+    let raw = if let Some(value) = env_var("OXIDITY_STAGING_MAINNET_RPC_URL") { value } else {
+        eprintln!("skip: set OXIDITY_STAGING_MAINNET_RPC_URL for ignored staging smoke tests");
+        return None;
     };
     match Url::parse(&raw) {
         Ok(url) => Some(url),
@@ -135,7 +132,7 @@ async fn flashloan_builder_encodes_callbacks() {
 
     // Decode the calldata back to FlashCallbackData to ensure layout is correct.
     let decoded = UnifiedHardenedExecutor::executeFlashLoanCall::abi_decode(
-        &request.input.clone().into_input().expect("input bytes"),
+        &request.input.into_input().expect("input bytes"),
     )
     .expect("decode envelope");
 
@@ -150,7 +147,7 @@ async fn flashloan_builder_encodes_callbacks() {
     assert_eq!(decoded.assets[0], wrapped_native_for_chain(CHAIN_ETHEREUM));
 }
 
-/// Ensure Aave flashloan selector is used when provider is set to AaveV3.
+/// Ensure Aave flashloan selector is used when provider is set to `AaveV3`.
 #[tokio::test]
 async fn flashloan_builder_uses_aave_selector() {
     let executor_addr = Address::from([0x33; 20]);
@@ -195,12 +192,12 @@ async fn flashloan_builder_uses_aave_selector() {
         Ok(v) => v,
         Err(e) => {
             // Some local Nethermind/Anvil configs disable access-list calls; skip gracefully.
-            eprintln!("skipping aave selector test: {}", e);
+            eprintln!("skipping aave selector test: {e}");
             return;
         }
     };
 
-    let input_bytes = request.input.clone().into_input().expect("input bytes");
+    let input_bytes = request.input.into_input().expect("input bytes");
     let selector = &input_bytes[..4];
     assert_eq!(
         selector,
