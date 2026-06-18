@@ -1,6 +1,25 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::redundant_closure_for_method_calls,
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::items_after_statements,
+    clippy::manual_let_else,
+    clippy::must_use_candidate,
+    clippy::option_if_let_else,
+    clippy::redundant_clone,
+    clippy::redundant_closure,
+    clippy::significant_drop_tightening,
+    clippy::single_match_else,
+    clippy::too_many_lines,
+    clippy::uninlined_format_args,
+    clippy::unused_async
+)]
+
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
 use crate::network::provider::HttpProvider;

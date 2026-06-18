@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(clippy::explicit_into_iter_loop, clippy::must_use_candidate)]
+
 use alloy::primitives::{Address, Bytes, U256};
 
 use super::{RouteLeg, RoutePlan, RouteVenue};

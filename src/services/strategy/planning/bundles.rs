@@ -1,6 +1,18 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::redundant_closure_for_method_calls,
+    clippy::map_unwrap_or,
+    clippy::match_same_arms,
+    clippy::missing_const_for_fn,
+    clippy::must_use_candidate,
+    clippy::redundant_closure,
+    clippy::significant_drop_tightening,
+    clippy::too_many_lines,
+    clippy::uninlined_format_args
+)]
+
 use crate::common::error::AppError;
 use crate::domain::constants::{FLASHBOTS_MAX_BYTES, FLASHBOTS_MAX_TXS};
 use crate::services::strategy::strategy::StrategyExecutor;

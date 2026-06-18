@@ -1,6 +1,18 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::bool_to_int_with_if,
+    clippy::cast_sign_loss,
+    clippy::manual_let_else,
+    clippy::needless_continue,
+    clippy::nonminimal_bool,
+    clippy::semicolon_if_nothing_returned,
+    clippy::too_many_lines,
+    clippy::uninlined_format_args,
+    clippy::use_self
+)]
+
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
 use crate::services::strategy::routers::{ERC20, UniV2Router};
@@ -24,19 +36,22 @@ impl StrategyExecutor {
         let failure_window_secs = self.toxic_probe_failure_window_secs();
         let failure_threshold = self.toxic_probe_failure_threshold();
         let now = std::time::Instant::now();
-        let mut count = 1u32;
-        if let Some(mut entry) = self.toxic_probe_failures.get_mut(&token) {
-            let (ref mut prev_count, ref mut first_seen) = *entry;
-            if first_seen.elapsed().as_secs() > failure_window_secs {
-                *prev_count = 1;
-                *first_seen = now;
-            } else {
-                *prev_count = prev_count.saturating_add(1);
-            }
-            count = *prev_count;
-        } else {
-            self.toxic_probe_failures.insert(token, (1, now));
-        }
+        let count = self.toxic_probe_failures.get_mut(&token).map_or_else(
+            || {
+                self.toxic_probe_failures.insert(token, (1, now));
+                1
+            },
+            |mut entry| {
+                let (ref mut prev_count, ref mut first_seen) = *entry;
+                if first_seen.elapsed().as_secs() > failure_window_secs {
+                    *prev_count = 1;
+                    *first_seen = now;
+                } else {
+                    *prev_count = prev_count.saturating_add(1);
+                }
+                *prev_count
+            },
+        );
 
         if count >= failure_threshold {
             self.toxic_probe_failures.remove(&token);
@@ -274,7 +289,7 @@ impl StrategyExecutor {
         for token in tokens {
             for router in routers.iter().copied() {
                 match self.rebalance_token(token, router).await {
-                    Ok(_) => {
+                    Ok(()) => {
                         tracing::warn!(
                             target: "inventory",
                             reason=%reason,
@@ -401,10 +416,10 @@ impl StrategyExecutor {
                     U256::from(10_000u64 - crate::services::strategy::strategy::TAX_TOLERANCE_BPS);
                 let ok = actual_out.saturating_mul(U256::from(10_000u64))
                     >= expected_out.saturating_mul(tolerance_bps);
-                if !ok {
-                    let _ = self.record_toxic_probe_failure(token, "probe_output_too_low");
-                } else {
+                if ok {
                     self.clear_toxic_probe_failures(token);
+                } else {
+                    let _ = self.record_toxic_probe_failure(token, "probe_output_too_low");
                 }
                 Ok(ok)
             }

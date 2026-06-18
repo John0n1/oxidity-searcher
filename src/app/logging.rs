@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::format_push_string,
+    clippy::map_unwrap_or,
+    clippy::must_use_candidate,
+    clippy::uninlined_format_args
+)]
+
 use std::str::FromStr;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 

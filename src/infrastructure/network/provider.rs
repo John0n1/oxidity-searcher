@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(clippy::uninlined_format_args)]
+
 use crate::common::error::AppError;
 use alloy::network::Ethereum;
 use alloy::providers::RootProvider;

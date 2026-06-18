@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::too_many_lines,
+    clippy::unnecessary_wraps
+)]
+
 use alloy::primitives::{Address, U256};
 use clap::Parser;
 use oxidity_searcher::app::config::GlobalSettings;
@@ -975,14 +983,8 @@ fn tx_to_call_object(tx: &RpcTx) -> serde_json::Value {
     if let Some(nonce) = tx.nonce.as_deref() {
         obj.insert("nonce".into(), serde_json::Value::String(nonce.to_string()));
     }
-    obj.insert(
-        "value".into(),
-        serde_json::Value::String(tx.value.clone()),
-    );
-    obj.insert(
-        "data".into(),
-        serde_json::Value::String(tx.input.clone()),
-    );
+    obj.insert("value".into(), serde_json::Value::String(tx.value.clone()));
+    obj.insert("data".into(), serde_json::Value::String(tx.input.clone()));
     serde_json::Value::Object(obj)
 }
 

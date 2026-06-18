@@ -17,6 +17,7 @@ mod support;
 use support::{ExecutorHarnessOptions, build_strategy_executor};
 
 /// Ensures a MEV-Share hint can be decoded, simulated, and queued without panic.
+#[allow(clippy::large_futures)]
 #[tokio::test]
 async fn mev_share_hint_round_trip() {
     let (exec, harness) = build_strategy_executor(ExecutorHarnessOptions::default()).await;

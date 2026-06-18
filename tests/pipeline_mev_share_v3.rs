@@ -16,15 +16,16 @@ use url::Url;
 mod support;
 use support::{ExecutorHarnessOptions, build_strategy_executor};
 
+#[allow(clippy::large_futures)]
 #[tokio::test]
 async fn mev_share_v3_pipeline_manual() {
     use std::env;
 
-    let rpc = if let Ok(v) = env::var("HTTP_PROVIDER_1") { v } else {
+    let Ok(rpc) = env::var("HTTP_PROVIDER_1") else {
         eprintln!("skip: set HTTP_PROVIDER_1 and WEBSOCKET_PROVIDER_1 (Nethermind/Anvil)");
         return;
     };
-    let _ws = if let Ok(v) = env::var("WEBSOCKET_PROVIDER_1") { v } else {
+    let Ok(_ws) = env::var("WEBSOCKET_PROVIDER_1") else {
         eprintln!("skip: set WEBSOCKET_PROVIDER_1 (Nethermind/Anvil)");
         return;
     };

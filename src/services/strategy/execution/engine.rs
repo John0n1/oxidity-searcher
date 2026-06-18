@@ -1,6 +1,18 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::explicit_iter_loop,
+    clippy::map_unwrap_or,
+    clippy::must_use_candidate,
+    clippy::option_if_let_else,
+    clippy::semicolon_if_nothing_returned,
+    clippy::struct_excessive_bools,
+    clippy::too_many_lines,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::uninlined_format_args
+)]
+
 use crate::common::constants::default_balancer_vault_for_chain;
 use crate::common::error::AppError;
 use crate::core::executor::{BundleSender, SharedBundleSender};
@@ -610,8 +622,8 @@ impl Engine {
                 let poll_interval = Duration::from_secs(self.feed_audit_recheck_secs);
                 loop {
                     tokio::select! {
-                        _ = shutdown_monitor.cancelled() => break,
-                        _ = sleep(poll_interval) => {}
+                        () = shutdown_monitor.cancelled() => break,
+                        () = sleep(poll_interval) => {}
                     }
                     let state = Self::check_sync_lag_state(
                         &provider,

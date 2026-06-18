@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(clippy::implicit_hasher, clippy::must_use_candidate)]
+
 use crate::common::error::AppError;
 use crate::common::global_data::parse_global_data_file;
 use crate::network::provider::HttpProvider;

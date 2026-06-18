@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(clippy::redundant_else, clippy::uninlined_format_args)]
+
 use crate::common::constants;
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;

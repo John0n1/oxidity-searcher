@@ -1,6 +1,18 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::redundant_closure_for_method_calls,
+    clippy::cast_lossless,
+    clippy::items_after_statements,
+    clippy::missing_const_for_fn,
+    clippy::needless_continue,
+    clippy::redundant_closure,
+    clippy::semicolon_if_nothing_returned,
+    clippy::too_many_lines,
+    clippy::uninlined_format_args
+)]
+
 use crate::common::error::AppError;
 use crate::domain::constants::{FLASHBOTS_MAX_BYTES, FLASHBOTS_MAX_TXS};
 use crate::network::provider::HttpProvider;
@@ -581,7 +593,7 @@ impl BundleSender {
                         replacement_uuid.as_deref(),
                     )
                     .await
-                    .map(|_| (name.clone(), url.clone()))
+                    .map(|()| (name.clone(), url.clone()))
                     .map_err(|e| (name.clone(), url.clone(), e))
                 });
             }
@@ -820,7 +832,7 @@ impl BundleSender {
         }
 
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_millis(3_000))
+            .timeout(Duration::from_secs(3))
             .build();
         let client = match client {
             Ok(c) => c,

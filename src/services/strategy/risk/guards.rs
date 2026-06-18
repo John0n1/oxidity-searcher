@@ -1,6 +1,19 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::doc_markdown,
+    clippy::manual_let_else,
+    clippy::missing_const_for_fn,
+    clippy::suboptimal_flops,
+    clippy::unused_self,
+    clippy::use_self
+)]
+
 use crate::common::constants::MIN_PROFIT_THRESHOLD_WEI;
 use crate::common::error::AppError;
 use crate::network::gas::GasFees;

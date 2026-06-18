@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(clippy::must_use_candidate)]
+
 use crate::common::constants::default_routers_for_chain;
 use alloy::primitives::Address;
 use alloy::sol;

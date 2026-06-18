@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::must_use_candidate,
+    clippy::significant_drop_in_scrutinee,
+    clippy::uninlined_format_args
+)]
+
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
 use crate::network::provider::HttpProvider;

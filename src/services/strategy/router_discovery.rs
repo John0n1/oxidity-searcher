@@ -1,6 +1,21 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::redundant_closure_for_method_calls,
+    clippy::assigning_clones,
+    clippy::manual_let_else,
+    clippy::missing_const_for_fn,
+    clippy::needless_pass_by_ref_mut,
+    clippy::option_if_let_else,
+    clippy::redundant_closure,
+    clippy::significant_drop_tightening,
+    clippy::too_many_lines,
+    clippy::uninlined_format_args,
+    clippy::unused_async,
+    clippy::unused_self
+)]
+
 use crate::common::error::AppError;
 use crate::data::db::Database;
 use crate::services::strategy::decode::RouterKind;

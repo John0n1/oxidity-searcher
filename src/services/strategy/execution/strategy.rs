@@ -1,6 +1,35 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::redundant_closure_for_method_calls,
+    clippy::bool_to_int_with_if,
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::large_futures,
+    clippy::manual_let_else,
+    clippy::map_unwrap_or,
+    clippy::match_like_matches_macro,
+    clippy::missing_const_for_fn,
+    clippy::must_use_candidate,
+    clippy::needless_continue,
+    clippy::option_if_let_else,
+    clippy::or_fun_call,
+    clippy::redundant_clone,
+    clippy::redundant_closure,
+    clippy::redundant_pub_crate,
+    clippy::semicolon_if_nothing_returned,
+    clippy::significant_drop_tightening,
+    clippy::single_match_else,
+    clippy::struct_excessive_bools,
+    clippy::suboptimal_flops,
+    clippy::too_many_lines,
+    clippy::uninlined_format_args,
+    clippy::use_self
+)]
+
 use crate::app::logging::{
     ansi_tables_enabled, format_framed_table, format_framed_table_with_blue_title,
 };
@@ -1005,7 +1034,7 @@ impl StrategyExecutor {
             .upsert_nonce_state(self.chain_id, block, next_nonce, &pools)
             .await
         {
-            Ok(_) => {
+            Ok(()) => {
                 self.stats
                     .nonce_state_persist
                     .fetch_add(1, Ordering::Relaxed);
@@ -1020,29 +1049,32 @@ impl StrategyExecutor {
     }
 
     async fn restore_bundle_state(&self) -> Result<(), AppError> {
-        let loaded = self.db.load_nonce_state(self.chain_id).await;
-        if let Ok(Some((block, next, touched_raw))) = loaded {
-            let touched = Self::deserialize_pools(&touched_raw);
-            {
-                let mut guard = self.bundle_state.lock().await;
-                *guard = Some(BundleState::with_touched(block, next, touched));
+        match self.db.load_nonce_state(self.chain_id).await {
+            Ok(Some((block, next, touched_raw))) => {
+                let touched = Self::deserialize_pools(&touched_raw);
+                {
+                    let mut guard = self.bundle_state.lock().await;
+                    *guard = Some(BundleState::with_touched(block, next, touched));
+                }
+                self.current_block.store(block, Ordering::Relaxed);
+                self.stats.nonce_state_loads.fetch_add(1, Ordering::Relaxed);
+                tracing::info!(
+                    target: "bundle_state",
+                    block,
+                    next_nonce = next,
+                    "🔢 Restored nonce state from DB"
+                );
             }
-            self.current_block.store(block, Ordering::Relaxed);
-            self.stats.nonce_state_loads.fetch_add(1, Ordering::Relaxed);
-            tracing::info!(
-                target: "bundle_state",
-                block,
-                next_nonce = next,
-                "🔢 Restored nonce state from DB"
-            );
-        } else if let Ok(None) = loaded {
-            self.stats.nonce_state_loads.fetch_add(1, Ordering::Relaxed);
-            tracing::debug!(target: "bundle_state", "No persisted nonce state found");
-        } else if let Err(e) = loaded {
-            self.stats
-                .nonce_state_load_fail
-                .fetch_add(1, Ordering::Relaxed);
-            tracing::warn!(target: "bundle_state", error=%e, "Failed to load nonce state");
+            Ok(None) => {
+                self.stats.nonce_state_loads.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(target: "bundle_state", "No persisted nonce state found");
+            }
+            Err(e) => {
+                self.stats
+                    .nonce_state_load_fail
+                    .fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(target: "bundle_state", error=%e, "Failed to load nonce state");
+            }
         }
         Ok(())
     }
@@ -1547,7 +1579,7 @@ impl StrategyExecutor {
     async fn block_watcher(self: Arc<Self>) {
         loop {
             let msg = tokio::select! {
-                _ = self.shutdown.cancelled() => {
+                () = self.shutdown.cancelled() => {
                     tracing::info!(target: "strategy", "Shutdown requested; stopping block watcher");
                     break;
                 }
