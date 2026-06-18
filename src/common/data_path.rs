@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::doc_markdown,
+    clippy::map_unwrap_or,
+    clippy::must_use_candidate
+)]
+
 use crate::domain::error::AppError;
 use std::path::{Path, PathBuf};
 
@@ -64,12 +70,7 @@ pub fn resolve_data_path(raw_path: &str, explicit_data_dir: Option<&str>) -> Pat
         return as_path;
     }
     let normalized_rel = normalize_data_relative(&as_path);
-    if explicit_data_dir
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .is_some()
-        || env_data_dir().is_some()
-    {
+    if explicit_data_dir.is_some_and(|dir| !dir.trim().is_empty()) || env_data_dir().is_some() {
         return resolve_data_dir(explicit_data_dir).join(normalized_rel);
     }
     if let Some(exe_data) = executable_data_dir_candidate() {

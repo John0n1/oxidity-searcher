@@ -1,6 +1,22 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::cast_lossless,
+    clippy::doc_markdown,
+    clippy::explicit_iter_loop,
+    clippy::manual_let_else,
+    clippy::map_unwrap_or,
+    clippy::missing_const_for_fn,
+    clippy::must_use_candidate,
+    clippy::semicolon_if_nothing_returned,
+    clippy::single_match_else,
+    clippy::string_lit_as_bytes,
+    clippy::uninlined_format_args,
+    clippy::unused_async,
+    clippy::use_self
+)]
+
 use crate::common::error::AppError;
 use crate::common::global_data::parse_global_data_file;
 use crate::network::provider::{HttpProvider, WsProvider};
@@ -649,7 +665,7 @@ impl ReserveCache {
                     tracing::info!(target: "reserves", "Subscribed to V2 Sync logs");
                     loop {
                         let next = tokio::select! {
-                            _ = shutdown.cancelled() => {
+                            () = shutdown.cancelled() => {
                                 tracing::info!(target: "reserves", "Shutdown requested; closing Sync subscription");
                                 return;
                             }
@@ -669,11 +685,11 @@ impl ReserveCache {
                 }
             }
             tokio::select! {
-                _ = shutdown.cancelled() => {
+                () = shutdown.cancelled() => {
                     tracing::info!(target: "reserves", "Shutdown requested; stopping V2 log listener retry loop");
                     break;
                 }
-                _ = sleep(Duration::from_secs(2)) => {}
+                () = sleep(Duration::from_secs(2)) => {}
             }
         }
     }

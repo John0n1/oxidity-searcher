@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::doc_markdown,
+    clippy::map_unwrap_or,
+    clippy::must_use_candidate
+)]
+
 use alloy::primitives::{Address, Bytes, U256};
 
 /// Supported venues for routing and flash liquidity.

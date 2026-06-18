@@ -92,10 +92,20 @@ fn no_committed_hex_keys_in_configs() {
             if trimmed.is_empty() || trimmed.starts_with('#') {
                 continue;
             }
-            assert!(!re.is_match(trimmed), "Secret-looking hex in {} at line {}", file, idx + 1);
+            assert!(
+                !re.is_match(trimmed),
+                "Secret-looking hex in {} at line {}",
+                file,
+                idx + 1
+            );
             if let Some(caps) = key_re.captures(trimmed) {
                 let value = caps.get(2).map(|m| m.as_str()).unwrap_or_default();
-                assert!(is_placeholder_secret(value), "Secret-looking assignment in {} at line {}", file, idx + 1)
+                assert!(
+                    is_placeholder_secret(value),
+                    "Secret-looking assignment in {} at line {}",
+                    file,
+                    idx + 1
+                );
             }
         }
     }

@@ -1,14 +1,22 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::explicit_iter_loop,
+    clippy::match_same_arms,
+    clippy::missing_const_for_fn,
+    clippy::must_use_candidate,
+    clippy::struct_field_names
+)]
+
 use crate::common::data_path::resolve_default_data_file;
 use crate::common::global_data::parse_global_data_file;
 use alloy::primitives::{Address, U256};
-use lazy_static::lazy_static;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::LazyLock;
 
 // =============================================================================
 // NETWORK CONSTANTS
@@ -46,36 +54,34 @@ pub const FLASHBOTS_MAX_BYTES: usize = 300_000;
 // MEV CONSTANTS (Using U256 for precise Wei math)
 // =============================================================================
 
-lazy_static! {
-    // 0.0009 ETH baseline net profit floor; conservative enough for weak edges while
-    // still allowing low-fee opportunities to pass.
-    pub static ref MIN_PROFIT_THRESHOLD_WEI: U256 = U256::from(900_000_000_000_000u64);
+// 0.0009 ETH baseline net profit floor; conservative enough for weak edges while
+// still allowing low-fee opportunities to pass.
+pub static MIN_PROFIT_THRESHOLD_WEI: LazyLock<U256> =
+    LazyLock::new(|| U256::from(900_000_000_000_000u64));
 
-    // 0.00002 ETH
-    pub static ref LOW_BALANCE_THRESHOLD_WEI: U256 = U256::from(20_000_000_000_000u64);
+// 0.00002 ETH
+pub static LOW_BALANCE_THRESHOLD_WEI: LazyLock<U256> =
+    LazyLock::new(|| U256::from(20_000_000_000_000u64));
 
-    static ref GLOBAL_DATA_DEFAULTS: GlobalDataFileRaw = {
-        let path = resolve_default_data_file("global_data.json", None);
-        load_global_data_defaults(path.as_path())
-    };
+static GLOBAL_DATA_DEFAULTS: LazyLock<GlobalDataFileRaw> = LazyLock::new(|| {
+    let path = resolve_default_data_file("global_data.json", None);
+    load_global_data_defaults(path.as_path())
+});
 
-    static ref ADDRESS_REGISTRY_DEFAULTS: AddressRegistryDefaults = {
-        load_address_registry_defaults(&GLOBAL_DATA_DEFAULTS.address_registry)
-    };
+static ADDRESS_REGISTRY_DEFAULTS: LazyLock<AddressRegistryDefaults> =
+    LazyLock::new(|| load_address_registry_defaults(&GLOBAL_DATA_DEFAULTS.address_registry));
 
-    static ref WRAPPED_NATIVE_BY_CHAIN: HashMap<u64, Address> = {
-        let mut merged = load_wrapped_native_from_tokenlist(&GLOBAL_DATA_DEFAULTS.tokenlist);
-        // If registry provides a wrapped-native address per chain, prefer it.
-        for (chain_id, addr) in ADDRESS_REGISTRY_DEFAULTS.wrapped_native_by_chain.iter() {
-            merged.insert(*chain_id, *addr);
-        }
-        merged
-    };
+static WRAPPED_NATIVE_BY_CHAIN: LazyLock<HashMap<u64, Address>> = LazyLock::new(|| {
+    let mut merged = load_wrapped_native_from_tokenlist(&GLOBAL_DATA_DEFAULTS.tokenlist);
+    // If registry provides a wrapped-native address per chain, prefer it.
+    for (chain_id, addr) in &ADDRESS_REGISTRY_DEFAULTS.wrapped_native_by_chain {
+        merged.insert(*chain_id, *addr);
+    }
+    merged
+});
 
-    static ref NATIVE_SENTINEL_BY_CHAIN: HashMap<u64, Address> = {
-        load_native_sentinel_from_tokenlist(&GLOBAL_DATA_DEFAULTS.tokenlist)
-    };
-}
+static NATIVE_SENTINEL_BY_CHAIN: LazyLock<HashMap<u64, Address>> =
+    LazyLock::new(|| load_native_sentinel_from_tokenlist(&GLOBAL_DATA_DEFAULTS.tokenlist));
 
 #[derive(Debug, Clone, Default)]
 struct AddressRegistryDefaults {

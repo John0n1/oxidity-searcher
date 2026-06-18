@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(clippy::map_unwrap_or, clippy::must_use_candidate, clippy::or_fun_call)]
+
 use std::collections::HashMap;
 use std::path::Path;
 

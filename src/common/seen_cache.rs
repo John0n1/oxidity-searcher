@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(clippy::future_not_send, clippy::significant_drop_tightening)]
+
 use dashmap::DashSet;
 use std::collections::VecDeque;
 use std::hash::Hash;

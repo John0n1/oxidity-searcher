@@ -61,6 +61,7 @@ impl Default for ExecutorHarnessOptions {
     }
 }
 
+#[allow(clippy::default_trait_access, clippy::too_many_lines)]
 pub async fn build_strategy_executor(
     options: ExecutorHarnessOptions,
 ) -> (StrategyExecutor, ExecutorHarness) {

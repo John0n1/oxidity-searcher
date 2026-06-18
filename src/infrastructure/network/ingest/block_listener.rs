@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::map_unwrap_or,
+    clippy::missing_const_for_fn,
+    clippy::must_use_candidate,
+    clippy::semicolon_if_nothing_returned
+)]
+
 use crate::common::error::AppError;
 use crate::network::nonce::NonceManager;
 use crate::network::provider::WsProvider;
@@ -49,7 +56,7 @@ impl BlockListener {
                     tracing::info!("BlockListener: subscribed to newHeads");
                     loop {
                         tokio::select! {
-                            _ = self.shutdown.cancelled() => {
+                            () = self.shutdown.cancelled() => {
                                 tracing::info!(target: "blocks", "Shutdown requested; exiting newHeads stream");
                                 return Ok(());
                             }
@@ -85,11 +92,11 @@ impl BlockListener {
                 }
             }
             tokio::select! {
-                _ = self.shutdown.cancelled() => {
+                () = self.shutdown.cancelled() => {
                     tracing::info!(target: "blocks", "Shutdown requested during block-listener backoff");
                     return Ok(());
                 }
-                _ = sleep(Duration::from_secs(2)) => {}
+                () = sleep(Duration::from_secs(2)) => {}
             }
         }
     }

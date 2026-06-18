@@ -1,6 +1,31 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::assigning_clones,
+    clippy::bool_to_int_with_if,
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::explicit_iter_loop,
+    clippy::format_push_string,
+    clippy::items_after_statements,
+    clippy::large_futures,
+    clippy::manual_let_else,
+    clippy::map_unwrap_or,
+    clippy::missing_const_for_fn,
+    clippy::option_if_let_else,
+    clippy::or_fun_call,
+    clippy::ref_option,
+    clippy::significant_drop_tightening,
+    clippy::single_match_else,
+    clippy::too_many_lines,
+    clippy::trivially_copy_pass_by_ref,
+    clippy::uninlined_format_args,
+    clippy::unnecessary_sort_by,
+    clippy::use_self
+)]
+
 use crate::app::logging::ansi_tables_enabled;
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
@@ -782,7 +807,7 @@ impl StrategyExecutor {
                     tracing::error!(target: "strategy", error=%e, "Strategy failed");
                 }
             }
-        };
+        }
 
         let processed = self
             .stats

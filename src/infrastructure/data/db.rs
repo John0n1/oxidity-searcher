@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Oxidity <john@oxidity.io>
 
+#![allow(
+    clippy::needless_raw_string_hashes,
+    clippy::similar_names,
+    clippy::uninlined_format_args
+)]
+
 use crate::common::error::AppError;
 use crate::data::schema::TransactionRecord;
 use alloy::primitives::Address;

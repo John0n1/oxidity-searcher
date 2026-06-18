@@ -32,7 +32,7 @@ fn env_var(key: &str) -> Option<String> {
 }
 
 fn staging_rpc_url() -> Option<Url> {
-    let raw = if let Some(value) = env_var("OXIDITY_STAGING_MAINNET_RPC_URL") { value } else {
+    let Some(raw) = env_var("OXIDITY_STAGING_MAINNET_RPC_URL") else {
         eprintln!("skip: set OXIDITY_STAGING_MAINNET_RPC_URL for ignored staging smoke tests");
         return None;
     };
@@ -209,7 +209,7 @@ async fn flashloan_builder_uses_aave_selector() {
 /// Run manually with:
 /// `cargo test live_executor_flashloan_smoke_mainnet -- --ignored --nocapture`
 #[tokio::test]
-#[ignore]
+#[ignore = "manual staging smoke test"]
 async fn live_executor_flashloan_smoke_mainnet() {
     let Some(rpc_url) = staging_rpc_url() else {
         return;
@@ -271,7 +271,7 @@ async fn live_executor_flashloan_smoke_mainnet() {
 
 /// Live smoke check for Aave simple flashloan entry on deployed executor.
 #[tokio::test]
-#[ignore]
+#[ignore = "manual staging smoke test"]
 async fn live_executor_aave_smoke_mainnet() {
     let Some(rpc_url) = staging_rpc_url() else {
         return;

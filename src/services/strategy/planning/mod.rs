@@ -1,6 +1,27 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::bool_to_int_with_if,
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::items_after_statements,
+    clippy::manual_let_else,
+    clippy::map_unwrap_or,
+    clippy::match_wildcard_for_single_variants,
+    clippy::missing_const_for_fn,
+    clippy::non_std_lazy_statics,
+    clippy::or_fun_call,
+    clippy::redundant_closure,
+    clippy::redundant_else,
+    clippy::semicolon_if_nothing_returned,
+    clippy::single_match_else,
+    clippy::too_many_lines,
+    clippy::uninlined_format_args,
+    clippy::use_self
+)]
+
 pub mod bundles;
 pub mod execution_planner;
 pub mod graph;
@@ -80,7 +101,7 @@ const UNISWAP_V3_FLASHLOAN_OVERHEAD_GAS: u64 = 260_000;
 const V2_SWAP_OVERHEAD_GAS: u64 = 160_000;
 const CURVE_SWAP_OVERHEAD_GAS: u64 = 220_000;
 const BALANCER_SWAP_OVERHEAD_GAS: u64 = 200_000;
-const FEE_TTL: Duration = Duration::from_secs(300);
+const FEE_TTL: Duration = Duration::from_mins(5);
 
 static BALANCER_FEE_CACHE: Lazy<DashMap<u64, (U256, std::time::Instant)>> = Lazy::new(DashMap::new);
 static AAVE_FEE_CACHE: Lazy<DashMap<Address, (U256, std::time::Instant)>> = Lazy::new(DashMap::new);
@@ -514,18 +535,18 @@ impl StrategyExecutor {
             gas_limit = 150_000;
         }
 
-        let mut bribe = U256::ZERO;
-        if self.executor_bribe_bps > 0 {
+        let bribe = if self.executor_bribe_bps > 0 {
             let base = U256::from(gas_limit).saturating_mul(U256::from(gas_fees.max_fee_per_gas));
-            bribe =
-                base.saturating_mul(U256::from(self.executor_bribe_bps)) / U256::from(10_000u64);
-        }
+            base.saturating_mul(U256::from(self.executor_bribe_bps)) / U256::from(10_000u64)
+        } else {
+            U256::ZERO
+        };
         let bribe_recipient = self.executor_bribe_recipient.unwrap_or(Address::ZERO);
 
         let total_value = values
             .iter()
             .copied()
-            .fold(U256::ZERO, |acc, v| acc.saturating_add(v))
+            .fold(U256::ZERO, U256::saturating_add)
             .saturating_add(bribe);
 
         let exec_call = UnifiedHardenedExecutor::executeBundleCall {

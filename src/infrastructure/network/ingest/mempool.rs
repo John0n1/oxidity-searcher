@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::semicolon_if_nothing_returned,
+    clippy::too_many_lines,
+    clippy::uninlined_format_args
+)]
+
 use crate::common::error::AppError;
 use crate::common::seen_cache::remember_with_bounded_order;
 use crate::core::strategy::StrategyStats;
@@ -68,7 +74,7 @@ impl MempoolScanner {
                     let mut stream = sub.into_stream();
                     loop {
                         tokio::select! {
-                            _ = self.shutdown.cancelled() => {
+                            () = self.shutdown.cancelled() => {
                                 tracing::info!(target: "mempool", "Shutdown requested; exiting pending tx stream");
                                 return Ok(());
                             }
@@ -101,7 +107,7 @@ impl MempoolScanner {
                             let mut stream = sub.into_stream();
                             loop {
                                 tokio::select! {
-                                    _ = self.shutdown.cancelled() => {
+                                    () = self.shutdown.cancelled() => {
                                         tracing::info!(target: "mempool", "Shutdown requested; exiting pending hash stream");
                                         return Ok(());
                                     }
@@ -152,11 +158,11 @@ impl MempoolScanner {
             }
 
             tokio::select! {
-                _ = self.shutdown.cancelled() => {
+                () = self.shutdown.cancelled() => {
                     tracing::info!(target: "mempool", "Shutdown requested during reconnect backoff");
                     return Ok(());
                 }
-                _ = sleep(Duration::from_secs(2)) => {}
+                () = sleep(Duration::from_secs(2)) => {}
             }
         }
     }
@@ -252,11 +258,11 @@ impl MempoolScanner {
                 }
             }
             tokio::select! {
-                _ = self.shutdown.cancelled() => {
+                () = self.shutdown.cancelled() => {
                     tracing::info!(target: "mempool", "Shutdown requested during poll sleep");
                     break;
                 }
-                _ = sleep(Duration::from_millis(1200)) => {}
+                () = sleep(Duration::from_millis(1200)) => {}
             }
         }
 

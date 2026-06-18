@@ -1,0 +1,5 @@
+[advisories]
+# RUSTSEC-2023-0071: Marvin Attack timing side-channel in `rsa` crate.
+# This is a transitive dependency (pulled in via target-specific TLS deps).
+# No fixed version is available upstream; the crate maintainer has not released a patch.
+ignore = ["RUSTSEC-2023-0071"]

@@ -1,6 +1,18 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::redundant_closure_for_method_calls,
+    clippy::branches_sharing_code,
+    clippy::must_use_candidate,
+    clippy::needless_pass_by_value,
+    clippy::redundant_clone,
+    clippy::redundant_closure,
+    clippy::single_char_pattern,
+    clippy::struct_excessive_bools,
+    clippy::uninlined_format_args
+)]
+
 use crate::common::error::AppError;
 use crate::data::executor::UnifiedHardenedExecutor;
 use crate::network::provider::HttpProvider;

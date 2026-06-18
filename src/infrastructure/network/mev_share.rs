@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::doc_markdown,
+    clippy::map_unwrap_or,
+    clippy::needless_pass_by_ref_mut,
+    clippy::needless_pass_by_value,
+    clippy::option_if_let_else,
+    clippy::semicolon_if_nothing_returned,
+    clippy::uninlined_format_args
+)]
+
 use crate::common::error::AppError;
 use crate::common::parsing::{
     parse_address_hex, parse_b256_hex, parse_hex_bytes, parse_u64_hex, parse_u128_hex,
@@ -130,7 +140,7 @@ impl MevShareClient {
                 return Ok(());
             }
             match self.stream_once().await {
-                Ok(_) => {
+                Ok(()) => {
                     reconnect_backoff_secs = 2;
                 }
                 Err(e) => {
@@ -165,11 +175,11 @@ impl MevShareClient {
                     }
 
                     tokio::select! {
-                        _ = self.shutdown.cancelled() => {
+                        () = self.shutdown.cancelled() => {
                             tracing::info!(target: "mev_share", "Shutdown requested during reconnect backoff");
                             return Ok(());
                         }
-                        _ = sleep(Duration::from_secs(reconnect_backoff_secs)) => {}
+                        () = sleep(Duration::from_secs(reconnect_backoff_secs)) => {}
                     }
                     reconnect_backoff_secs = (reconnect_backoff_secs.saturating_mul(2)).min(30);
                 }
@@ -237,10 +247,10 @@ impl MevShareClient {
                     "SSE returned non-success; honoring Retry-After"
                 );
                 tokio::select! {
-                    _ = self.shutdown.cancelled() => {
+                    () = self.shutdown.cancelled() => {
                         return Ok(());
                     }
-                    _ = sleep(delay) => {}
+                    () = sleep(delay) => {}
                 }
             }
             return Err(AppError::Connection(format!(
@@ -254,7 +264,7 @@ impl MevShareClient {
 
         loop {
             let maybe_chunk = tokio::select! {
-                _ = self.shutdown.cancelled() => {
+                () = self.shutdown.cancelled() => {
                     tracing::info!(target: "mev_share", "Shutdown requested; exiting SSE stream");
                     return Ok(());
                 }
@@ -471,10 +481,7 @@ mod tests {
 
     #[test]
     fn retry_after_accepts_delta_seconds() {
-        assert_eq!(
-            parse_retry_after_value("120"),
-            Some(Duration::from_secs(120))
-        );
+        assert_eq!(parse_retry_after_value("120"), Some(Duration::from_mins(2)));
     }
 
     #[test]

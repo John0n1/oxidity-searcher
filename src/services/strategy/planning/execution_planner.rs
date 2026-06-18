@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::missing_const_for_fn,
+    clippy::must_use_candidate,
+    clippy::or_fun_call,
+    clippy::unused_self,
+    clippy::use_self
+)]
+
 use alloy::primitives::{I256, U256};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

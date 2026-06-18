@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::missing_const_for_fn,
+    clippy::must_use_candidate
+)]
+
 use crate::common::error::AppError;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};

@@ -1,6 +1,26 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::redundant_closure_for_method_calls,
+    clippy::case_sensitive_file_extension_comparisons,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::cloned_instead_of_copied,
+    clippy::explicit_iter_loop,
+    clippy::manual_let_else,
+    clippy::map_unwrap_or,
+    clippy::missing_const_for_fn,
+    clippy::must_use_candidate,
+    clippy::redundant_closure,
+    clippy::struct_excessive_bools,
+    clippy::too_many_lines,
+    clippy::uninlined_format_args,
+    clippy::use_self,
+    clippy::wildcard_imports
+)]
+
 use crate::common::data_path::{resolve_data_path, resolve_required_data_path};
 use crate::common::parsing::parse_boolish;
 use crate::domain::constants;
@@ -1348,11 +1368,13 @@ impl GlobalSettings {
     pub fn flashloan_providers(
         &self,
     ) -> Vec<crate::services::strategy::strategy::FlashloanProvider> {
-        use crate::services::strategy::strategy::FlashloanProvider::*;
+        use crate::services::strategy::strategy::FlashloanProvider::{
+            AaveV3, Balancer, Dydx, MakerDao, UniswapV2, UniswapV3,
+        };
         let raw = self.flashloan_provider.to_lowercase();
         let mut parts: Vec<&str> = raw
             .split(',')
-            .map(|s| s.trim())
+            .map(str::trim)
             .filter(|s| !s.is_empty())
             .collect();
         let mut auto = false;
@@ -1532,7 +1554,8 @@ impl GlobalSettings {
         let mut out: Vec<String> = self
             .mevshare_builders
             .iter()
-            .map(|s| s.trim())
+            .map(String::as_str)
+            .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(ToString::to_string)
             .collect();
@@ -1753,7 +1776,7 @@ fn detect_active_config_file() -> Option<String> {
     ];
 
     for file in priority_files.iter() {
-        if let Some(true) = config_has_active_flag(file) {
+        if config_has_active_flag(file) == Some(true) {
             return Some((*file).to_string());
         }
     }
@@ -1765,7 +1788,7 @@ fn detect_active_config_file() -> Option<String> {
             if let Some(name) = path.file_name().and_then(|n| n.to_str())
                 && name.starts_with("config.")
                 && name.ends_with(".toml")
-                && let Some(true) = config_has_active_flag(name)
+                && config_has_active_flag(name) == Some(true)
             {
                 return Some(name.to_string());
             }

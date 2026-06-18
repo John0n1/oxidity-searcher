@@ -1,6 +1,18 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::cast_lossless,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::map_unwrap_or,
+    clippy::must_use_candidate,
+    clippy::needless_pass_by_value,
+    clippy::single_match_else,
+    clippy::uninlined_format_args
+)]
+
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
 use crate::network::provider::HttpProvider;
@@ -117,16 +129,8 @@ impl GasOracle {
             }
         }
 
-        let avg_p50 = if p50_count > 0 {
-            p50_sum / p50_count
-        } else {
-            2_000_000_000
-        };
-        let avg_p90 = if p90_count > 0 {
-            p90_sum / p90_count
-        } else {
-            avg_p50
-        };
+        let avg_p50 = p50_sum.checked_div(p50_count).unwrap_or(2_000_000_000);
+        let avg_p90 = p90_sum.checked_div(p90_count).unwrap_or(avg_p50);
 
         let util_sum: f64 = history.gas_used_ratio.iter().copied().sum();
         let util_avg = if history.gas_used_ratio.is_empty() {

@@ -32,6 +32,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Parser, Debug)]
 #[command(author, version, about = "oxidity searcher")]
 struct Cli {
@@ -112,6 +113,7 @@ fn log_chainlink_feed_summary(chain_id: u64, feeds: &HashMap<String, alloy::prim
     }
 }
 
+#[allow(clippy::large_futures, clippy::too_many_lines)]
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
     let cli = Cli::parse();

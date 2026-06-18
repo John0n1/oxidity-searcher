@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(clippy::must_use_candidate, clippy::semicolon_if_nothing_returned)]
+
 use crate::core::strategy::StrategyWork;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -53,8 +55,8 @@ impl WorkQueue {
                 }
             }
             tokio::select! {
-                _ = shutdown.cancelled() => return None,
-                _ = notified => {}
+                () = shutdown.cancelled() => return None,
+                () = notified => {}
             }
         }
     }

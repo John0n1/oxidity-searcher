@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(clippy::needless_continue)]
+
 use std::future::Future;
 use std::time::Duration;
 use tokio::time::sleep;

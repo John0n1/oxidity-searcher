@@ -1,6 +1,17 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+#![allow(
+    clippy::explicit_iter_loop,
+    clippy::missing_const_for_fn,
+    clippy::must_use_candidate,
+    clippy::needless_pass_by_value,
+    clippy::non_std_lazy_statics,
+    clippy::redundant_clone,
+    clippy::similar_names,
+    clippy::too_many_lines
+)]
+
 use alloy::consensus::Transaction as ConsensusTxTrait;
 use alloy::primitives::{Address, Bytes, TxKind, U256, aliases::U24};
 use alloy::rpc::types::eth::Transaction;
