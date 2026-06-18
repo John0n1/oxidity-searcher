@@ -139,13 +139,11 @@ async fn main() -> Result<(), AppError> {
                 let kind = entry
                     .classification
                     .as_ref()
-                    .map(|value| value.kind.as_str())
-                    .unwrap_or("-");
+                    .map_or("-", |value| value.kind.as_str());
                 let note = entry
                     .classification
                     .as_ref()
-                    .map(|value| value.note.as_str())
-                    .unwrap_or("needs_manual_review");
+                    .map_or("needs_manual_review", |value| value.note.as_str());
                 println!(
                     "{:<44} {:>10} {:<8} {}",
                     entry.address, entry.seen_count, kind, note

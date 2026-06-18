@@ -98,8 +98,6 @@ fn active_migration_targets_are_not_duplicated() {
     let duplicates = duplicate_targets_for_dir(MIGRATIONS_DIR);
     assert!(
         duplicates.is_empty(),
-        "Unexpected duplicate migration DDL targets in {}: {:?}",
-        MIGRATIONS_DIR,
-        duplicates
+        "Unexpected duplicate migration DDL targets in {MIGRATIONS_DIR}: {duplicates:?}"
     );
 }
