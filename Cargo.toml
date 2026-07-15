@@ -20,7 +20,7 @@ serde_json = "1.0.149"
 
 config = "0.15.23"
 dotenvy = "0.15.7"
-
+quinn_proto = ">=0.11.15" 
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "fmt", "registry", "parking_lot"] }
 
