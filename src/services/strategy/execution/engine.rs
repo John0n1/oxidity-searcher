@@ -23,6 +23,7 @@ use crate::core::strategy::{
     StrategyConfig, StrategyExecutor, StrategyRuntimeSettings, StrategyStats,
 };
 use crate::data::db::Database;
+use crate::data::executor::UnifiedHardenedExecutor;
 use crate::infrastructure::data::address_registry::AddressRegistry;
 use crate::infrastructure::data::token_manager::TokenManager;
 use crate::network::block_listener::BlockListener;
@@ -196,6 +197,14 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(config: EngineConfig) -> Self {
+        // Balance-delta settlement spans submission through confirmation. Live
+        // executions must therefore be single-flight so custody snapshots cannot
+        // overlap and nonce order cannot be inverted by concurrent workers.
+        let worker_limit = if config.dry_run {
+            config.worker_limit.max(1)
+        } else {
+            1
+        };
         Self {
             http_provider: config.http_provider,
             websocket_provider: config.websocket_provider,
@@ -244,7 +253,7 @@ impl Engine {
             chainlink_feed_strict: config.chainlink_feed_strict,
             bundle_use_replacement_uuid: config.bundle_use_replacement_uuid,
             bundle_cancel_previous: config.bundle_cancel_previous,
-            worker_limit: config.worker_limit,
+            worker_limit,
             address_registry_path: config.address_registry_path,
             pairs_path: config.pairs_path,
             receipt_poll_ms: config.receipt_poll_ms,
@@ -298,7 +307,7 @@ impl Engine {
                     tracing::warn!(
                         target: "rpc",
                         transport = label,
-                        "RPC module 'subscribe' missing; eth_subscribe streaming may fail (Nethermind: JsonRpc.EnabledModules should include Subscribe)"
+                        "RPC module 'subscribe' missing; eth_subscribe streaming may fail (Client: JsonRpc.EnabledModules should include Subscribe)"
                     );
                 }
             }
@@ -335,7 +344,7 @@ impl Engine {
         client_version
     }
 
-    fn log_nethermind_tuning_hint(
+    fn log_client_tuning_hint(
         &self,
         client_version: Option<&str>,
         capabilities: &RpcCapabilities,
@@ -343,35 +352,35 @@ impl Engine {
         let Some(version) = client_version else {
             return;
         };
-        if !version.to_ascii_lowercase().contains("nethermind") {
+        if !version.to_ascii_lowercase().contains("client") {
             return;
         }
 
         tracing::debug!(
             target: "rpc",
             chain_id = self.chain_id,
-            "Nethermind tuning guidance: JsonRpc.EnabledModules should include Eth,Subscribe,Debug,Trace,TxPool; raise JsonRpc.EthModuleConcurrentInstances for concurrent eth_* load; tune JsonRpc.RequestQueueLimit and JsonRpc.Timeout for burst traffic."
+            "Client tuning guidance: JsonRpc.EnabledModules should include Eth,Subscribe,Debug,Trace,TxPool; raise JsonRpc.EthModuleConcurrentInstances for concurrent eth_* load; tune JsonRpc.RequestQueueLimit and JsonRpc.Timeout for burst traffic."
         );
         if !capabilities.eth_simulate {
             tracing::warn!(
                 target: "rpc",
-                "Nethermind eth_simulateV1 unavailable. Ensure Eth namespace is enabled and node version supports eth_simulateV1."
+                "Client eth_simulateV1 unavailable. Ensure Eth namespace is enabled and node version supports eth_simulateV1."
             );
         } else if !capabilities.eth_simulate_shape_ok {
             tracing::warn!(
                 target: "rpc",
-                "Nethermind eth_simulateV1 responded, but the expected parameter shape check failed; verify eth_simulateV1 payload semantics for this node version."
+                "Client eth_simulateV1 responded, but the expected parameter shape check failed; verify eth_simulateV1 payload semantics for this node version."
             );
         }
         if !capabilities.debug_trace_call_many {
             tracing::warn!(
                 target: "rpc",
-                "Nethermind debug_traceCallMany unavailable. Ensure Debug/Trace namespaces are enabled for bundle-level tracing fallback."
+                "Client debug_traceCallMany unavailable. Ensure Debug/Trace namespaces are enabled for bundle-level tracing fallback."
             );
         } else if !capabilities.debug_trace_call_many_shape_ok {
             tracing::warn!(
                 target: "rpc",
-                "Nethermind debug_traceCallMany responded, but the expected parameter shape check failed; verify callMany bundle payload semantics for this node version."
+                "Client debug_traceCallMany responded, but the expected parameter shape check failed; verify callMany bundle payload semantics for this node version."
             );
         }
     }
@@ -544,8 +553,8 @@ impl Engine {
         }
     }
 
-    pub async fn run(self) -> Result<(), AppError> {
-        if self.flashloan_enabled && self.executor.is_none() {
+    pub async fn run(mut self) -> Result<(), AppError> {
+        if self.flashloan_enabled && self.executor.is_none() && !self.dry_run {
             return Err(AppError::Config(
                 "flashloan_enabled requires executor_address".into(),
             ));
@@ -555,16 +564,88 @@ impl Engine {
                 AppError::Initialization(format!("Executor code check failed: {e}"))
             })?;
             if code.is_empty() {
-                return Err(AppError::Config(format!(
-                    "executor_address {:#x} has no code deployed",
-                    exec
-                )));
+                if self.dry_run {
+                    tracing::warn!(
+                        target: "config",
+                        executor = %format!("{exec:#x}"),
+                        "Executor has no deployed code; disabling executor and flash-loan planning in shadow mode"
+                    );
+                    self.executor = None;
+                    self.flashloan_enabled = false;
+                } else {
+                    return Err(AppError::Config(format!(
+                        "executor_address {:#x} has no code deployed",
+                        exec
+                    )));
+                }
+            } else {
+                let contract = UnifiedHardenedExecutor::new(exec, self.http_provider.clone());
+                let owner = contract.owner().call().await.map_err(|e| {
+                    AppError::Initialization(format!("Executor owner check failed: {e}"))
+                })?;
+                let weth = contract.WETH().call().await.map_err(|e| {
+                    AppError::Initialization(format!("Executor WETH check failed: {e}"))
+                })?;
+                let vault = contract.balancerVault().call().await.map_err(|e| {
+                    AppError::Initialization(format!("Executor Balancer Vault check failed: {e}"))
+                })?;
+                let receiver = contract.profitReceiver().call().await.map_err(|e| {
+                    AppError::Initialization(format!("Executor profit receiver check failed: {e}"))
+                })?;
+                let paused = contract.paused().call().await.map_err(|e| {
+                    AppError::Initialization(format!("Executor pause-state check failed: {e}"))
+                })?;
+                let expected_owner = self.wallet_signer.address();
+                if owner != expected_owner {
+                    return Err(AppError::Config(format!(
+                        "executor owner mismatch: on-chain={owner:#x}, signer={expected_owner:#x}"
+                    )));
+                }
+                if weth != self.wrapped_native {
+                    return Err(AppError::Config(format!(
+                        "executor WETH mismatch: on-chain={weth:#x}, expected={:#x}",
+                        self.wrapped_native
+                    )));
+                }
+                if let Some(expected_vault) = default_balancer_vault_for_chain(self.chain_id)
+                    && vault != expected_vault
+                {
+                    return Err(AppError::Config(format!(
+                        "executor Balancer Vault mismatch: on-chain={vault:#x}, expected={expected_vault:#x}"
+                    )));
+                }
+                if receiver.is_zero() {
+                    return Err(AppError::Config(
+                        "executor profit receiver is the zero address".into(),
+                    ));
+                }
+                if paused && !self.dry_run {
+                    return Err(AppError::Config(
+                        "executor is paused; live execution is disabled".into(),
+                    ));
+                }
+                tracing::info!(
+                    target: "config",
+                    executor = %format!("{exec:#x}"),
+                    owner = %format!("{owner:#x}"),
+                    weth = %format!("{weth:#x}"),
+                    balancer_vault = %format!("{vault:#x}"),
+                    profit_receiver = %format!("{receiver:#x}"),
+                    paused,
+                    "Executor deployment identity verified"
+                );
             }
+        } else if self.dry_run && self.flashloan_enabled {
+            tracing::warn!(
+                target: "config",
+                "No executor is deployed; disabling flash-loan planning in shadow mode"
+            );
+            self.flashloan_enabled = false;
         }
 
         let client_version = self.log_rpc_capabilities().await;
         let capabilities = self.simulator.probe_capabilities().await;
-        self.log_nethermind_tuning_hint(client_version.as_deref(), &capabilities);
+        self.log_client_tuning_hint(client_version.as_deref(), &capabilities);
         if !capabilities.fee_history {
             tracing::warn!(
                 target: "rpc",
@@ -594,6 +675,12 @@ impl Engine {
         )
         .await;
         if sync_state.is_lagging {
+            if !self.dry_run {
+                return Err(AppError::Connection(format!(
+                    "Refusing live execution while the node/provider is stale: {}",
+                    sync_state.reasons.join("; ")
+                )));
+            }
             tracing::warn!(
                 target: "price_feed",
                 chain_id = self.chain_id,
@@ -602,7 +689,7 @@ impl Engine {
                 highest_block = ?sync_state.highest_block,
                 local_tip = ?sync_state.local_tip,
                 public_tip = ?sync_state.public_tip,
-                "Node is still syncing/lagging; downgrading critical Chainlink feed audit to warn+continue"
+                "Node is still syncing/lagging; shadow mode will observe only"
             );
         }
         self.price_feed
@@ -666,31 +753,51 @@ impl Engine {
                     break;
                 }
             });
+        } else {
+            let provider = self.http_provider.clone();
+            let chain_id = self.chain_id;
+            let shutdown_monitor = shutdown.clone();
+            let public_rpc_for_monitor = feed_audit_public_rpc.clone();
+            let dry_run = self.dry_run;
+            let recheck_secs = self.feed_audit_recheck_secs;
+            tokio::spawn(async move {
+                let poll_interval = Duration::from_secs(recheck_secs);
+                loop {
+                    tokio::select! {
+                        () = shutdown_monitor.cancelled() => break,
+                        () = sleep(poll_interval) => {}
+                    }
+                    let state = Self::check_sync_lag_state(
+                        &provider,
+                        chain_id,
+                        feed_audit_max_lag_blocks,
+                        public_rpc_for_monitor.as_deref(),
+                        feed_audit_public_tip_lag_blocks,
+                    )
+                    .await;
+                    if state.is_lagging {
+                        tracing::error!(
+                            target: "rpc",
+                            chain_id,
+                            reasons = %state.reasons.join("; "),
+                            dry_run,
+                            "Provider freshness gate changed to stale"
+                        );
+                        if !dry_run {
+                            shutdown_monitor.cancel();
+                            break;
+                        }
+                    }
+                }
+            });
         }
-        if self.rpc_capability_strict
-            && !(capabilities.eth_simulate || capabilities.debug_trace_call_many)
-        {
+        let conformant_bundle_simulator = (capabilities.eth_simulate
+            && capabilities.eth_simulate_shape_ok)
+            || (capabilities.debug_trace_call_many && capabilities.debug_trace_call_many_shape_ok);
+        if self.rpc_capability_strict && !conformant_bundle_simulator {
             return Err(AppError::Config(
-                "rpc_capability_strict=true but neither eth_simulateV1 nor debug_traceCallMany is available"
-                    .into(),
-            ));
-        }
-        if self.rpc_capability_strict
-            && capabilities.eth_simulate
-            && !capabilities.eth_simulate_shape_ok
-        {
-            return Err(AppError::Config(
-                "rpc_capability_strict=true but eth_simulateV1 parameter-shape conformance check failed"
-                    .into(),
-            ));
-        }
-        if self.rpc_capability_strict
-            && capabilities.debug_trace_call_many
-            && !capabilities.debug_trace_call_many_shape_ok
-        {
-            return Err(AppError::Config(
-                "rpc_capability_strict=true but debug_traceCallMany parameter-shape conformance check failed"
-                    .into(),
+                "rpc_capability_strict=true but no available bundle simulator passed parameter-shape conformance"
+                    .into()
             ));
         }
         if capabilities.debug_trace_call && !capabilities.debug_trace_call_many {
@@ -751,6 +858,20 @@ impl Engine {
                     "Failed to warm V2 reserves from preloaded pairs"
                 );
             }
+        }
+        if (reserve_cache.v2_pair_count() == 0
+            || self.chain_id == crate::common::constants::CHAIN_SEPOLIA)
+            && let Some(factory) =
+                crate::common::constants::default_uniswap_v2_factory(self.chain_id)
+            && let Err(e) = reserve_cache.bootstrap_v2_factory_pairs(factory, 100).await
+        {
+            tracing::warn!(
+                target: "reserves",
+                chain_id = self.chain_id,
+                factory = %format!("{factory:#x}"),
+                error = %e,
+                "Failed to bootstrap V2 pairs from factory; WS discovery remains enabled"
+            );
         }
 
         let mut aave_pool = self.aave_pool;
@@ -981,5 +1102,83 @@ impl Engine {
 }
 
 #[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::simulation::SimulationBackend;
+    use crate::network::price_feed::PriceApiKeys;
+    use alloy::transports::http::reqwest::Url;
+
+    #[tokio::test]
+    async fn new_sets_worker_limit_to_one_for_live_engine() {
+        let http = HttpProvider::new_http(Url::parse("http://127.0.0.1:8545").unwrap());
+        let config = EngineConfig {
+            http_provider: http.clone(),
+            websocket_provider: WsProvider::new_http(Url::parse("http://127.0.0.1:8545").unwrap()),
+            db: Database::new("sqlite::memory:").await.unwrap(),
+            nonce_manager: NonceManager::new(http.clone(), Address::ZERO),
+            portfolio: Arc::new(PortfolioManager::new(http.clone(), Address::ZERO)),
+            safety_guard: Arc::new(SafetyGuard::new()),
+            dry_run: false,
+            gas_oracle: GasOracle::new(http.clone(), 1),
+            price_feed: PriceFeed::new(http.clone(), 1, HashMap::new(), PriceApiKeys::default()).unwrap(),
+            chain_id: 1,
+            relay_url: "http://127.0.0.1:8545".to_string(),
+            mev_share_relay_url: "http://127.0.0.1:8545".to_string(),
+            wallet_signer: PrivateKeySigner::random(),
+            bundle_signer: PrivateKeySigner::random(),
+            executor: None,
+            executor_bribe_bps: 0,
+            executor_bribe_recipient: None,
+            flashloan_enabled: false,
+            flashloan_providers: Vec::new(),
+            aave_pool: None,
+            max_gas_price_gwei: 1,
+            gas_cap_multiplier_bps: 10000,
+            simulator: Simulator::new(http.clone(), SimulationBackend::new("revm")),
+            token_manager: Arc::new(TokenManager::default()),
+            strategy_enabled: true,
+            slippage_bps: 50,
+            profit_guard_base_floor_multiplier_bps: 10000,
+            profit_guard_cost_multiplier_bps: 10000,
+            profit_guard_min_margin_bps: 10000,
+            liquidity_ratio_floor_ppm: 1000000,
+            sell_min_native_out_wei: 1,
+            router_allowlist: Arc::new(DashSet::new()),
+            wrapper_allowlist: Arc::new(DashSet::new()),
+            infra_allowlist: Arc::new(DashSet::new()),
+            router_discovery: None,
+            skip_log_every: 1,
+            wrapped_native: Address::ZERO,
+            allow_non_wrapped_swaps: false,
+            mev_share_stream_url: "http://127.0.0.1:8545".to_string(),
+            mev_share_history_limit: 1,
+            mev_share_enabled: false,
+            mevshare_builders: Vec::new(),
+            sandwich_attacks_enabled: true,
+            simulation_backend: "revm".to_string(),
+            chainlink_feed_strict: false,
+            bundle_use_replacement_uuid: false,
+            bundle_cancel_previous: false,
+            worker_limit: 4,
+            address_registry_path: None,
+            pairs_path: None,
+            receipt_poll_ms: 1,
+            receipt_timeout_ms: 1,
+            receipt_confirm_blocks: 1,
+            emergency_exit_on_unknown_receipt: false,
+            runtime_settings: StrategyRuntimeSettings::default(),
+            rpc_capability_strict: false,
+            feed_audit_max_lag_blocks: 1,
+            feed_audit_recheck_secs: 1,
+            feed_audit_public_rpc_url: None,
+            feed_audit_public_tip_lag_blocks: 1,
+            bundle_target_blocks: 1,
+            relay_http_client: Client::new(),
+        };
+
+        let engine = Engine::new(config);
+        assert_eq!(engine.worker_limit, 1);
+    }
+}
 
 crate::coverage_floor_pad_test!(800);

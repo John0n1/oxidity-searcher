@@ -6,6 +6,13 @@ use alloy::sol;
 sol! {
     #[sol(rpc)]
     interface UnifiedHardenedExecutor {
+        function owner() external view returns (address);
+        function pendingOwner() external view returns (address);
+        function WETH() external view returns (address);
+        function balancerVault() external view returns (address);
+        function profitReceiver() external view returns (address);
+        function paused() external view returns (bool);
+
         function executeBundle(
             address[] calldata targets,
             bytes[] calldata payloads,
@@ -25,6 +32,12 @@ sol! {
         function safeApprove(address token, address spender, uint256 amount) external;
         function setProfitReceiver(address newReceiver) external;
         function setSweepPreference(bool sweepToEth) external;
+        function setPaused(bool newPaused) external;
+        function transferOwnership(address newOwner) external;
+        function cancelOwnershipTransfer() external;
+        function acceptOwnership() external;
+        function sweepToken(address token) external;
+        function sweepETH() external;
 
         // Aave v3 simple flashloan entry
         function executeAaveFlashLoanSimple(
@@ -63,6 +76,10 @@ sol! {
         ) external;
 
         error OnlyOwner();
+        error OnlyPendingOwner();
+        error ContractPaused();
+        error ReentrantExecution();
+        error PartialExecutionDisabled();
         error OnlyVault();
         error LengthMismatch();
         error ZeroAssets();

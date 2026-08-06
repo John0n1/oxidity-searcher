@@ -14,7 +14,7 @@ pub mod risk;
 pub use risk::{guards, safety, time_utils};
 
 pub mod state;
-pub use state::{inventory, portfolio};
+pub use state::{inventory, portfolio, settlement};
 
 pub mod router_discovery;
 pub mod routers;

@@ -159,6 +159,41 @@ impl PortfolioManager {
             .or_insert(gas_wei);
     }
 
+    /// Apply a receipt- and balance-delta-derived result. This is the only method that should
+    /// feed production P&L; quote/simulation estimates must remain outside the realized ledger.
+    pub fn record_realized_settlement(
+        &self,
+        chain_id: u64,
+        realized_net_wei: I256,
+        actual_gas_wei: U256,
+    ) {
+        self.net_pnl_wei
+            .entry(chain_id)
+            .and_modify(|value| *value = value.saturating_add(realized_net_wei))
+            .or_insert(realized_net_wei);
+        self.total_gas_spent_wei
+            .entry(chain_id)
+            .and_modify(|value| *value = value.saturating_add(actual_gas_wei))
+            .or_insert(actual_gas_wei);
+    }
+
+    /// Reverse a finalized settlement after its inclusion block leaves the canonical chain.
+    pub fn reverse_realized_settlement(
+        &self,
+        chain_id: u64,
+        realized_net_wei: I256,
+        actual_gas_wei: U256,
+    ) {
+        self.net_pnl_wei
+            .entry(chain_id)
+            .and_modify(|value| *value = value.saturating_sub(realized_net_wei))
+            .or_insert(realized_net_wei.saturating_neg());
+        self.total_gas_spent_wei
+            .entry(chain_id)
+            .and_modify(|value| *value = value.saturating_sub(actual_gas_wei))
+            .or_insert(U256::ZERO);
+    }
+
     pub fn record_token_profit(
         &self,
         chain_id: u64,
@@ -337,5 +372,17 @@ mod tests {
         let (_chain, _token, units, decimals) = rows[0];
         assert_eq!(decimals, 6);
         assert!((units - 2.5).abs() < 1e-12);
+    }
+
+    #[tokio::test]
+    async fn realized_settlement_preserves_signed_loss_and_actual_gas() {
+        let dummy_provider = HttpProvider::new_http(Url::parse("http://localhost:8545").unwrap());
+        let pm = PortfolioManager::new(dummy_provider, Address::ZERO);
+        pm.record_realized_settlement(1, I256::try_from(-25).unwrap(), U256::from(7u64));
+        assert_eq!(pm.get_net_profit_i256(1), I256::try_from(-25).unwrap());
+        assert_eq!(
+            pm.total_gas_spent_wei.get(&1).map(|value| *value),
+            Some(U256::from(7u64))
+        );
     }
 }

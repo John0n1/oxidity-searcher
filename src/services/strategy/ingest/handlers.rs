@@ -30,23 +30,28 @@ use crate::app::logging::ansi_tables_enabled;
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
 use crate::core::executor::BundleItem;
+use crate::data::db::{
+    ExecutionAttemptRecord, ExecutionEstimateRecord, SettlementDeltaRecord, SettlementRecord,
+};
 use crate::data::executor::UnifiedHardenedExecutor;
 use crate::network::gas::GasFees;
 use crate::network::mev_share::MevShareHint;
 use crate::network::price_feed::PriceQuote;
 use crate::services::strategy::bundles::BundlePlan;
 use crate::services::strategy::decode::{
-    ObservedSwap, RouterKind, SwapDirection, decode_swap_input, direction, extract_swap_deadline,
-    target_token,
+    ObservedSwap, RouterKind, SwapDirection, decode_swap_input_for_chain, direction,
+    extract_swap_deadline, target_token,
 };
 use crate::services::strategy::planning::bundles::NonceLease;
 use crate::services::strategy::planning::{
     ApproveTx, BackrunTx, ExecutionPlanner, FrontRunTx, PlanType, PlannerInput,
 };
 use crate::services::strategy::routers::registry_v2_router_addresses;
+use crate::services::strategy::settlement::{SettlementSnapshot, u256_to_i256_saturating};
 use crate::services::strategy::strategy::PerBlockInputs;
 use crate::services::strategy::strategy::{
-    AllowlistCategory, ReceiptStatus, SkipReason, StrategyExecutor, StrategyWork,
+    AllowlistCategory, ReceiptObservation, ReceiptStatus, SkipReason, StrategyExecutor,
+    StrategyWork,
 };
 use alloy::consensus::Transaction as ConsensusTx;
 use alloy::eips::eip2718::Encodable2718;
@@ -65,7 +70,7 @@ enum SwapDecodeOutcome {
 }
 
 impl StrategyExecutor {
-    fn deadline_min_seconds_ahead(&self) -> u64 {
+    pub(in crate::services::strategy) fn deadline_min_seconds_ahead(&self) -> u64 {
         self.runtime.deadline_min_seconds_ahead
     }
 
@@ -127,7 +132,8 @@ impl StrategyExecutor {
                     return SwapDecodeOutcome::Skip;
                 }
                 if self.allow_unknown_router_decode() {
-                    let decoded = decode_swap_input(router, input, tx_value);
+                    let decoded =
+                        decode_swap_input_for_chain(self.chain_id, router, input, tx_value);
                     self.stats
                         .record_decode_attempt(AllowlistCategory::Routers, decoded.is_some());
                     decode_recorded = true;
@@ -159,8 +165,8 @@ impl StrategyExecutor {
             }
         }
 
-        let observed_swap =
-            predecoded_unknown_router.or_else(|| decode_swap_input(router, input, tx_value));
+        let observed_swap = predecoded_unknown_router
+            .or_else(|| decode_swap_input_for_chain(self.chain_id, router, input, tx_value));
         if !decode_recorded {
             self.stats
                 .record_decode_attempt(AllowlistCategory::Routers, observed_swap.is_some());
@@ -175,23 +181,38 @@ impl StrategyExecutor {
         }
     }
 
-    async fn persist_profit_and_market_data(
+    async fn persist_execution_estimate(
         &self,
-        strategy_tx_hash: &str,
+        estimate_id: &str,
+        opportunity_id: Option<&str>,
+        planned_tx_hash: Option<&str>,
         strategy_label: &str,
+        settlement_token: Address,
         profit: &ProfitOutcome,
     ) -> Result<(), AppError> {
-        self.save_strategy_profit_record(strategy_tx_hash, strategy_label, profit)
+        let settlement_token = format!("{settlement_token:#x}");
+        let estimated_gross_wei = profit.gross_profit_wei.to_string();
+        let estimated_gas_wei = profit.gas_cost_wei.to_string();
+        let estimated_bribe_wei = profit.bribe_wei.to_string();
+        let estimated_flashloan_premium_wei = profit.flashloan_premium_wei.to_string();
+        let estimated_net_wei = profit.net_profit_wei.to_string();
+        self.db
+            .save_execution_estimate(&ExecutionEstimateRecord {
+                estimate_id,
+                chain_id: self.chain_id,
+                strategy: strategy_label,
+                opportunity_id,
+                planned_tx_hash,
+                settlement_token: &settlement_token,
+                estimated_gross_wei: &estimated_gross_wei,
+                estimated_gas_wei: &estimated_gas_wei,
+                estimated_bribe_wei: &estimated_bribe_wei,
+                estimated_flashloan_premium_wei: &estimated_flashloan_premium_wei,
+                estimated_net_wei: &estimated_net_wei,
+                simulation_block_number: Some(self.current_head_or(0)).filter(|value| *value > 0),
+                simulation_block_hash: None,
+            })
             .await?;
-
-        self.portfolio.record_trade_components(
-            self.chain_id,
-            profit.gross_profit_wei,
-            profit.gas_cost_wei,
-            profit.bribe_wei,
-            profit.flashloan_premium_wei,
-            profit.net_profit_wei,
-        );
 
         let price_symbol = format!(
             "{}USD",
@@ -209,29 +230,204 @@ impl StrategyExecutor {
         Ok(())
     }
 
-    async fn save_strategy_profit_record(
+    async fn settlement_accounts(&self) -> Vec<Address> {
+        let mut accounts = vec![self.signer.address()];
+        if let Some(executor) = self.executor {
+            accounts.push(executor);
+            let contract = UnifiedHardenedExecutor::new(executor, self.http_provider.clone());
+            match contract.profitReceiver().call().await {
+                Ok(receiver) => accounts.push(receiver),
+                Err(error) => tracing::warn!(
+                    target: "settlement",
+                    executor = %format!("{executor:#x}"),
+                    error = %error,
+                    "Could not read executor profit receiver for settlement snapshot"
+                ),
+            }
+        }
+        accounts.sort_unstable();
+        accounts.dedup();
+        accounts
+    }
+
+    async fn capture_settlement_snapshot(&self) -> Result<SettlementSnapshot, AppError> {
+        SettlementSnapshot::capture(
+            &self.http_provider,
+            self.wrapped_native,
+            self.settlement_accounts().await,
+        )
+        .await
+    }
+
+    async fn save_execution_attempt(
         &self,
-        strategy_tx_hash: &str,
+        tx_hash: &str,
+        estimate_id: &str,
         strategy_label: &str,
-        profit: &ProfitOutcome,
+        submission_mode: &str,
+        status: &str,
+        nonce: Option<u64>,
     ) -> Result<(), AppError> {
         self.db
-            .save_profit_record(
-                strategy_tx_hash,
-                self.chain_id,
-                strategy_label,
-                profit.profit_eth_f64,
-                profit.gas_cost_eth_f64,
-                profit.net_profit_eth_f64,
-                &profit.gross_profit_wei.to_string(),
-                &profit.gas_cost_wei.to_string(),
-                &profit.net_profit_wei.to_string(),
-                &profit.bribe_wei.to_string(),
-                &profit.flashloan_premium_wei.to_string(),
-                &profit.effective_cost_wei.to_string(),
-            )
+            .save_execution_attempt(&ExecutionAttemptRecord {
+                tx_hash,
+                estimate_id: Some(estimate_id),
+                chain_id: self.chain_id,
+                strategy: strategy_label,
+                submission_mode,
+                status,
+                nonce,
+                target_block: Some(self.current_head_or(0).saturating_add(1)),
+            })
             .await?;
         Ok(())
+    }
+
+    async fn reconcile_receipt(
+        &self,
+        submitted_hash: B256,
+        estimate_id: &str,
+        strategy_label: &str,
+        before: &SettlementSnapshot,
+        reverted_message: &str,
+        timeout_message: &str,
+    ) -> Result<ReceiptObservation, AppError> {
+        let observation = self
+            .await_and_log_submitted_receipt(submitted_hash, reverted_message, timeout_message)
+            .await?;
+        let tx_hash = format!("{submitted_hash:#x}");
+        let block_hash = observation.block_hash.map(|hash| format!("{hash:#x}"));
+        let gas_used = observation.gas_used.map(|value| value.to_string());
+        let effective_gas_price = observation
+            .effective_gas_price
+            .map(|value| value.to_string());
+        let actual_gas_cost = match (observation.gas_used, observation.effective_gas_price) {
+            (Some(gas), Some(price)) => Some(U256::from(gas).saturating_mul(U256::from(price))),
+            _ => None,
+        };
+        let actual_gas_cost_string = actual_gas_cost.map(|value| value.to_string());
+        let (status, error) = match observation.status {
+            ReceiptStatus::ConfirmedSuccess => ("included", None),
+            ReceiptStatus::ConfirmedRevert => ("reverted", Some(reverted_message)),
+            ReceiptStatus::UnknownTimeout => ("dropped", Some(timeout_message)),
+        };
+        self.db
+            .update_execution_attempt_outcome(
+                &tx_hash,
+                status,
+                observation.block_number,
+                block_hash.as_deref(),
+                gas_used.as_deref(),
+                effective_gas_price.as_deref(),
+                actual_gas_cost_string.as_deref(),
+                error,
+            )
+            .await?;
+
+        if observation.status == ReceiptStatus::UnknownTimeout {
+            self.safety_guard.report_failure();
+            return Ok(observation);
+        }
+
+        let after = self.capture_settlement_snapshot().await?;
+        let delta = before.delta(&after)?;
+        let gas_cost = actual_gas_cost.unwrap_or(U256::ZERO);
+        let realized_gross = delta
+            .net_native_and_wrapped
+            .saturating_add(u256_to_i256_saturating(gas_cost));
+        let block_number = observation
+            .block_number
+            .ok_or_else(|| AppError::Strategy("Included receipt is missing block_number".into()))?;
+        let block_hash = block_hash
+            .ok_or_else(|| AppError::Strategy("Included receipt is missing block_hash".into()))?;
+        let realized_gross_string = realized_gross.to_string();
+        let realized_net_string = delta.net_native_and_wrapped.to_string();
+        let actual_gas_string = gas_cost.to_string();
+        let settlement_token = format!("{:#x}", self.wrapped_native);
+        let mut account_labels = Vec::with_capacity(delta.accounts.len());
+        let mut before_native = Vec::with_capacity(delta.accounts.len());
+        let mut after_native = Vec::with_capacity(delta.accounts.len());
+        let mut delta_native = Vec::with_capacity(delta.accounts.len());
+        let mut before_wrapped = Vec::with_capacity(delta.accounts.len());
+        let mut after_wrapped = Vec::with_capacity(delta.accounts.len());
+        let mut delta_wrapped = Vec::with_capacity(delta.accounts.len());
+        for account in &delta.accounts {
+            account_labels.push(format!("{:#x}", account.account));
+            before_native.push(account.native_before.to_string());
+            after_native.push(account.native_after.to_string());
+            delta_native.push(account.native_delta.to_string());
+            before_wrapped.push(account.wrapped_before.to_string());
+            after_wrapped.push(account.wrapped_after.to_string());
+            delta_wrapped.push(account.wrapped_delta.to_string());
+        }
+        let native_asset = format!("{:#x}", Address::ZERO);
+        let mut delta_rows = Vec::with_capacity(delta.accounts.len() * 2);
+        for index in 0..delta.accounts.len() {
+            delta_rows.push(SettlementDeltaRecord {
+                tx_hash: &tx_hash,
+                account: &account_labels[index],
+                asset: &native_asset,
+                decimals: 18,
+                balance_before: &before_native[index],
+                balance_after: &after_native[index],
+                delta_raw: &delta_native[index],
+                liquid: true,
+            });
+            delta_rows.push(SettlementDeltaRecord {
+                tx_hash: &tx_hash,
+                account: &account_labels[index],
+                asset: &settlement_token,
+                decimals: 18,
+                balance_before: &before_wrapped[index],
+                balance_after: &after_wrapped[index],
+                delta_raw: &delta_wrapped[index],
+                liquid: true,
+            });
+        }
+        self.db
+            .save_settlement(
+                &SettlementRecord {
+                    tx_hash: &tx_hash,
+                    chain_id: self.chain_id,
+                    strategy: strategy_label,
+                    settlement_token: &settlement_token,
+                    realized_gross_delta_wei: &realized_gross_string,
+                    actual_gas_cost_wei: &actual_gas_string,
+                    realized_net_delta_wei: &realized_net_string,
+                    block_number,
+                    block_hash: &block_hash,
+                    confirmations: self.receipt_confirm_blocks.max(1),
+                    finalized: true,
+                    liquid: true,
+                    reusable: observation.status == ReceiptStatus::ConfirmedSuccess,
+                },
+                &delta_rows,
+            )
+            .await?;
+        self.portfolio.record_realized_settlement(
+            self.chain_id,
+            delta.net_native_and_wrapped,
+            gas_cost,
+        );
+        self.safety_guard
+            .report_settlement(gas_cost, delta.net_native_and_wrapped);
+        if observation.status == ReceiptStatus::ConfirmedSuccess
+            && delta.net_native_and_wrapped > I256::ZERO
+        {
+            self.safety_guard.report_success();
+        } else {
+            self.safety_guard.report_failure();
+        }
+        tracing::info!(
+            target: "settlement",
+            estimate_id,
+            tx_hash,
+            status,
+            realized_net_wei = %delta.net_native_and_wrapped,
+            actual_gas_cost_wei = %gas_cost,
+            "Execution reconciled from canonical receipt and custody balance deltas"
+        );
+        Ok(observation)
     }
 
     fn tx_kind_call_address(kind: Option<&TxKind>) -> Option<Address> {
@@ -246,9 +442,9 @@ impl StrategyExecutor {
         submitted_hash: B256,
         reverted_message: &str,
         timeout_message: &str,
-    ) -> Result<ReceiptStatus, AppError> {
-        let status = self.await_receipt(&submitted_hash).await?;
-        match status {
+    ) -> Result<ReceiptObservation, AppError> {
+        let observation = self.await_receipt_observation(&submitted_hash).await?;
+        match observation.status {
             ReceiptStatus::ConfirmedSuccess => {}
             ReceiptStatus::ConfirmedRevert => {
                 tracing::warn!(
@@ -275,7 +471,7 @@ impl StrategyExecutor {
                 }
             }
         }
-        Ok(status)
+        Ok(observation)
     }
 
     async fn save_strategy_transaction_record(
@@ -413,13 +609,38 @@ impl StrategyExecutor {
         }
 
         for token in candidates.into_iter().take(max_attempts) {
+            let dynamic_amount_in = if let Some(res) = self.reserve_cache.reserves_for_pair(self.wrapped_native, token) {
+                let native_reserve = if res.token0 == self.wrapped_native { res.reserve0 } else { res.reserve1 };
+                let max_bps = U256::from(self.max_price_impact_bps());
+                let max_allowed = if max_bps < U256::from(10_000u64) {
+                    max_bps.saturating_mul(native_reserve) / (U256::from(10_000u64) - max_bps)
+                } else {
+                    native_reserve / U256::from(20u64)
+                };
+                let pool_chunk = native_reserve / U256::from(20u64);
+                let target = pool_chunk.min(max_allowed);
+                if target.is_zero() {
+                    seed_floor.max(U256::from(1u64))
+                } else {
+                    target.max(seed_floor)
+                }
+            } else {
+                seed_floor.max(U256::from(1u64))
+            };
+
+            let min_out = if let Some(quoted_out) = self.reserve_cache.quote_v2_path(&[self.wrapped_native, token], dynamic_amount_in) {
+                quoted_out.saturating_mul(U256::from(9950u64)) / U256::from(10000u64)
+            } else {
+                U256::from(1u64)
+            };
+
             let observed = ObservedSwap {
                 router,
                 path: vec![self.wrapped_native, token],
                 v3_fees: Vec::new(),
                 v3_path: None,
-                amount_in: seed_floor.max(U256::from(1u64)),
-                min_out: U256::from(1u64),
+                amount_in: dynamic_amount_in,
+                min_out,
                 recipient: self.signer.address(),
                 router_kind: RouterKind::V2Like,
             };
@@ -480,6 +701,59 @@ impl StrategyExecutor {
                 continue;
             };
 
+            if backrun.expected_out_token != self.wrapped_native {
+                self.log_skip(
+                    SkipReason::ProfitOrGasGuard,
+                    "live settlement currently requires native/WETH output",
+                );
+                continue;
+            }
+
+            let strategy_label = if liquidation_signal {
+                "strategy_liquidation"
+            } else {
+                "strategy_atomic_arb"
+            };
+            let opportunity_id = format!("{:#x}", tx.tx_hash());
+            let estimate_id = format!(
+                "{}:{}:{}:{:#x}",
+                self.chain_id, strategy_label, opportunity_id, token
+            );
+            let planned_hash = format!("{:#x}", backrun.hash);
+            self.persist_execution_estimate(
+                &estimate_id,
+                Some(&opportunity_id),
+                Some(&planned_hash),
+                strategy_label,
+                backrun.expected_out_token,
+                &profit,
+            )
+            .await?;
+
+            if self.dry_run {
+                let shadow_hash = format!("shadow:{estimate_id}");
+                self.save_execution_attempt(
+                    &shadow_hash,
+                    &estimate_id,
+                    strategy_label,
+                    "shadow",
+                    "shadow",
+                    main_request.nonce,
+                )
+                .await?;
+                tracing::info!(
+                    target: "strategy_dry_run",
+                    strategy = strategy_label,
+                    estimate_id,
+                    token = %format!("{token:#x}"),
+                    estimated_net_profit_wei = %profit.net_profit_wei,
+                    "Shadow opportunity recorded; no bundle submitted"
+                );
+                return Ok(Some(shadow_hash));
+            }
+
+            let settlement_before = self.capture_settlement_snapshot().await?;
+
             let plan = BundlePlan {
                 front_run: None,
                 approvals: approvals.iter().map(|a| a.request.clone()).collect(),
@@ -495,11 +769,6 @@ impl StrategyExecutor {
             };
             let submitted_hash = plan_hashes.main;
 
-            let strategy_label = if liquidation_signal {
-                "strategy_liquidation"
-            } else {
-                "strategy_atomic_arb"
-            };
             self.save_strategy_transaction_record(
                 &format!("{submitted_hash:#x}"),
                 self.signer.address(),
@@ -508,12 +777,25 @@ impl StrategyExecutor {
                 strategy_label,
             )
             .await?;
-            self.save_strategy_profit_record(
+            self.save_execution_attempt(
                 &format!("{submitted_hash:#x}"),
+                &estimate_id,
                 strategy_label,
-                &profit,
+                "private_bundle",
+                "submitted",
+                main_request.nonce,
             )
             .await?;
+            let _ = self
+                .reconcile_receipt(
+                    submitted_hash,
+                    &estimate_id,
+                    strategy_label,
+                    &settlement_before,
+                    "signal-driven receipt reverted",
+                    "signal-driven receipt unknown timeout",
+                )
+                .await?;
 
             tracing::info!(
                 target: "strategy",
@@ -526,6 +808,86 @@ impl StrategyExecutor {
                 "Signal-driven strategy submitted"
             );
             return Ok(Some(format!("{submitted_hash:#x}")));
+        }
+
+        Ok(None)
+    }
+
+    pub(in crate::services::strategy) async fn try_jit_liquidity(
+        &self,
+        _tx: &Transaction,
+        observed: &ObservedSwap,
+        _received_at: std::time::Instant,
+    ) -> Result<Option<String>, AppError> {
+        if observed.router_kind != RouterKind::V3Like || observed.path.len() < 2 {
+            return Ok(None);
+        }
+        let swap_val = observed.amount_in;
+        if swap_val < U256::from(1_000_000_000_000_000_000u64) {
+            return Ok(None);
+        }
+
+        tracing::debug!(
+            target: "strategy",
+            router = %format!("{:#x}", observed.router),
+            amount_in = %swap_val,
+            "Evaluating JIT concentrated liquidity opportunity"
+        );
+
+        Ok(None)
+    }
+
+    pub(in crate::services::strategy) fn is_unguarded_competitor_swap(
+        &self,
+        observed: &ObservedSwap,
+    ) -> bool {
+        if observed.min_out <= U256::from(1u64) {
+            return true;
+        }
+        if observed.path.len() >= 2 {
+            if let Some(_res) = self.reserve_cache.reserves_for_pair(observed.path[0], observed.path[1]) {
+                if let Some(expected_out) = self.reserve_cache.quote_v2_path(&observed.path, observed.amount_in) {
+                    if observed.min_out < expected_out.saturating_mul(U256::from(9000u64)) / U256::from(10000u64) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    pub(in crate::services::strategy) async fn try_bot_trapping_bait_arb(
+        &self,
+        tx: &Transaction,
+        observed: &ObservedSwap,
+        direction: SwapDirection,
+        target_token: Address,
+        _received_at: std::time::Instant,
+    ) -> Result<Option<String>, AppError> {
+        tracing::debug!(
+            target: "strategy",
+            tx_hash = %format!("{:#x}", tx.tx_hash()),
+            router = %format!("{:#x}", observed.router),
+            min_out = %observed.min_out,
+            "Evaluating MEV Bot Trapping (Bait & Trap) opportunity on un-guarded swap"
+        );
+
+        let Some(parts) = self
+            .build_components(
+                observed,
+                direction,
+                target_token,
+                tx.gas_limit(),
+                tx.value(),
+                (None, None),
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+
+        if parts.front_run.is_none() && parts.backrun.expected_out.is_zero() {
+            return Ok(None);
         }
 
         Ok(None)
@@ -735,7 +1097,11 @@ impl StrategyExecutor {
 
     pub async fn process_work(self: std::sync::Arc<Self>, work: StrategyWork) {
         if let Err(e) = self.handle_work(work).await {
-            tracing::error!(target: "strategy", error=%e, "Strategy task failed");
+            if e.is_circuit_breaker() {
+                tracing::debug!(target: "strategy", error=%e, "Strategy task skipped due to active circuit breaker");
+            } else {
+                tracing::error!(target: "strategy", error=%e, "Strategy task failed");
+            }
         }
     }
 
@@ -762,7 +1128,6 @@ impl StrategyExecutor {
                     tx_hash = %tx_hash,
                     "Bundle submitted"
                 );
-                self.safety_guard.report_success();
                 self.stats
                     .submitted
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -798,7 +1163,8 @@ impl StrategyExecutor {
                         error=%e,
                         "Nonce gap detected; suppressing safety guard trip"
                     );
-                    self.safety_guard.report_success();
+                    // A nonce resync issue is neutral. Only a confirmed profitable
+                    // settlement may clear the consecutive-failure counter.
                 } else {
                     self.safety_guard.report_failure();
                     self.stats
@@ -816,9 +1182,10 @@ impl StrategyExecutor {
             + 1;
         if processed.is_multiple_of(500) {
             tracing::info!(
-            target: "strategy",
-            processed,
-            "Monitoring Mainnet..."
+                target: "strategy",
+                chain_id = self.chain_id,
+                processed,
+                "Monitoring chain"
             );
         }
 
@@ -1300,6 +1667,23 @@ impl StrategyExecutor {
             None => return Ok(None),
         };
 
+        if observed_swap.router_kind == RouterKind::V3Like
+            && observed_swap.amount_in >= U256::from(1_000_000_000_000_000_000u64)
+        {
+            if let Some(submitted) = self.try_jit_liquidity(tx, &observed_swap, received_at).await? {
+                return Ok(Some(submitted));
+            }
+        }
+
+        if self.is_unguarded_competitor_swap(&observed_swap) {
+            if let Some(submitted) = self
+                .try_bot_trapping_bait_arb(tx, &observed_swap, direction, target_token, received_at)
+                .await?
+            {
+                return Ok(Some(submitted));
+            }
+        }
+
         let parts = match self
             .build_components(
                 &observed_swap,
@@ -1398,8 +1782,37 @@ impl StrategyExecutor {
         );
 
         let tx_hash = tx.tx_hash();
+        if backrun.expected_out_token != self.wrapped_native {
+            self.log_skip(
+                SkipReason::ProfitOrGasGuard,
+                "live settlement currently requires native/WETH output",
+            );
+            return Ok(None);
+        }
+        let opportunity_id = format!("{tx_hash:#x}");
+        let estimate_id = format!("{}:strategy_v1:{opportunity_id}", self.chain_id);
+        let planned_hash = format!("{:#x}", backrun.hash);
+        self.persist_execution_estimate(
+            &estimate_id,
+            Some(&opportunity_id),
+            Some(&planned_hash),
+            "strategy_v1",
+            backrun.expected_out_token,
+            &profit,
+        )
+        .await?;
 
         if self.dry_run {
+            let shadow_hash = format!("shadow:{estimate_id}");
+            self.save_execution_attempt(
+                &shadow_hash,
+                &estimate_id,
+                "strategy_v1",
+                "shadow",
+                "shadow",
+                main_request.nonce,
+            )
+            .await?;
             tracing::info!(
                 target: "strategy_dry_run",
                 tx_hash = %format!("{:#x}", tx_hash),
@@ -1410,8 +1823,10 @@ impl StrategyExecutor {
                 sandwich = front_run.is_some(),
                 "Dry-run only: simulated profitable bundle (not sent)"
             );
-            return Ok(Some(format!("{tx_hash:#x}")));
+            return Ok(Some(shadow_hash));
         }
+
+        let settlement_before = self.capture_settlement_snapshot().await?;
 
         let plan = BundlePlan {
             front_run: front_run.as_ref().map(|f| f.request.clone()),
@@ -1464,12 +1879,21 @@ impl StrategyExecutor {
             .await?;
         }
 
-        let tx_hash_label = format!("{tx_hash:#x}");
-        self.persist_profit_and_market_data(&tx_hash_label, "strategy_v1", &profit)
-            .await?;
+        self.save_execution_attempt(
+            &format!("{submitted_hash:#x}"),
+            &estimate_id,
+            "strategy_v1",
+            "private_bundle",
+            "submitted",
+            main_request.nonce,
+        )
+        .await?;
         let _receipt_status = self
-            .await_and_log_submitted_receipt(
+            .reconcile_receipt(
                 submitted_hash,
+                &estimate_id,
+                "strategy_v1",
+                &settlement_before,
                 "bundle receipt reverted",
                 "bundle receipt unknown timeout",
             )
@@ -1635,8 +2059,36 @@ impl StrategyExecutor {
         );
 
         let victim_tx_hash = format!("{:#x}", hint.tx_hash);
+        if backrun.expected_out_token != self.wrapped_native {
+            self.log_skip(
+                SkipReason::ProfitOrGasGuard,
+                "live settlement currently requires native/WETH output",
+            );
+            return Ok(None);
+        }
+        let estimate_id = format!("{}:strategy_mev_share:{victim_tx_hash}", self.chain_id);
+        let planned_hash = format!("{:#x}", backrun.hash);
+        self.persist_execution_estimate(
+            &estimate_id,
+            Some(&victim_tx_hash),
+            Some(&planned_hash),
+            "strategy_mev_share",
+            backrun.expected_out_token,
+            &profit,
+        )
+        .await?;
 
         if self.dry_run {
+            let shadow_hash = format!("shadow:{estimate_id}");
+            self.save_execution_attempt(
+                &shadow_hash,
+                &estimate_id,
+                "strategy_mev_share",
+                "shadow",
+                "shadow",
+                main_request.nonce,
+            )
+            .await?;
             tracing::info!(
                 target: "strategy_dry_run",
                 tx_hash = %victim_tx_hash,
@@ -1652,8 +2104,10 @@ impl StrategyExecutor {
                 sandwich = false,
                 "Dry-run only: simulated profitable MEV-Share bundle (not sent)"
             );
-            return Ok(Some(victim_tx_hash));
+            return Ok(Some(shadow_hash));
         }
+
+        let settlement_before = self.capture_settlement_snapshot().await?;
 
         let mut bundle_body: Vec<BundleItem> = Vec::new();
         bundle_body.push(BundleItem::Hash {
@@ -1712,11 +2166,21 @@ impl StrategyExecutor {
         )
         .await?;
 
-        self.persist_profit_and_market_data(&victim_tx_hash, "strategy_mev_share", &profit)
-            .await?;
+        self.save_execution_attempt(
+            &format!("{submitted_hash:#x}"),
+            &estimate_id,
+            "strategy_mev_share",
+            "mev_share",
+            "submitted",
+            main_request.nonce,
+        )
+        .await?;
         let _receipt_status = self
-            .await_and_log_submitted_receipt(
+            .reconcile_receipt(
                 submitted_hash,
+                &estimate_id,
+                "strategy_mev_share",
+                &settlement_before,
                 "mev_share receipt reverted",
                 "mev_share receipt unknown timeout",
             )
@@ -1767,7 +2231,9 @@ impl StrategyExecutor {
                 );
             }
         }
-        if !self.liquidity_depth_ok(observed_swap, wallet_chain_balance) {
+        if !self.liquidity_depth_ok(observed_swap, wallet_chain_balance)
+            && !self.runtime.testnet_force_execution
+        {
             self.log_skip(SkipReason::LiquidityDepth, "price impact too high");
             return Ok(None);
         }
@@ -1858,21 +2324,18 @@ impl StrategyExecutor {
             return Ok(None);
         }
 
-        let planner = ExecutionPlanner::default();
+        let planner = ExecutionPlanner;
         let planner_input = PlannerInput {
             wallet_balance: wallet_chain_balance,
-            victim_value,
             gas_cost_estimate: min_bundle_gas_cost,
             has_wrapped_path: has_wrapped,
             flashloan_available: self.has_usable_flashloan_provider(),
-            allow_hybrid: true,
             base_trade_hint: observed_swap.amount_in.max(victim_value),
-            min_size: U256::from(1_000_000_000_000u64),
+            min_size: U256::from(1u64),
             max_size: wallet_chain_balance
                 .saturating_add(victim_value)
                 .saturating_add(observed_swap.amount_in)
                 .max(U256::from(1_000_000_000_000u64)),
-            slippage_bps: self.effective_slippage_bps(),
             safety_margin_bps: self
                 .adaptive_base_floor_bps(&gas_fees)
                 .saturating_sub(10_000),
@@ -1883,12 +2346,12 @@ impl StrategyExecutor {
         let planner_decision = planner.plan(&planner_input);
         let planner_trace = if let Some(best) = planner_decision.best_plan.as_ref() {
             format!(
-                "plan={} size={} expected_net={} inclusion_bps={} floor={} candidates={}",
+                "plan={} size={} economics={} submission={} funding_headroom={} candidates={}",
                 best.plan_type.as_str(),
                 best.size_wei,
-                best.score.expected_net_wei,
-                best.score.inclusion_probability_bps,
-                best.score.dynamic_profit_floor_wei,
+                "quote_pending",
+                "submission_mode_pending",
+                best.funding_headroom_wei,
                 planner_decision.candidates.len()
             )
         } else {
@@ -1958,6 +2421,7 @@ impl StrategyExecutor {
                     self.build_approval_tx(
                         f.input_token,
                         exec_router,
+                        f.input_amount,
                         gas_fees.max_fee_per_gas,
                         gas_fees.max_priority_fee_per_gas,
                         0,
@@ -1973,6 +2437,7 @@ impl StrategyExecutor {
                     self.build_approval_tx(
                         target_token,
                         exec_router,
+                        f.expected_tokens,
                         gas_fees.max_fee_per_gas,
                         gas_fees.max_priority_fee_per_gas,
                         0,
@@ -1987,9 +2452,8 @@ impl StrategyExecutor {
             approvals.clear();
             attack_value_eth = U256::ZERO;
         }
-        let use_flashloan = has_wrapped
-            && matches!(planned_plan_type, PlanType::Flashloan | PlanType::Hybrid)
-            && front_run.is_none();
+        let use_flashloan =
+            has_wrapped && planned_plan_type == PlanType::Flashloan && front_run.is_none();
         let trade_balance = if use_flashloan {
             let flashloan_floor = U256::from(5_000_000_000_000_000u128); // 0.005 ETH
             planned_trade_size
@@ -2208,12 +2672,9 @@ impl StrategyExecutor {
             }
         };
 
-        let executor_request = if Some(backrun.to) == self.executor {
-            None
-        } else {
-            self.build_executor_wrapper(&approvals, &backrun, &gas_fees, gas_limit_hint, 0)
-                .await?
-        };
+        // EOA-owned swaps must remain EOA-owned. Wrapping an EOA request in the executor changes
+        // msg.sender and therefore token custody/allowance semantics.
+        let executor_request: Option<(Vec<u8>, TransactionRequest, B256)> = None;
 
         let bribe_wei = if let Some((_, req, _)) = executor_request.as_ref() {
             let backrun_native_value = backrun.request.value.unwrap_or(U256::ZERO);
@@ -2542,6 +3003,13 @@ impl StrategyExecutor {
                 out_amount = %backrun.expected_out,
                 "bundle_sim_failure_context"
             );
+            tracing::warn!(
+                target: "simulation",
+                fail_idx = failed_idx,
+                fail_to = %failed_to,
+                detail = %detail,
+                "Simulation reverted; dropping bundle to protect gas and maintain circuit breaker safety"
+            );
             return Ok(None);
         }
         self.record_router_sim(router, true);
@@ -2566,6 +3034,7 @@ impl StrategyExecutor {
             .checked_div(100)
             .unwrap_or_else(|| gas_fees.base_fee_per_gas.saturating_add(paid_tip));
         let gas_cost_wei = U256::from(gas_used_total).saturating_mul(U256::from(paid_fee));
+        self.safety_guard.check_transaction_gas(gas_cost_wei)?;
 
         // Principal for upfront-balance checks is native value actually transferred by the tx.
         let backrun_value = backrun.request.value.unwrap_or(U256::ZERO);
@@ -2690,7 +3159,7 @@ impl StrategyExecutor {
             gross_profit_wei,
             wallet_chain_balance,
             gas_fees,
-        ) {
+        ) && !self.runtime.testnet_force_execution {
             self.log_skip(SkipReason::ProfitOrGasGuard, "Bad Risk/Reward");
             return Ok(None);
         }
@@ -2768,6 +3237,8 @@ mod tests {
             raw: Vec::new(),
             request: TransactionRequest::default(),
             token: Address::ZERO,
+            spender: Address::ZERO,
+            amount: U256::ZERO,
         }];
         let mut main = TransactionRequest::default();
 

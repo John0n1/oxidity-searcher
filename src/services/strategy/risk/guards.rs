@@ -120,8 +120,12 @@ impl StrategyExecutor {
             .unwrap_or(base_floor);
 
         let cost_basis = gas_cost_wei.saturating_add(extra_costs);
+        // `net_profit_wei` already excludes all direct costs. Only the configured increment above
+        // 100% is an additional uncertainty margin here; charging the full cost again would
+        // double-count gas, bribes, and premiums.
+        let incremental_cost_bps = cost_bps.saturating_sub(10_000);
         let scaled_cost = cost_basis
-            .saturating_mul(U256::from(cost_bps))
+            .saturating_mul(U256::from(incremental_cost_bps))
             .checked_div(U256::from(10_000u64))
             .unwrap_or(cost_basis);
 
@@ -139,9 +143,7 @@ impl StrategyExecutor {
         let tuned_floor =
             self.tuned_profit_floor_with_costs(wallet_balance, gas_cost_wei, extra_costs, gas_fees);
         let abs_or_scaled = self.configured_dynamic_floor(wallet_balance);
-        let gas_mult_floor = gas_cost_wei
-            .saturating_mul(U256::from(self.profit_floor_mult_gas))
-            .saturating_add(extra_costs);
+        let gas_mult_floor = gas_cost_wei.saturating_mul(U256::from(self.profit_floor_mult_gas));
         let volatility_bps = self
             .price_feed
             .volatility_bps_cached("ETH")
@@ -149,9 +151,9 @@ impl StrategyExecutor {
             .min(2_000);
         let volatility_guard = gas_cost_wei
             .saturating_add(extra_costs)
-            .saturating_mul(U256::from(10_000u64.saturating_add(volatility_bps)))
+            .saturating_mul(U256::from(volatility_bps))
             .checked_div(U256::from(10_000u64))
-            .unwrap_or_else(|| gas_cost_wei.saturating_add(extra_costs));
+            .unwrap_or(U256::ZERO);
         let usd_guard = min_usd_floor_wei.unwrap_or(U256::ZERO);
         tuned_floor
             .max(abs_or_scaled)
@@ -200,6 +202,11 @@ impl StrategyExecutor {
         extra_costs: U256,
         uses_flashloan: bool,
     ) -> U256 {
+        // Ethereum execution is private-bundle-first. A bundle that is not included does not pay
+        // on-chain gas or flash-loan fees. Included reverts are accounted from their receipts.
+        if self.chain_id == crate::common::constants::CHAIN_ETHEREUM {
+            return U256::ZERO;
+        }
         let retry_penalty_bps = if uses_flashloan { 2_000u64 } else { 1_200u64 };
         let direct = gas_cost_wei.saturating_add(extra_costs);
         direct.saturating_add(

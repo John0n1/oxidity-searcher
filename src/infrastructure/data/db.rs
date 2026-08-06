@@ -18,6 +18,70 @@ use sqlx::{
 use std::path::Path;
 use std::str::FromStr;
 
+#[derive(Clone, Debug)]
+pub struct ExecutionEstimateRecord<'a> {
+    pub estimate_id: &'a str,
+    pub chain_id: u64,
+    pub strategy: &'a str,
+    pub opportunity_id: Option<&'a str>,
+    pub planned_tx_hash: Option<&'a str>,
+    pub settlement_token: &'a str,
+    pub estimated_gross_wei: &'a str,
+    pub estimated_gas_wei: &'a str,
+    pub estimated_bribe_wei: &'a str,
+    pub estimated_flashloan_premium_wei: &'a str,
+    pub estimated_net_wei: &'a str,
+    pub simulation_block_number: Option<u64>,
+    pub simulation_block_hash: Option<&'a str>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExecutionAttemptRecord<'a> {
+    pub tx_hash: &'a str,
+    pub estimate_id: Option<&'a str>,
+    pub chain_id: u64,
+    pub strategy: &'a str,
+    pub submission_mode: &'a str,
+    pub status: &'a str,
+    pub nonce: Option<u64>,
+    pub target_block: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SettlementRecord<'a> {
+    pub tx_hash: &'a str,
+    pub chain_id: u64,
+    pub strategy: &'a str,
+    pub settlement_token: &'a str,
+    pub realized_gross_delta_wei: &'a str,
+    pub actual_gas_cost_wei: &'a str,
+    pub realized_net_delta_wei: &'a str,
+    pub block_number: u64,
+    pub block_hash: &'a str,
+    pub confirmations: u64,
+    pub finalized: bool,
+    pub liquid: bool,
+    pub reusable: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct SettlementDeltaRecord<'a> {
+    pub tx_hash: &'a str,
+    pub account: &'a str,
+    pub asset: &'a str,
+    pub decimals: u8,
+    pub balance_before: &'a str,
+    pub balance_after: &'a str,
+    pub delta_raw: &'a str,
+    pub liquid: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReorgedSettlement {
+    pub realized_net_delta_wei: String,
+    pub actual_gas_cost_wei: String,
+}
+
 fn to_i64(value: u64, label: &str) -> Result<i64, AppError> {
     i64::try_from(value).map_err(|e| {
         AppError::Initialization(format!(
@@ -224,6 +288,278 @@ impl Database {
         let id: i64 = row.get("id");
 
         Ok(id)
+    }
+
+    pub async fn save_execution_estimate(
+        &self,
+        record: &ExecutionEstimateRecord<'_>,
+    ) -> Result<(), AppError> {
+        let chain_id = to_i64(record.chain_id, "execution_estimates.chain_id")?;
+        let simulation_block_number = record
+            .simulation_block_number
+            .map(|value| to_i64(value, "execution_estimates.simulation_block_number"))
+            .transpose()?;
+        sqlx::query(
+            r#"
+            INSERT INTO execution_estimates (
+                estimate_id, chain_id, strategy, opportunity_id, planned_tx_hash,
+                settlement_token, estimated_gross_wei, estimated_gas_wei,
+                estimated_bribe_wei, estimated_flashloan_premium_wei, estimated_net_wei,
+                simulation_block_number, simulation_block_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(estimate_id) DO UPDATE SET
+                planned_tx_hash=excluded.planned_tx_hash,
+                estimated_gross_wei=excluded.estimated_gross_wei,
+                estimated_gas_wei=excluded.estimated_gas_wei,
+                estimated_bribe_wei=excluded.estimated_bribe_wei,
+                estimated_flashloan_premium_wei=excluded.estimated_flashloan_premium_wei,
+                estimated_net_wei=excluded.estimated_net_wei,
+                simulation_block_number=excluded.simulation_block_number,
+                simulation_block_hash=excluded.simulation_block_hash,
+                updated_at=CURRENT_TIMESTAMP
+            "#,
+        )
+        .bind(record.estimate_id)
+        .bind(chain_id)
+        .bind(record.strategy)
+        .bind(record.opportunity_id)
+        .bind(record.planned_tx_hash)
+        .bind(record.settlement_token)
+        .bind(record.estimated_gross_wei)
+        .bind(record.estimated_gas_wei)
+        .bind(record.estimated_bribe_wei)
+        .bind(record.estimated_flashloan_premium_wei)
+        .bind(record.estimated_net_wei)
+        .bind(simulation_block_number)
+        .bind(record.simulation_block_hash)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Initialization(format!("Execution estimate upsert failed: {e}")))?;
+        Ok(())
+    }
+
+    pub async fn save_execution_attempt(
+        &self,
+        record: &ExecutionAttemptRecord<'_>,
+    ) -> Result<(), AppError> {
+        let chain_id = to_i64(record.chain_id, "execution_attempts.chain_id")?;
+        let nonce = record
+            .nonce
+            .map(|value| to_i64(value, "execution_attempts.nonce"))
+            .transpose()?;
+        let target_block = record
+            .target_block
+            .map(|value| to_i64(value, "execution_attempts.target_block"))
+            .transpose()?;
+        sqlx::query(
+            r#"
+            INSERT INTO execution_attempts (
+                tx_hash, estimate_id, chain_id, strategy, submission_mode, status, nonce, target_block
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(tx_hash) DO UPDATE SET
+                estimate_id=COALESCE(excluded.estimate_id, execution_attempts.estimate_id),
+                submission_mode=excluded.submission_mode,
+                status=excluded.status,
+                nonce=COALESCE(excluded.nonce, execution_attempts.nonce),
+                target_block=COALESCE(excluded.target_block, execution_attempts.target_block),
+                updated_at=CURRENT_TIMESTAMP
+            "#,
+        )
+        .bind(record.tx_hash)
+        .bind(record.estimate_id)
+        .bind(chain_id)
+        .bind(record.strategy)
+        .bind(record.submission_mode)
+        .bind(record.status)
+        .bind(nonce)
+        .bind(target_block)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Initialization(format!("Execution attempt upsert failed: {e}")))?;
+
+        if let Some(estimate_id) = record.estimate_id {
+            sqlx::query(
+                "UPDATE execution_estimates SET status = ?, updated_at=CURRENT_TIMESTAMP WHERE estimate_id = ?",
+            )
+            .bind(if record.status == "shadow" { "simulated" } else { "submitted" })
+            .bind(estimate_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| AppError::Initialization(format!("Estimate status update failed: {e}")))?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_execution_attempt_outcome(
+        &self,
+        tx_hash: &str,
+        status: &str,
+        block_number: Option<u64>,
+        block_hash: Option<&str>,
+        gas_used: Option<&str>,
+        effective_gas_price_wei: Option<&str>,
+        actual_gas_cost_wei: Option<&str>,
+        error: Option<&str>,
+    ) -> Result<(), AppError> {
+        let block_number = block_number
+            .map(|value| to_i64(value, "execution_attempts.included_block_number"))
+            .transpose()?;
+        sqlx::query(
+            r#"
+            UPDATE execution_attempts SET
+                status=?, included_block_number=COALESCE(?, included_block_number),
+                included_block_hash=COALESCE(?, included_block_hash),
+                gas_used=COALESCE(?, gas_used),
+                effective_gas_price_wei=COALESCE(?, effective_gas_price_wei),
+                actual_gas_cost_wei=COALESCE(?, actual_gas_cost_wei),
+                error=COALESCE(?, error), updated_at=CURRENT_TIMESTAMP
+            WHERE tx_hash=?
+            "#,
+        )
+        .bind(status)
+        .bind(block_number)
+        .bind(block_hash)
+        .bind(gas_used)
+        .bind(effective_gas_price_wei)
+        .bind(actual_gas_cost_wei)
+        .bind(error)
+        .bind(tx_hash)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Initialization(format!("Execution outcome update failed: {e}")))?;
+        Ok(())
+    }
+
+    pub async fn save_settlement(
+        &self,
+        settlement: &SettlementRecord<'_>,
+        deltas: &[SettlementDeltaRecord<'_>],
+    ) -> Result<(), AppError> {
+        let chain_id = to_i64(settlement.chain_id, "settlements.chain_id")?;
+        let block_number = to_i64(settlement.block_number, "settlements.block_number")?;
+        let confirmations = to_i64(settlement.confirmations, "settlements.confirmations")?;
+        let mut tx =
+            self.pool.begin().await.map_err(|e| {
+                AppError::Initialization(format!("Settlement transaction failed: {e}"))
+            })?;
+        sqlx::query(
+            r#"
+            INSERT INTO settlements (
+                tx_hash, chain_id, strategy, settlement_token, realized_gross_delta_wei,
+                actual_gas_cost_wei, realized_net_delta_wei, block_number, block_hash,
+                confirmations, finalized, liquid, reusable
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(tx_hash) DO UPDATE SET
+                realized_gross_delta_wei=excluded.realized_gross_delta_wei,
+                actual_gas_cost_wei=excluded.actual_gas_cost_wei,
+                realized_net_delta_wei=excluded.realized_net_delta_wei,
+                block_number=excluded.block_number, block_hash=excluded.block_hash,
+                confirmations=excluded.confirmations, finalized=excluded.finalized,
+                liquid=excluded.liquid, reusable=excluded.reusable,
+                updated_at=CURRENT_TIMESTAMP
+            "#,
+        )
+        .bind(settlement.tx_hash)
+        .bind(chain_id)
+        .bind(settlement.strategy)
+        .bind(settlement.settlement_token)
+        .bind(settlement.realized_gross_delta_wei)
+        .bind(settlement.actual_gas_cost_wei)
+        .bind(settlement.realized_net_delta_wei)
+        .bind(block_number)
+        .bind(settlement.block_hash)
+        .bind(confirmations)
+        .bind(settlement.finalized)
+        .bind(settlement.liquid)
+        .bind(settlement.reusable)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| AppError::Initialization(format!("Settlement upsert failed: {e}")))?;
+
+        for delta in deltas {
+            sqlx::query(
+                r#"
+                INSERT INTO settlement_deltas (
+                    tx_hash, account, asset, decimals, balance_before, balance_after, delta_raw, liquid
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(tx_hash, account, asset) DO UPDATE SET
+                    balance_before=excluded.balance_before, balance_after=excluded.balance_after,
+                    delta_raw=excluded.delta_raw, liquid=excluded.liquid
+                "#,
+            )
+            .bind(delta.tx_hash)
+            .bind(delta.account)
+            .bind(delta.asset)
+            .bind(i64::from(delta.decimals))
+            .bind(delta.balance_before)
+            .bind(delta.balance_after)
+            .bind(delta.delta_raw)
+            .bind(delta.liquid)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| AppError::Initialization(format!("Settlement delta upsert failed: {e}")))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| AppError::Initialization(format!("Settlement commit failed: {e}")))?;
+        Ok(())
+    }
+
+    pub async fn mark_block_settlements_reorged(
+        &self,
+        chain_id: u64,
+        block_number: u64,
+        canonical_block_hash: &str,
+    ) -> Result<Vec<ReorgedSettlement>, AppError> {
+        let chain_id = to_i64(chain_id, "settlements.chain_id")?;
+        let block_number = to_i64(block_number, "settlements.block_number")?;
+        let affected = sqlx::query(
+            r#"
+            SELECT realized_net_delta_wei, actual_gas_cost_wei
+            FROM settlements
+            WHERE chain_id=? AND block_number=? AND block_hash <> ? AND finalized=TRUE
+            "#,
+        )
+        .bind(chain_id)
+        .bind(block_number)
+        .bind(canonical_block_hash)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| AppError::Initialization(format!("Reorg settlement read failed: {e}")))?
+        .into_iter()
+        .map(|row| ReorgedSettlement {
+            realized_net_delta_wei: row.get("realized_net_delta_wei"),
+            actual_gas_cost_wei: row.get("actual_gas_cost_wei"),
+        })
+        .collect::<Vec<_>>();
+        sqlx::query(
+            r#"
+            UPDATE execution_attempts
+            SET status='reorged', updated_at=CURRENT_TIMESTAMP
+            WHERE chain_id=? AND included_block_number=?
+              AND COALESCE(included_block_hash, '') <> ? AND status <> 'reorged'
+            "#,
+        )
+        .bind(chain_id)
+        .bind(block_number)
+        .bind(canonical_block_hash)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Initialization(format!("Reorg attempt update failed: {e}")))?;
+        sqlx::query(
+            r#"
+            UPDATE settlements SET finalized=FALSE, reusable=FALSE, updated_at=CURRENT_TIMESTAMP
+            WHERE chain_id=? AND block_number=? AND block_hash <> ?
+            "#,
+        )
+        .bind(chain_id)
+        .bind(block_number)
+        .bind(canonical_block_hash)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| AppError::Initialization(format!("Reorg settlement update failed: {e}")))?;
+        Ok(affected)
     }
 
     pub async fn update_status(
@@ -532,6 +868,72 @@ mod tests {
         assert_eq!(top.len(), 1);
         assert_eq!(format!("{:#x}", top[0].0), unresolved);
         assert_eq!(top[0].1, 15);
+    }
+
+    #[tokio::test]
+    async fn reorg_reconciliation_is_idempotent_and_returns_realized_totals_once() {
+        let db = Database::new("sqlite::memory:").await.expect("db");
+        db.save_execution_attempt(&ExecutionAttemptRecord {
+            tx_hash: "0xfeed",
+            estimate_id: None,
+            chain_id: 1,
+            strategy: "test",
+            submission_mode: "private_bundle",
+            status: "included",
+            nonce: Some(1),
+            target_block: Some(99),
+        })
+        .await
+        .expect("attempt");
+        db.update_execution_attempt_outcome(
+            "0xfeed",
+            "included",
+            Some(100),
+            Some("0xold"),
+            Some("10"),
+            Some("2"),
+            Some("20"),
+            None,
+        )
+        .await
+        .expect("attempt outcome");
+        db.save_settlement(
+            &SettlementRecord {
+                tx_hash: "0xfeed",
+                chain_id: 1,
+                strategy: "test",
+                settlement_token: "0xweth",
+                realized_gross_delta_wei: "25",
+                actual_gas_cost_wei: "20",
+                realized_net_delta_wei: "5",
+                block_number: 100,
+                block_hash: "0xold",
+                confirmations: 2,
+                finalized: true,
+                liquid: true,
+                reusable: true,
+            },
+            &[],
+        )
+        .await
+        .expect("settlement");
+
+        let first = db
+            .mark_block_settlements_reorged(1, 100, "0xcanonical")
+            .await
+            .expect("first reconcile");
+        assert_eq!(
+            first,
+            vec![ReorgedSettlement {
+                realized_net_delta_wei: "5".into(),
+                actual_gas_cost_wei: "20".into(),
+            }]
+        );
+        let second = db
+            .mark_block_settlements_reorged(1, 100, "0xcanonical")
+            .await
+            .expect("second reconcile");
+        assert!(second.is_empty(), "settlement must not be reversed twice");
     }
 }
 

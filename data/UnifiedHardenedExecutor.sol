@@ -31,12 +31,8 @@ interface IBalancerVault {
     /// @param tokens Borrowed token list.
     /// @param amounts Borrowed amount list.
     /// @param userData Opaque callback payload.
-    function flashLoan(
-        address recipient,
-        IERC20[] memory tokens,
-        uint256[] memory amounts,
-        bytes memory userData
-    ) external;
+    function flashLoan(address recipient, IERC20[] memory tokens, uint256[] memory amounts, bytes memory userData)
+        external;
 }
 
 interface IFlashLoanRecipient {
@@ -77,13 +73,9 @@ interface IAaveFlashLoanSimpleReceiver {
     /// @param initiator Original flash loan initiator.
     /// @param params Opaque payload passed from initiation.
     /// @return True when callback execution succeeds.
-    function executeOperation(
-        address asset,
-        uint256 amount,
-        uint256 premium,
-        address initiator,
-        bytes calldata params
-    ) external returns (bool);
+    function executeOperation(address asset, uint256 amount, uint256 premium, address initiator, bytes calldata params)
+        external
+        returns (bool);
 }
 
 interface IDydxSoloMargin {
@@ -116,32 +108,20 @@ interface IDydxSoloMargin {
 }
 
 interface IDydxCallee {
-    function callFunction(
-        address sender,
-        IDydxSoloMargin.AccountInfo calldata accountInfo,
-        bytes calldata data
-    ) external;
+    function callFunction(address sender, IDydxSoloMargin.AccountInfo calldata accountInfo, bytes calldata data)
+        external;
 }
 
 interface IERC3156FlashLender {
     function maxFlashLoan(address token) external view returns (uint256);
     function flashFee(address token, uint256 amount) external view returns (uint256);
-    function flashLoan(
-        address receiver,
-        address token,
-        uint256 amount,
-        bytes calldata data
-    ) external returns (bool);
+    function flashLoan(address receiver, address token, uint256 amount, bytes calldata data) external returns (bool);
 }
 
 interface IERC3156FlashBorrower {
-    function onFlashLoan(
-        address initiator,
-        address token,
-        uint256 amount,
-        uint256 fee,
-        bytes calldata data
-    ) external returns (bytes32);
+    function onFlashLoan(address initiator, address token, uint256 amount, uint256 fee, bytes calldata data)
+        external
+        returns (bytes32);
 }
 
 interface IUniswapV2Pair {
@@ -151,31 +131,17 @@ interface IUniswapV2Pair {
 }
 
 interface IUniswapV2Callee {
-    function uniswapV2Call(
-        address sender,
-        uint256 amount0,
-        uint256 amount1,
-        bytes calldata data
-    ) external;
+    function uniswapV2Call(address sender, uint256 amount0, uint256 amount1, bytes calldata data) external;
 }
 
 interface IUniswapV3Pool {
     function token0() external view returns (address);
     function token1() external view returns (address);
-    function flash(
-        address recipient,
-        uint256 amount0,
-        uint256 amount1,
-        bytes calldata data
-    ) external;
+    function flash(address recipient, uint256 amount0, uint256 amount1, bytes calldata data) external;
 }
 
 interface IUniswapV3FlashCallback {
-    function uniswapV3FlashCallback(
-        uint256 fee0,
-        uint256 fee1,
-        bytes calldata data
-    ) external;
+    function uniswapV3FlashCallback(uint256 fee0, uint256 fee1, bytes calldata data) external;
 }
 
 /// @title UnifiedHardenedExecutor
@@ -189,59 +155,77 @@ contract UnifiedHardenedExecutor is
     IUniswapV2Callee,
     IUniswapV3FlashCallback
 {
-    uint256 public constant AUTO_SWEEP_INTERVAL = 15 days;
     uint8 private constant DYDX_ACTION_DEPOSIT = 0;
     uint8 private constant DYDX_ACTION_WITHDRAW = 1;
     uint8 private constant DYDX_ACTION_CALL = 8;
     uint8 private constant DYDX_ASSET_DENOMINATION_WEI = 0;
     uint8 private constant DYDX_ASSET_REFERENCE_DELTA = 0;
-    bytes32 private constant ERC3156_CALLBACK_SUCCESS =
-        keccak256("ERC3156FlashBorrower.onFlashLoan");
+    bytes32 private constant ERC3156_CALLBACK_SUCCESS = keccak256("ERC3156FlashBorrower.onFlashLoan");
     uint256 private constant UNISWAP_V2_FEE_NUMERATOR = 1000;
     uint256 private constant UNISWAP_V2_FEE_DENOMINATOR = 997;
 
-    address public immutable owner;
+    address public owner;
+    address public pendingOwner;
     address public immutable WETH;
-    address private immutable BALANCER_VAULT;
+    address public immutable balancerVault;
 
     address public profitReceiver;
     bool public sweepProfitToEth;
-    uint256 public lastSweepAt;
+    bool public paused;
+    bool private executionActive;
     address private activeAavePool;
+    bytes32 private aaveLoanContextHash;
+    uint256 private aavePreLoanBalance;
     bool private balancerLoanActive;
     bytes32 private balancerLoanContextHash;
+    uint256[] private balancerPreLoanBalances;
     address private activeDydxSolo;
     bytes32 private dydxLoanContextHash;
+    uint256 private dydxPreLoanBalance;
     address private activeMakerLender;
     bytes32 private makerLoanContextHash;
+    uint256 private makerPreLoanBalance;
     address private activeUniswapV2Pair;
     bytes32 private uniswapV2LoanContextHash;
+    uint256 private uniswapV2PreLoanBalance;
     address private activeUniswapV3Pool;
     bytes32 private uniswapV3LoanContextHash;
+    uint256 private uniswapV3PreLoanBalance;
+
+    mapping(address => bool) public approvedProviders;
 
     event ArbitrageExecuted(uint256 surplus, address indexed token);
     event BundleExecuted(uint256 bribePaid);
     event ProfitReceiverUpdated(address indexed newReceiver);
     event SweepPreferenceUpdated(bool sweepToEth);
-    event DistributeFailed(address indexed token, uint256 amount);
+    event OwnershipTransferStarted(address indexed previousOwner, address indexed pendingOwner);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event PauseStateUpdated(bool paused);
+    event ProfitSettled(address indexed token, uint256 amount, address indexed receiver);
     event CallFailed(uint256 index, bytes reason);
     event ManualSweepExecuted(uint256 timestamp);
-    event AutoSweepExecuted(uint256 timestamp);
     event AavePoolStateUpdated(address indexed previousPool, address indexed newPool);
     event BalancerLoanSessionStateUpdated(bool active, bytes32 contextHash);
     event DydxSoloStateUpdated(address indexed previousSolo, address indexed newSolo);
     event MakerFlashLenderStateUpdated(address indexed previousLender, address indexed newLender);
     event UniswapV2PairStateUpdated(address indexed previousPair, address indexed newPair);
     event UniswapV3PoolStateUpdated(address indexed previousPool, address indexed newPool);
+    event ProviderApprovalUpdated(address indexed provider, bool approved);
 
     error OnlyOwner();
+    error OnlyPendingOwner();
+    error ContractPaused();
+    error ReentrantExecution();
+    error PartialExecutionDisabled();
     error OnlyVault();
     error LengthMismatch();
     error ZeroAssets();
     error ExecutionFailed(uint256 index, bytes reason);
     error InsufficientFundsForRepayment(address token, uint256 required, uint256 available);
+    error PrincipalNotReceived();
     error InvalidWETHAddress();
     error InvalidProfitReceiver();
+    error InvalidOwner();
     error TokenTransferFailed();
     error ApprovalFailed();
     error BribeFailed();
@@ -263,6 +247,7 @@ contract UnifiedHardenedExecutor is
     error BalancerLoanContextMismatch();
     error BalancerCallbackNotReceived();
     error AaveCallbackNotReceived();
+    error AaveLoanContextMismatch();
     error DydxLoanNotActive();
     error DydxLoanContextMismatch();
     error DydxCallbackNotReceived();
@@ -275,6 +260,7 @@ contract UnifiedHardenedExecutor is
     error UniswapV3LoanNotActive();
     error UniswapV3LoanContextMismatch();
     error UniswapV3CallbackNotReceived();
+    error ProviderNotApproved();
 
     /// @notice Deploys the executor.
     /// @dev Sets immutable dependencies and initializes sweep configuration.
@@ -282,16 +268,16 @@ contract UnifiedHardenedExecutor is
     /// @param _weth Wrapped native token address.
     /// @param _balancerVault Balancer vault address used for callbacks.
     constructor(address _profitReceiver, address _weth, address _balancerVault) {
-        if (_profitReceiver == address(0)) revert InvalidProfitReceiver();
+        if (_profitReceiver == address(0) || _profitReceiver == address(this)) revert InvalidProfitReceiver();
         if (_weth == address(0) || _weth.code.length == 0) revert InvalidWETHAddress();
         if (_balancerVault == address(0) || _balancerVault.code.length == 0) revert InvalidBalancerVault();
 
         owner = msg.sender;
         profitReceiver = _profitReceiver;
         WETH = _weth;
-        BALANCER_VAULT = _balancerVault;
+        balancerVault = _balancerVault;
+        approvedProviders[_balancerVault] = true;
         sweepProfitToEth = true;
-        lastSweepAt = block.timestamp;
     }
 
     /// @notice Accepts native ETH transfers, including WETH unwrap proceeds.
@@ -308,6 +294,18 @@ contract UnifiedHardenedExecutor is
     modifier onlySelfOrOwner() {
         if (msg.sender != owner && msg.sender != address(this)) revert OnlyOwner();
         _;
+    }
+
+    modifier whenNotPaused() {
+        if (paused) revert ContractPaused();
+        _;
+    }
+
+    modifier nonReentrantInitiation() {
+        if (executionActive) revert ReentrantExecution();
+        executionActive = true;
+        _;
+        executionActive = false;
     }
 
     /// @notice Executes an arbitrary multicall bundle with optional bribe.
@@ -327,46 +325,20 @@ contract UnifiedHardenedExecutor is
         uint256 bribeAmount,
         bool allowPartial,
         address balanceCheckToken
-    ) external payable onlyOwner {
-        uint256 targetsLen = targets.length;
-        if (targetsLen != payloads.length || targetsLen != values.length) {
+    ) external payable onlyOwner whenNotPaused nonReentrantInitiation {
+        if (targets.length != payloads.length || targets.length != values.length) {
             revert LengthMismatch();
         }
-        if (targetsLen == 0) revert LengthMismatch();
+        if (targets.length == 0) revert LengthMismatch();
+        if (allowPartial) revert PartialExecutionDisabled();
 
-        uint256 tokenBalanceBefore = balanceCheckToken == address(0)
-            ? 0
-            : IERC20(balanceCheckToken).balanceOf(address(this));
+        uint256 tokenBalanceBefore =
+            balanceCheckToken == address(0) ? 0 : IERC20(balanceCheckToken).balanceOf(address(this));
+        uint256 wethBalanceBefore = IERC20(WETH).balanceOf(address(this));
+        uint256 ethBalanceBefore = address(this).balance;
 
-        for (uint256 i = 0; i < targetsLen; i++) {
-            (bool success, bytes memory result) = targets[i].call{value: values[i]}(payloads[i]);
-            if (!success) {
-                if (allowPartial) {
-                    emit CallFailed(i, result);
-                    continue;
-                }
-                _revertWithDetails(i, result);
-            }
-        }
-
-        if (bribeAmount > 0) {
-            if (address(this).balance < bribeAmount) revert BribeFailed();
-
-            address actualRecipient = bribeRecipient == address(0) ? block.coinbase : bribeRecipient;
-            (bool ok, ) = actualRecipient.call{value: bribeAmount}("");
-            if (!ok) revert BribeFailed();
-
-            emit BundleExecuted(bribeAmount);
-        }
-
-        bool autoSweepRan = false;
-        if (autoSweepDue()) {
-            address cachedProfitReceiver = profitReceiver;
-            autoSweepRan = _transferEthToProfitReceiver(false, cachedProfitReceiver);
-        }
-        if (autoSweepRan) {
-            _recordSweep(true);
-        }
+        _executeDirectCalls(targets, payloads, values);
+        _payBribe(bribeRecipient, bribeAmount);
 
         if (balanceCheckToken != address(0)) {
             uint256 tokenBalanceAfter = IERC20(balanceCheckToken).balanceOf(address(this));
@@ -374,6 +346,8 @@ contract UnifiedHardenedExecutor is
                 revert BalanceInvariantBroken(balanceCheckToken, tokenBalanceBefore, tokenBalanceAfter);
             }
         }
+
+        _settleDirectProfit(wethBalanceBefore, ethBalanceBefore);
     }
 
     /// @notice Starts a Balancer flash loan session.
@@ -381,11 +355,13 @@ contract UnifiedHardenedExecutor is
     /// @param assets Sorted borrowed token list.
     /// @param amounts Borrowed amount list, each strictly positive.
     /// @param params ABI-encoded execution payload forwarded to callback.
-    function executeFlashLoan(
-        IERC20[] calldata assets,
-        uint256[] calldata amounts,
-        bytes calldata params
-    ) external onlyOwner {
+    function executeFlashLoan(IERC20[] calldata assets, uint256[] calldata amounts, bytes calldata params)
+        external
+        onlyOwner
+        whenNotPaused
+        nonReentrantInitiation
+    {
+        _requireApprovedProvider(balancerVault);
         if (assets.length == 0) revert ZeroAssets();
         if (assets.length != amounts.length) revert LengthMismatch();
         for (uint256 i = 0; i < amounts.length; i++) {
@@ -401,9 +377,13 @@ contract UnifiedHardenedExecutor is
 
         balancerLoanActive = true;
         balancerLoanContextHash = keccak256(abi.encode(assets, amounts, params));
+        delete balancerPreLoanBalances;
+        for (uint256 i = 0; i < assets.length; i++) {
+            balancerPreLoanBalances.push(assets[i].balanceOf(address(this)));
+        }
         emit BalancerLoanSessionStateUpdated(true, balancerLoanContextHash);
 
-        IBalancerVault(BALANCER_VAULT).flashLoan(address(this), assets, amounts, params);
+        IBalancerVault(balancerVault).flashLoan(address(this), assets, amounts, params);
 
         if (balancerLoanActive || balancerLoanContextHash != bytes32(0)) {
             revert BalancerCallbackNotReceived();
@@ -416,21 +396,25 @@ contract UnifiedHardenedExecutor is
     /// @param asset Borrowed token address.
     /// @param amount Borrowed amount.
     /// @param params ABI-encoded execution payload forwarded to callback.
-    function executeAaveFlashLoanSimple(
-        address pool,
-        address asset,
-        uint256 amount,
-        bytes calldata params
-    ) external onlyOwner {
+    function executeAaveFlashLoanSimple(address pool, address asset, uint256 amount, bytes calldata params)
+        external
+        onlyOwner
+        whenNotPaused
+        nonReentrantInitiation
+    {
+        _requireApprovedProvider(pool);
         if (pool == address(0)) revert InvalidPool();
         if (pool.code.length == 0) revert InvalidPool();
         if (asset == address(0)) revert InvalidAsset();
         if (amount == 0) revert ZeroAssets();
         address previousPool = activeAavePool;
         activeAavePool = pool;
+        aavePreLoanBalance = IERC20(asset).balanceOf(address(this));
+        aaveLoanContextHash = keccak256(abi.encode(pool, asset, amount, params));
         emit AavePoolStateUpdated(previousPool, pool);
         IAavePool(pool).flashLoanSimple(address(this), asset, amount, params, 0);
-        if (activeAavePool != address(0)) revert AaveCallbackNotReceived();
+        if (activeAavePool != address(0) || aaveLoanContextHash != bytes32(0)) revert AaveCallbackNotReceived();
+        _resetAllowance(asset, pool);
     }
 
     /// @notice Starts a dYdX Solo flash loan session.
@@ -438,12 +422,13 @@ contract UnifiedHardenedExecutor is
     /// @param asset Borrowed token.
     /// @param amount Borrowed amount.
     /// @param params ABI-encoded payload containing `(targets, values, payloads)`.
-    function executeDydxFlashLoan(
-        address soloMargin,
-        address asset,
-        uint256 amount,
-        bytes calldata params
-    ) external onlyOwner {
+    function executeDydxFlashLoan(address soloMargin, address asset, uint256 amount, bytes calldata params)
+        external
+        onlyOwner
+        whenNotPaused
+        nonReentrantInitiation
+    {
+        _requireApprovedProvider(soloMargin);
         if (soloMargin == address(0) || soloMargin.code.length == 0) revert InvalidFlashloanSolo();
         if (asset == address(0)) revert InvalidAsset();
         if (amount == 0) revert ZeroAssets();
@@ -454,6 +439,7 @@ contract UnifiedHardenedExecutor is
 
         address previousSolo = activeDydxSolo;
         activeDydxSolo = soloMargin;
+        dydxPreLoanBalance = IERC20(asset).balanceOf(address(this));
         dydxLoanContextHash = keccak256(abi.encode(soloMargin, asset, amount, params));
         emit DydxSoloStateUpdated(previousSolo, soloMargin);
 
@@ -469,6 +455,7 @@ contract UnifiedHardenedExecutor is
         if (activeDydxSolo != address(0) || dydxLoanContextHash != bytes32(0)) {
             revert DydxCallbackNotReceived();
         }
+        _resetAllowance(asset, soloMargin);
     }
 
     /// @notice Starts a MakerDAO ERC3156 flash loan session.
@@ -476,18 +463,20 @@ contract UnifiedHardenedExecutor is
     /// @param asset Borrowed token.
     /// @param amount Borrowed amount.
     /// @param params ABI-encoded payload containing `(targets, values, payloads)`.
-    function executeMakerFlashLoan(
-        address lender,
-        address asset,
-        uint256 amount,
-        bytes calldata params
-    ) external onlyOwner {
+    function executeMakerFlashLoan(address lender, address asset, uint256 amount, bytes calldata params)
+        external
+        onlyOwner
+        whenNotPaused
+        nonReentrantInitiation
+    {
+        _requireApprovedProvider(lender);
         if (lender == address(0) || lender.code.length == 0) revert InvalidFlashloanLender();
         if (asset == address(0)) revert InvalidAsset();
         if (amount == 0) revert ZeroAssets();
 
         address previousLender = activeMakerLender;
         activeMakerLender = lender;
+        makerPreLoanBalance = IERC20(asset).balanceOf(address(this));
         makerLoanContextHash = keccak256(abi.encode(lender, asset, amount, params));
         emit MakerFlashLenderStateUpdated(previousLender, lender);
 
@@ -496,6 +485,7 @@ contract UnifiedHardenedExecutor is
         if (activeMakerLender != address(0) || makerLoanContextHash != bytes32(0)) {
             revert MakerCallbackNotReceived();
         }
+        _resetAllowance(asset, lender);
     }
 
     /// @notice Starts a Uniswap V2 flash swap session for a single borrowed token.
@@ -503,12 +493,13 @@ contract UnifiedHardenedExecutor is
     /// @param asset Borrowed token (must equal pair token0 or token1).
     /// @param amount Borrowed amount.
     /// @param params ABI-encoded payload containing `(targets, values, payloads)`.
-    function executeUniswapV2FlashLoan(
-        address pair,
-        address asset,
-        uint256 amount,
-        bytes calldata params
-    ) external onlyOwner {
+    function executeUniswapV2FlashLoan(address pair, address asset, uint256 amount, bytes calldata params)
+        external
+        onlyOwner
+        whenNotPaused
+        nonReentrantInitiation
+    {
+        _requireApprovedProvider(pair);
         if (pair == address(0) || pair.code.length == 0) revert InvalidFlashloanPair();
         if (asset == address(0)) revert InvalidAsset();
         if (amount == 0) revert ZeroAssets();
@@ -527,6 +518,7 @@ contract UnifiedHardenedExecutor is
 
         address previousPair = activeUniswapV2Pair;
         activeUniswapV2Pair = pair;
+        uniswapV2PreLoanBalance = IERC20(asset).balanceOf(address(this));
         uniswapV2LoanContextHash = keccak256(abi.encode(pair, asset, amount, params));
         emit UniswapV2PairStateUpdated(previousPair, pair);
 
@@ -541,12 +533,13 @@ contract UnifiedHardenedExecutor is
     /// @param asset Borrowed token (must equal pool token0 or token1).
     /// @param amount Borrowed amount.
     /// @param params ABI-encoded payload containing `(targets, values, payloads)`.
-    function executeUniswapV3FlashLoan(
-        address pool,
-        address asset,
-        uint256 amount,
-        bytes calldata params
-    ) external onlyOwner {
+    function executeUniswapV3FlashLoan(address pool, address asset, uint256 amount, bytes calldata params)
+        external
+        onlyOwner
+        whenNotPaused
+        nonReentrantInitiation
+    {
+        _requireApprovedProvider(pool);
         if (pool == address(0) || pool.code.length == 0) revert InvalidPool();
         if (asset == address(0)) revert InvalidAsset();
         if (amount == 0) revert ZeroAssets();
@@ -565,6 +558,7 @@ contract UnifiedHardenedExecutor is
 
         address previousPool = activeUniswapV3Pool;
         activeUniswapV3Pool = pool;
+        uniswapV3PreLoanBalance = IERC20(asset).balanceOf(address(this));
         uniswapV3LoanContextHash = keccak256(abi.encode(pool, asset, amount, params));
         emit UniswapV3PoolStateUpdated(previousPool, pool);
 
@@ -586,7 +580,7 @@ contract UnifiedHardenedExecutor is
         uint256[] memory feeAmounts,
         bytes memory userData
     ) external override {
-        if (msg.sender != BALANCER_VAULT) revert OnlyVault();
+        if (msg.sender != balancerVault) revert OnlyVault();
         if (!balancerLoanActive) revert BalancerLoanNotActive();
 
         bytes32 callbackContext = keccak256(abi.encode(tokens, amounts, userData));
@@ -600,11 +594,18 @@ contract UnifiedHardenedExecutor is
             revert LengthMismatch();
         }
 
-        _executePayloadFromMemory(userData);
-
-        if (_settleBalancerRepayment(tokens, amounts, feeAmounts)) {
-            _recordSweep(true);
+        uint256[] memory preExistingBalances = new uint256[](tokens.length);
+        for (uint256 i = 0; i < tokens.length; i++) {
+            uint256 callbackBalance = tokens[i].balanceOf(address(this));
+            uint256 preLoan = balancerPreLoanBalances[i];
+            if (callbackBalance < preLoan + amounts[i]) {
+                revert PrincipalNotReceived();
+            }
+            preExistingBalances[i] = callbackBalance - amounts[i];
         }
+        delete balancerPreLoanBalances;
+        _executePayloadFromMemory(userData);
+        _settleBalancerRepayment(tokens, amounts, feeAmounts, preExistingBalances);
     }
 
     /// @notice Aave V3 simple flash loan callback that executes payload calls and approves repayment.
@@ -615,25 +616,33 @@ contract UnifiedHardenedExecutor is
     /// @param initiator Flash loan initiator expected to be this contract.
     /// @param params ABI-encoded payload containing `(targets, values, payloads)`.
     /// @return True when callback processing completes.
-    function executeOperation(
-        address asset,
-        uint256 amount,
-        uint256 premium,
-        address initiator,
-        bytes calldata params
-    ) external override returns (bool) {
+    function executeOperation(address asset, uint256 amount, uint256 premium, address initiator, bytes calldata params)
+        external
+        override
+        returns (bool)
+    {
         if (msg.sender != activeAavePool) revert OnlyPool();
         if (initiator != address(this)) revert OnlyOwner();
+        if (aaveLoanContextHash != keccak256(abi.encode(msg.sender, asset, amount, params))) revert AaveLoanContextMismatch();
+
         address previousPool = activeAavePool;
         activeAavePool = address(0);
+        aaveLoanContextHash = bytes32(0);
         emit AavePoolStateUpdated(previousPool, address(0));
 
+        uint256 callbackBalance = IERC20(asset).balanceOf(address(this));
+        if (callbackBalance < aavePreLoanBalance + amount) {
+            revert PrincipalNotReceived();
+        }
+        aavePreLoanBalance = 0;
+        uint256 preExistingBalance = callbackBalance - amount;
         _executePayloadFromCalldata(params);
 
         uint256 amountOwing = amount + premium;
         uint256 bal = IERC20(asset).balanceOf(address(this));
-        if (bal < amountOwing) {
-            revert InsufficientFundsForRepayment(asset, amountOwing, bal);
+        uint256 requiredBalance = preExistingBalance + amountOwing;
+        if (bal < requiredBalance) {
+            revert InsufficientFundsForRepayment(asset, requiredBalance, bal);
         }
 
         uint256 currentAllowance = IERC20(asset).allowance(address(this), msg.sender);
@@ -644,9 +653,7 @@ contract UnifiedHardenedExecutor is
             _lowLevelApprove(asset, msg.sender, amountOwing);
         }
 
-        if (_settleAaveAutoSweep(asset, bal - amountOwing)) {
-            _recordSweep(true);
-        }
+        _settleProfit(asset, bal - requiredBalance);
         return true;
     }
 
@@ -654,11 +661,10 @@ contract UnifiedHardenedExecutor is
     /// @param sender Original sender passed by SoloMargin.
     /// @param accountInfo dYdX account metadata.
     /// @param data ABI-encoded payload `(asset, amount, params)`.
-    function callFunction(
-        address sender,
-        IDydxSoloMargin.AccountInfo calldata accountInfo,
-        bytes calldata data
-    ) external override {
+    function callFunction(address sender, IDydxSoloMargin.AccountInfo calldata accountInfo, bytes calldata data)
+        external
+        override
+    {
         if (msg.sender != activeDydxSolo) revert OnlyDydxSolo();
         if (activeDydxSolo == address(0)) revert DydxLoanNotActive();
         if (sender != address(this) || accountInfo.owner != address(this)) revert OnlyOwner();
@@ -672,12 +678,19 @@ contract UnifiedHardenedExecutor is
         dydxLoanContextHash = bytes32(0);
         emit DydxSoloStateUpdated(previousSolo, address(0));
 
+        uint256 callbackBalance = IERC20(asset).balanceOf(address(this));
+        if (callbackBalance < dydxPreLoanBalance + amount) {
+            revert PrincipalNotReceived();
+        }
+        dydxPreLoanBalance = 0;
+        uint256 preExistingBalance = callbackBalance - amount;
         _executePayloadFromMemory(params);
 
         uint256 amountOwing = amount + 2;
         uint256 bal = IERC20(asset).balanceOf(address(this));
-        if (bal < amountOwing) {
-            revert InsufficientFundsForRepayment(asset, amountOwing, bal);
+        uint256 requiredBalance = preExistingBalance + amountOwing;
+        if (bal < requiredBalance) {
+            revert InsufficientFundsForRepayment(asset, requiredBalance, bal);
         }
 
         uint256 currentAllowance = IERC20(asset).allowance(address(this), msg.sender);
@@ -688,9 +701,7 @@ contract UnifiedHardenedExecutor is
             _lowLevelApprove(asset, msg.sender, amountOwing);
         }
 
-        if (_settleAaveAutoSweep(asset, bal - amountOwing)) {
-            _recordSweep(true);
-        }
+        _settleProfit(asset, bal - requiredBalance);
     }
 
     /// @notice ERC3156 flash loan callback used by MakerDAO flash lender.
@@ -700,13 +711,11 @@ contract UnifiedHardenedExecutor is
     /// @param fee Flash loan fee.
     /// @param data ABI-encoded payload containing `(targets, values, payloads)`.
     /// @return Callback success selector hash required by ERC3156.
-    function onFlashLoan(
-        address initiator,
-        address token,
-        uint256 amount,
-        uint256 fee,
-        bytes calldata data
-    ) external override returns (bytes32) {
+    function onFlashLoan(address initiator, address token, uint256 amount, uint256 fee, bytes calldata data)
+        external
+        override
+        returns (bytes32)
+    {
         if (msg.sender != activeMakerLender) revert OnlyMakerFlashLender();
         if (activeMakerLender == address(0)) revert MakerLoanNotActive();
         if (initiator != address(this)) revert OnlyOwner();
@@ -719,12 +728,19 @@ contract UnifiedHardenedExecutor is
         makerLoanContextHash = bytes32(0);
         emit MakerFlashLenderStateUpdated(previousLender, address(0));
 
+        uint256 callbackBalance = IERC20(token).balanceOf(address(this));
+        if (callbackBalance < makerPreLoanBalance + amount) {
+            revert PrincipalNotReceived();
+        }
+        makerPreLoanBalance = 0;
+        uint256 preExistingBalance = callbackBalance - amount;
         _executePayloadFromCalldata(data);
 
         uint256 amountOwing = amount + fee;
         uint256 bal = IERC20(token).balanceOf(address(this));
-        if (bal < amountOwing) {
-            revert InsufficientFundsForRepayment(token, amountOwing, bal);
+        uint256 requiredBalance = preExistingBalance + amountOwing;
+        if (bal < requiredBalance) {
+            revert InsufficientFundsForRepayment(token, requiredBalance, bal);
         }
 
         uint256 currentAllowance = IERC20(token).allowance(address(this), msg.sender);
@@ -735,9 +751,7 @@ contract UnifiedHardenedExecutor is
             _lowLevelApprove(token, msg.sender, amountOwing);
         }
 
-        if (_settleAaveAutoSweep(token, bal - amountOwing)) {
-            _recordSweep(true);
-        }
+        _settleProfit(token, bal - requiredBalance);
         return ERC3156_CALLBACK_SUCCESS;
     }
 
@@ -746,12 +760,7 @@ contract UnifiedHardenedExecutor is
     /// @param amount0 Borrowed token0 amount.
     /// @param amount1 Borrowed token1 amount.
     /// @param data ABI-encoded payload `(asset, amount, params)`.
-    function uniswapV2Call(
-        address sender,
-        uint256 amount0,
-        uint256 amount1,
-        bytes calldata data
-    ) external override {
+    function uniswapV2Call(address sender, uint256 amount0, uint256 amount1, bytes calldata data) external override {
         if (msg.sender != activeUniswapV2Pair) revert OnlyUniswapV2Pair();
         if (activeUniswapV2Pair == address(0)) revert UniswapV2LoanNotActive();
         if (sender != address(this)) revert OnlyOwner();
@@ -770,17 +779,22 @@ contract UnifiedHardenedExecutor is
         uniswapV2LoanContextHash = bytes32(0);
         emit UniswapV2PairStateUpdated(previousPair, address(0));
 
+        uint256 callbackBalance = IERC20(asset).balanceOf(address(this));
+        if (callbackBalance < uniswapV2PreLoanBalance + amount) {
+            revert PrincipalNotReceived();
+        }
+        uniswapV2PreLoanBalance = 0;
+        uint256 preExistingBalance = callbackBalance - amount;
         _executePayloadFromMemory(params);
 
         uint256 amountOwing = _uniswapV2RepaymentAmount(amount);
         uint256 bal = IERC20(asset).balanceOf(address(this));
-        if (bal < amountOwing) {
-            revert InsufficientFundsForRepayment(asset, amountOwing, bal);
+        uint256 requiredBalance = preExistingBalance + amountOwing;
+        if (bal < requiredBalance) {
+            revert InsufficientFundsForRepayment(asset, requiredBalance, bal);
         }
 
-        if (_settleAaveAutoSweep(asset, bal - amountOwing)) {
-            _recordSweep(true);
-        }
+        _settleProfit(asset, bal - requiredBalance);
         _safeTransfer(asset, msg.sender, amountOwing);
     }
 
@@ -788,11 +802,7 @@ contract UnifiedHardenedExecutor is
     /// @param fee0 Fee owed in token0.
     /// @param fee1 Fee owed in token1.
     /// @param data ABI-encoded payload `(asset, amount, params)`.
-    function uniswapV3FlashCallback(
-        uint256 fee0,
-        uint256 fee1,
-        bytes calldata data
-    ) external override {
+    function uniswapV3FlashCallback(uint256 fee0, uint256 fee1, bytes calldata data) external override {
         if (msg.sender != activeUniswapV3Pool) revert OnlyUniswapV3Pool();
         if (activeUniswapV3Pool == address(0)) revert UniswapV3LoanNotActive();
 
@@ -805,6 +815,12 @@ contract UnifiedHardenedExecutor is
         uniswapV3LoanContextHash = bytes32(0);
         emit UniswapV3PoolStateUpdated(previousPool, address(0));
 
+        uint256 callbackBalance = IERC20(asset).balanceOf(address(this));
+        if (callbackBalance < uniswapV3PreLoanBalance + amount) {
+            revert PrincipalNotReceived();
+        }
+        uniswapV3PreLoanBalance = 0;
+        uint256 preExistingBalance = callbackBalance - amount;
         _executePayloadFromMemory(params);
 
         uint256 amountOwing;
@@ -818,20 +834,19 @@ contract UnifiedHardenedExecutor is
         }
 
         uint256 bal = IERC20(asset).balanceOf(address(this));
-        if (bal < amountOwing) {
-            revert InsufficientFundsForRepayment(asset, amountOwing, bal);
+        uint256 requiredBalance = preExistingBalance + amountOwing;
+        if (bal < requiredBalance) {
+            revert InsufficientFundsForRepayment(asset, requiredBalance, bal);
         }
 
-        if (_settleAaveAutoSweep(asset, bal - amountOwing)) {
-            _recordSweep(true);
-        }
+        _settleProfit(asset, bal - requiredBalance);
         _safeTransfer(asset, msg.sender, amountOwing);
     }
 
     /// @notice Updates the configured profit receiver.
     /// @param newReceiver New receiver address for sweep transfers.
     function setProfitReceiver(address newReceiver) external onlyOwner {
-        if (newReceiver == address(0)) revert InvalidProfitReceiver();
+        if (newReceiver == address(0) || newReceiver == address(this)) revert InvalidProfitReceiver();
         profitReceiver = newReceiver;
         emit ProfitReceiverUpdated(newReceiver);
     }
@@ -843,10 +858,43 @@ contract UnifiedHardenedExecutor is
         emit SweepPreferenceUpdated(sweepToEth);
     }
 
-    /// @notice Returns whether the configured auto-sweep interval has elapsed.
-    /// @return True when auto sweep is due.
-    function autoSweepDue() public view returns (bool) {
-        return block.timestamp >= lastSweepAt + AUTO_SWEEP_INTERVAL;
+    function setPaused(bool newPaused) external onlyOwner {
+        paused = newPaused;
+        emit PauseStateUpdated(newPaused);
+    }
+
+    /// @notice Updates approval state for a flash loan provider.
+    /// @param provider Provider address to approve or revoke.
+    /// @param approved True to approve; false to revoke.
+    function setApprovedProvider(address provider, bool approved) external onlyOwner {
+        if (provider == address(0) || provider == address(this) || provider.code.length == 0) revert InvalidPool();
+        approvedProviders[provider] = approved;
+        emit ProviderApprovalUpdated(provider, approved);
+    }
+
+    function _requireApprovedProvider(address provider) internal view {
+        if (!approvedProviders[provider]) {
+            revert ProviderNotApproved();
+        }
+    }
+
+    function transferOwnership(address newOwner) external onlyOwner {
+        if (newOwner == address(0) || newOwner == address(this)) revert InvalidOwner();
+        pendingOwner = newOwner;
+        emit OwnershipTransferStarted(owner, newOwner);
+    }
+
+    function cancelOwnershipTransfer() external onlyOwner {
+        pendingOwner = address(0);
+        emit OwnershipTransferStarted(owner, address(0));
+    }
+
+    function acceptOwnership() external {
+        if (msg.sender != pendingOwner) revert OnlyPendingOwner();
+        address previousOwner = owner;
+        owner = msg.sender;
+        pendingOwner = address(0);
+        emit OwnershipTransferred(previousOwner, msg.sender);
     }
 
     /// @notice Manually sweeps the full token balance to `profitReceiver`.
@@ -856,14 +904,16 @@ contract UnifiedHardenedExecutor is
         uint256 bal = IERC20(token).balanceOf(address(this));
         if (bal == 0) return;
         _safeTransfer(token, cachedProfitReceiver, bal);
-        _recordSweep(false);
+        emit ManualSweepExecuted(block.timestamp);
     }
 
     /// @notice Manually sweeps the full native ETH balance to `profitReceiver`.
     function sweepETH() external onlyOwner {
         address cachedProfitReceiver = profitReceiver;
-        if (_transferEthToProfitReceiver(true, cachedProfitReceiver)) {
-            _recordSweep(false);
+        uint256 balance = address(this).balance;
+        if (balance > 0) {
+            _transferEthAmount(cachedProfitReceiver, balance, true);
+            emit ManualSweepExecuted(block.timestamp);
         }
     }
 
@@ -897,15 +947,63 @@ contract UnifiedHardenedExecutor is
         _executeTargets(targets, values, payloads);
     }
 
+    function _executeDirectCalls(address[] calldata targets, bytes[] calldata payloads, uint256[] calldata values)
+        internal
+    {
+        for (uint256 i = 0; i < targets.length; i++) {
+            (bool success, bytes memory result) = targets[i].call{value: values[i]}(payloads[i]);
+            if (!success) {
+                _revertWithDetails(i, result);
+            }
+        }
+    }
+
+    function _payBribe(address recipient, uint256 amount) internal {
+        if (amount == 0) return;
+        if (address(this).balance < amount) revert BribeFailed();
+        address actualRecipient = recipient == address(0) ? block.coinbase : recipient;
+        (bool ok,) = actualRecipient.call{value: amount}("");
+        if (!ok) revert BribeFailed();
+        emit BundleExecuted(amount);
+    }
+
+    function _settleDirectProfit(uint256 wethBalanceBefore, uint256 ethBalanceBefore) internal {
+        uint256 wethBalanceAfter = IERC20(WETH).balanceOf(address(this));
+        uint256 ethBalanceAfter = address(this).balance;
+
+        uint256 capitalBefore = wethBalanceBefore + ethBalanceBefore;
+        uint256 capitalAfter = wethBalanceAfter + ethBalanceAfter;
+
+        if (capitalAfter < capitalBefore) {
+            revert BalanceInvariantBroken(WETH, capitalBefore, capitalAfter);
+        }
+
+        uint256 profit = capitalAfter - capitalBefore;
+        if (profit == 0) return;
+
+        if (sweepProfitToEth) {
+            uint256 ethAvailable = address(this).balance;
+            if (ethAvailable < profit) {
+                IWETH(WETH).withdraw(profit - ethAvailable);
+            }
+            _transferEthAmount(profitReceiver, profit, true);
+            emit ProfitSettled(address(0), profit, profitReceiver);
+        } else {
+            uint256 wethAvailable = IERC20(WETH).balanceOf(address(this));
+            if (wethAvailable < profit) {
+                IWETH(WETH).deposit{value: profit - wethAvailable}();
+            }
+            _safeTransfer(WETH, profitReceiver, profit);
+            emit ArbitrageExecuted(profit, WETH);
+            emit ProfitSettled(WETH, profit, profitReceiver);
+        }
+    }
+
     /// @notice Executes target calls with per-call ETH values.
     /// @param targets Ordered call targets.
     /// @param values ETH value for each call.
     /// @param payloads Calldata for each target.
-    function _executeTargets(
-        address[] memory targets,
-        uint256[] memory values,
-        bytes[] memory payloads
-    ) internal {
+    function _executeTargets(address[] memory targets, uint256[] memory values, bytes[] memory payloads) internal {
         uint256 targetsLen = targets.length;
         if (targetsLen != values.length || targetsLen != payloads.length) {
             revert LengthMismatch();
@@ -919,21 +1017,17 @@ contract UnifiedHardenedExecutor is
         }
     }
 
-    /// @notice Settles Balancer flash loan repayment and optional lazy auto-sweep.
+    /// @notice Settles Balancer repayment without consuming pre-existing executor balances.
     /// @param tokens Borrowed tokens.
     /// @param amounts Borrowed principal amounts.
     /// @param feeAmounts Fee amounts owed per token.
-    /// @return autoSweepRan True if at least one automatic sweep transfer succeeded.
     function _settleBalancerRepayment(
         IERC20[] memory tokens,
         uint256[] memory amounts,
-        uint256[] memory feeAmounts
-    ) internal returns (bool autoSweepRan) {
-        bool dueForAutoSweep = autoSweepDue();
+        uint256[] memory feeAmounts,
+        uint256[] memory preExistingBalances
+    ) internal {
         uint256 tokensLen = tokens.length;
-        address balancerVault = BALANCER_VAULT;
-        address cachedProfitReceiver = profitReceiver;
-        bool cachedSweepToEth = sweepProfitToEth;
 
         for (uint256 i = 0; i < tokensLen; i++) {
             uint256 amountOwing = amounts[i] + feeAmounts[i];
@@ -941,42 +1035,19 @@ contract UnifiedHardenedExecutor is
 
             address tokenAddr = address(tokens[i]);
             uint256 myBalance = IERC20(tokenAddr).balanceOf(address(this));
-
-            if (myBalance < amountOwing) {
-                revert InsufficientFundsForRepayment(tokenAddr, amountOwing, myBalance);
+            uint256 requiredBalance = preExistingBalances[i] + amountOwing;
+            if (myBalance < requiredBalance) {
+                revert InsufficientFundsForRepayment(tokenAddr, requiredBalance, myBalance);
             }
-
-            uint256 surplus = myBalance - amountOwing;
-            if (dueForAutoSweep && surplus > 0) {
-                if (_distributeProfit(tokenAddr, surplus, cachedProfitReceiver, cachedSweepToEth)) {
-                    autoSweepRan = true;
-                }
-            }
-
+            uint256 profit = myBalance - requiredBalance;
             _safeTransfer(tokenAddr, balancerVault, amountOwing);
-        }
-
-        if (dueForAutoSweep && _transferEthToProfitReceiver(false, cachedProfitReceiver)) {
-            autoSweepRan = true;
+            _settleProfit(tokenAddr, profit);
         }
     }
 
-    /// @notice Handles optional lazy auto-sweep after Aave repayment setup.
-    /// @param asset Borrowed asset used for surplus distribution.
-    /// @param surplus Surplus balance after reserving repayment amount.
-    /// @return autoSweepRan True if at least one automatic sweep transfer succeeded.
-    function _settleAaveAutoSweep(address asset, uint256 surplus) internal returns (bool autoSweepRan) {
-        bool dueForAutoSweep = autoSweepDue();
-        address cachedProfitReceiver = profitReceiver;
-        bool cachedSweepToEth = sweepProfitToEth;
-        if (dueForAutoSweep && surplus > 0) {
-            if (_distributeProfit(asset, surplus, cachedProfitReceiver, cachedSweepToEth)) {
-                autoSweepRan = true;
-            }
-        }
-        if (dueForAutoSweep && _transferEthToProfitReceiver(false, cachedProfitReceiver)) {
-            autoSweepRan = true;
-        }
+    function _settleProfit(address asset, uint256 profit) internal {
+        if (profit == 0) return;
+        _distributeProfit(asset, profit, profitReceiver, sweepProfitToEth);
     }
 
     /// @notice Finds dYdX market id for a token address.
@@ -997,15 +1068,9 @@ contract UnifiedHardenedExecutor is
     /// @param sign Sign flag where true is positive amount.
     /// @param value Amount value.
     /// @return AssetAmount formatted for SoloMargin actions.
-    function _dydxAssetAmount(
-        bool sign,
-        uint256 value
-    ) internal pure returns (IDydxSoloMargin.AssetAmount memory) {
+    function _dydxAssetAmount(bool sign, uint256 value) internal pure returns (IDydxSoloMargin.AssetAmount memory) {
         return IDydxSoloMargin.AssetAmount({
-            sign: sign,
-            denomination: DYDX_ASSET_DENOMINATION_WEI,
-            ref: DYDX_ASSET_REFERENCE_DELTA,
-            value: value
+            sign: sign, denomination: DYDX_ASSET_DENOMINATION_WEI, ref: DYDX_ASSET_REFERENCE_DELTA, value: value
         });
     }
 
@@ -1013,10 +1078,11 @@ contract UnifiedHardenedExecutor is
     /// @param marketId Market id.
     /// @param amount Amount to withdraw.
     /// @return ActionArgs for SoloMargin.
-    function _dydxWithdrawAction(
-        uint256 marketId,
-        uint256 amount
-    ) internal view returns (IDydxSoloMargin.ActionArgs memory) {
+    function _dydxWithdrawAction(uint256 marketId, uint256 amount)
+        internal
+        view
+        returns (IDydxSoloMargin.ActionArgs memory)
+    {
         return IDydxSoloMargin.ActionArgs({
             actionType: DYDX_ACTION_WITHDRAW,
             accountId: 0,
@@ -1049,10 +1115,11 @@ contract UnifiedHardenedExecutor is
     /// @param marketId Market id.
     /// @param amount Amount to deposit.
     /// @return ActionArgs for SoloMargin.
-    function _dydxDepositAction(
-        uint256 marketId,
-        uint256 amount
-    ) internal view returns (IDydxSoloMargin.ActionArgs memory) {
+    function _dydxDepositAction(uint256 marketId, uint256 amount)
+        internal
+        view
+        returns (IDydxSoloMargin.ActionArgs memory)
+    {
         return IDydxSoloMargin.ActionArgs({
             actionType: DYDX_ACTION_DEPOSIT,
             accountId: 0,
@@ -1078,87 +1145,55 @@ contract UnifiedHardenedExecutor is
     }
 
     /// @notice Distributes token-denominated profit to receiver based on sweep settings.
-    /// @dev On transfer failure, emits `DistributeFailed` and returns false without reverting.
     /// @param tokenAddr Token from which profit is distributed.
     /// @param profit Profit amount.
     /// @param receiver Profit receiver.
     /// @param sweepToEth Whether WETH profits should be unwrapped into ETH.
-    /// @return True when token transfer succeeds, false otherwise.
-    function _distributeProfit(
-        address tokenAddr,
-        uint256 profit,
-        address receiver,
-        bool sweepToEth
-    ) internal returns (bool) {
+    function _distributeProfit(address tokenAddr, uint256 profit, address receiver, bool sweepToEth) internal {
         if (tokenAddr == WETH && sweepToEth) {
             IWETH(WETH).withdraw(profit);
-            return false;
+            _transferEthAmount(receiver, profit, true);
+            emit ProfitSettled(tokenAddr, profit, receiver);
+            return;
         }
-
-        (bool success, bytes memory data) = tokenAddr.call(
-            abi.encodeWithSelector(0xa9059cbb, receiver, profit)
-        );
-        if (!success || (data.length != 0 && !abi.decode(data, (bool)))) {
-            emit DistributeFailed(tokenAddr, profit);
-            return false;
-        }
-
+        _safeTransfer(tokenAddr, receiver, profit);
         emit ArbitrageExecuted(profit, tokenAddr);
-        return true;
+        emit ProfitSettled(tokenAddr, profit, receiver);
     }
 
-    /// @notice Transfers all native ETH held by this contract to receiver.
-    /// @param revertOnFailure Whether failed transfer should revert.
-    /// @param receiver ETH receiver.
-    /// @return True when transfer succeeds, false when no balance or transfer failure is swallowed.
-    function _transferEthToProfitReceiver(bool revertOnFailure, address receiver) internal returns (bool) {
-        uint256 bal = address(this).balance;
-        if (bal == 0) return false;
-
-        (bool success, ) = receiver.call{value: bal}("");
+    function _transferEthAmount(address receiver, uint256 amount, bool revertOnFailure) internal {
+        if (amount == 0) return;
+        (bool success,) = receiver.call{value: amount}("");
         if (!success) {
             if (revertOnFailure) revert TokenTransferFailed();
-            emit DistributeFailed(address(0), bal);
-            return false;
-        }
-        return true;
-    }
-
-    /// @notice Records a sweep event and updates sweep timestamp only when needed.
-    /// @param automatic True for auto sweep events, false for manual sweep events.
-    function _recordSweep(bool automatic) internal {
-        uint256 sweepTimestamp = block.timestamp;
-        if (lastSweepAt != sweepTimestamp) {
-            lastSweepAt = sweepTimestamp;
-        }
-        if (automatic) {
-            emit AutoSweepExecuted(sweepTimestamp);
-        } else {
-            emit ManualSweepExecuted(sweepTimestamp);
         }
     }
 
-    /// @notice Performs a low-level ERC20 approve call.
+    /// @notice Performs a low-level ERC20 approve call with bytecode check.
     /// @param token ERC20 token.
     /// @param spender Allowance spender.
     /// @param amount Allowance value.
     function _lowLevelApprove(address token, address spender, uint256 amount) internal {
-        (bool success, bytes memory data) = token.call(
-            abi.encodeWithSelector(0x095ea7b3, spender, amount)
-        );
+        if (token.code.length == 0) revert InvalidAsset();
+        (bool success, bytes memory data) = token.call(abi.encodeWithSelector(0x095ea7b3, spender, amount));
         if (!success || (data.length != 0 && !abi.decode(data, (bool)))) {
             revert ApprovalFailed();
         }
     }
 
-    /// @notice Performs a low-level ERC20 transfer call.
+    function _resetAllowance(address token, address spender) internal {
+        if (IERC20(token).allowance(address(this), spender) != 0) {
+            _lowLevelApprove(token, spender, 0);
+        }
+    }
+
+    /// @notice Performs a low-level ERC20 transfer call with bytecode check.
     /// @param token ERC20 token.
     /// @param to Transfer recipient.
     /// @param value Transfer amount.
     function _safeTransfer(address token, address to, uint256 value) internal {
-        (bool success, bytes memory data) = token.call(
-            abi.encodeWithSelector(0xa9059cbb, to, value)
-        );
+        if (token.code.length == 0) revert InvalidAsset();
+        (bool success, bytes memory data) = token.call(abi.encodeWithSelector(0xa9059cbb, to, value));
         if (!success || (data.length != 0 && !abi.decode(data, (bool)))) {
             revert TokenTransferFailed();
         }

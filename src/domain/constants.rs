@@ -27,6 +27,10 @@ pub const CHAIN_OPTIMISM: u64 = 10;
 pub const CHAIN_BSC: u64 = 56;
 pub const CHAIN_POLYGON: u64 = 137;
 pub const CHAIN_ARBITRUM: u64 = 42161;
+pub const CHAIN_SEPOLIA: u64 = 11155111;
+
+pub const FLASHBOTS_MAINNET_RELAY_URL: &str = "https://relay.flashbots.net";
+pub const FLASHBOTS_SEPOLIA_RELAY_URL: &str = "https://relay-sepolia.flashbots.net";
 
 // Block times in seconds (approximate)
 pub fn get_block_time(chain_id: u64) -> u64 {
@@ -379,20 +383,28 @@ pub fn default_chainlink_feeds(chain_id: u64) -> HashMap<String, Address> {
         .unwrap_or_default()
 }
 
+pub fn try_wrapped_native_for_chain(chain_id: u64) -> Option<Address> {
+    WRAPPED_NATIVE_BY_CHAIN.get(&chain_id).copied()
+}
+
 pub fn wrapped_native_for_chain(chain_id: u64) -> Address {
-    WRAPPED_NATIVE_BY_CHAIN
-        .get(&chain_id)
-        .copied()
-        .or_else(|| WRAPPED_NATIVE_BY_CHAIN.get(&CHAIN_ETHEREUM).copied())
-        .unwrap_or(Address::ZERO)
+    try_wrapped_native_for_chain(chain_id).unwrap_or(Address::ZERO)
+}
+
+pub fn try_native_sentinel_for_chain(chain_id: u64) -> Option<Address> {
+    NATIVE_SENTINEL_BY_CHAIN.get(&chain_id).copied()
 }
 
 pub fn native_sentinel_for_chain(chain_id: u64) -> Address {
-    NATIVE_SENTINEL_BY_CHAIN
-        .get(&chain_id)
-        .copied()
-        .or_else(|| NATIVE_SENTINEL_BY_CHAIN.get(&CHAIN_ETHEREUM).copied())
-        .unwrap_or(Address::ZERO)
+    try_native_sentinel_for_chain(chain_id).unwrap_or(Address::ZERO)
+}
+
+pub fn default_flashbots_relay_for_chain(chain_id: u64) -> Option<&'static str> {
+    match chain_id {
+        CHAIN_ETHEREUM => Some(FLASHBOTS_MAINNET_RELAY_URL),
+        CHAIN_SEPOLIA => Some(FLASHBOTS_SEPOLIA_RELAY_URL),
+        _ => None,
+    }
 }
 
 pub fn native_symbol_for_chain(chain_id: u64) -> &'static str {
@@ -449,8 +461,38 @@ mod tests {
     #[test]
     fn native_symbol_map() {
         assert_eq!(native_symbol_for_chain(CHAIN_ETHEREUM), "ETH");
+        assert_eq!(native_symbol_for_chain(CHAIN_SEPOLIA), "ETH");
         assert_eq!(native_symbol_for_chain(CHAIN_BSC), "BNB");
         assert_eq!(native_symbol_for_chain(CHAIN_POLYGON), "MATIC");
+    }
+
+    #[test]
+    fn unknown_chains_do_not_inherit_mainnet_assets() {
+        let unknown_chain = u64::MAX;
+        assert_eq!(try_wrapped_native_for_chain(unknown_chain), None);
+        assert_eq!(wrapped_native_for_chain(unknown_chain), Address::ZERO);
+        assert_eq!(try_native_sentinel_for_chain(unknown_chain), None);
+        assert_eq!(native_sentinel_for_chain(unknown_chain), Address::ZERO);
+    }
+
+    #[test]
+    fn sepolia_defaults_are_explicit() {
+        assert_eq!(
+            wrapped_native_for_chain(CHAIN_SEPOLIA),
+            Address::from_str("0xfff9976782d46cc05630d1f6ebab18b2324d6b14").unwrap()
+        );
+        assert_eq!(
+            default_flashbots_relay_for_chain(CHAIN_SEPOLIA),
+            Some(FLASHBOTS_SEPOLIA_RELAY_URL)
+        );
+        assert!(default_balancer_vault_for_chain(CHAIN_SEPOLIA).is_some());
+        assert!(default_aave_pool(CHAIN_SEPOLIA).is_some());
+        assert!(default_uniswap_v2_router(CHAIN_SEPOLIA).is_some());
+        assert_eq!(
+            default_uniswap_v2_factory(CHAIN_SEPOLIA),
+            Some(Address::from_str("0xf62c03e08ada871a0beb309762e260a7a6a880e6").unwrap())
+        );
+        assert!(default_uniswap_v3_router(CHAIN_SEPOLIA).is_some());
     }
 
     #[test]

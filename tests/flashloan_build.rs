@@ -191,7 +191,7 @@ async fn flashloan_builder_uses_aave_selector() {
     let (_raw, request, _hash, _premium, _overhead) = match built {
         Ok(v) => v,
         Err(e) => {
-            // Some local Nethermind/Anvil configs disable access-list calls; skip gracefully.
+            // Some local Client/Anvil configs disable access-list calls; skip gracefully.
             eprintln!("skipping aave selector test: {e}");
             return;
         }

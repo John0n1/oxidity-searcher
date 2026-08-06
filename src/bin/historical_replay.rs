@@ -16,7 +16,7 @@ use oxidity_searcher::app::logging::setup_logging;
 use oxidity_searcher::common::parsing;
 use oxidity_searcher::domain::error::AppError;
 use oxidity_searcher::infrastructure::data::db::Database;
-use oxidity_searcher::services::strategy::decode::{RouterKind, decode_swap_input};
+use oxidity_searcher::services::strategy::decode::{RouterKind, decode_swap_input_for_chain};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -137,6 +137,7 @@ struct WindowReport {
 }
 
 struct ReplayWindowInput<'a> {
+    chain_id: u64,
     window_index: usize,
     start_block: u64,
     end_block: u64,
@@ -463,6 +464,7 @@ async fn main() -> Result<(), AppError> {
     let mut reports = Vec::with_capacity(windows.len());
     for (idx, (w_start, w_end)) in windows.iter().copied().enumerate() {
         let input = ReplayWindowInput {
+            chain_id,
             window_index: idx + 1,
             start_block: w_start,
             end_block: w_end,
@@ -584,6 +586,7 @@ async fn replay_window(
     input: ReplayWindowInput<'_>,
 ) -> Result<WindowReport, AppError> {
     let ReplayWindowInput {
+        chain_id,
         window_index,
         start_block,
         end_block,
@@ -637,7 +640,7 @@ async fn replay_window(
             tx_candidate = tx_candidate.saturating_add(1);
             candidate_routers.insert(to);
             let value = parsing::parse_u256_hex(&tx.value).unwrap_or(U256::ZERO);
-            if let Some(observed) = decode_swap_input(to, &input, value) {
+            if let Some(observed) = decode_swap_input_for_chain(chain_id, to, &input, value) {
                 tx_decoded = tx_decoded.saturating_add(1);
                 match observed.router_kind {
                     RouterKind::V2Like => decoded_v2 = decoded_v2.saturating_add(1),

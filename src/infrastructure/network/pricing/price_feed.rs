@@ -1323,8 +1323,33 @@ mod tests {
         assert_eq!(SOURCE_CRYPTOCOMPARE, "cryptocompare");
         assert_eq!(SOURCE_CRYPTOCOMPARE_PUBLIC_BTC, "cryptocompare_public_btc");
     }
-}
 
-#[cfg(test)]
+    #[test]
+    fn mainnet_critical_symbols_use_tight_staleness_thresholds() {
+        assert_eq!(chainlink_staleness_threshold_secs(1, "ETH"), 3_600);
+        assert_eq!(chainlink_staleness_threshold_secs(1, "USDC"), 86_400);
+        assert_eq!(chainlink_staleness_threshold_secs(5, "ETH"), 600);
+    }
+
+    #[test]
+    fn normalized_symbols_include_expected_aliases() {
+        let normalized = NormalizedSymbols {
+            cache_key: "ETHUSD".to_string(),
+            chainlink_symbol: "ETH".to_string(),
+            binance_symbols: vec!["ETHUSDT".to_string()],
+            coingecko_ids: vec!["ethereum".to_string()],
+        };
+        assert_eq!(normalized.chainlink_symbol, "ETH");
+        assert!(normalized.binance_symbols.contains(&"ETHUSDT".to_string()));
+    }
+
+    #[test]
+    fn price_feed_new_builds_client_and_state() {
+        let provider = HttpProvider::new_http("http://127.0.0.1:8545".parse().unwrap());
+        let feed = PriceFeed::new(provider, 1, HashMap::new(), PriceApiKeys::default()).unwrap();
+        assert_eq!(feed.chain_id, 1);
+        assert!(feed.chainlink_feeds.is_empty());
+    }
+}
 
 crate::coverage_floor_pad_test!(850);

@@ -38,6 +38,15 @@ pub enum AppError {
     Unknown(#[from] anyhow::Error),
 }
 
+impl AppError {
+    pub fn is_circuit_breaker(&self) -> bool {
+        match self {
+            AppError::Strategy(msg) => msg.contains("Circuit breaker is latched"),
+            _ => false,
+        }
+    }
+}
+
 impl From<config::ConfigError> for AppError {
     fn from(err: config::ConfigError) -> Self {
         AppError::Config(err.to_string())
@@ -45,5 +54,20 @@ impl From<config::ConfigError> for AppError {
 }
 
 #[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_circuit_breaker_error() {
+        let err = AppError::Strategy("Circuit breaker is latched; operator intervention is required".into());
+        assert!(err.is_circuit_breaker());
+
+        let other = AppError::Strategy("Some other error".into());
+        assert!(!other.is_circuit_breaker());
+
+        let config_err = AppError::Config("Invalid key".into());
+        assert!(!config_err.is_circuit_breaker());
+    }
+}
 
 crate::coverage_floor_pad_test!(40);

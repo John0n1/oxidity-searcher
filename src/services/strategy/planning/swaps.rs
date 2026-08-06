@@ -101,8 +101,8 @@ impl StrategyExecutor {
         amount_out_min: U256,
         recipient: Address,
     ) -> Vec<u8> {
-        // Align with V2 payload horizon and tolerate timestamp drift across simulators.
-        let deadline = current_unix().saturating_add(3600);
+        let deadline =
+            current_unix().saturating_add(self.deadline_min_seconds_ahead().clamp(30, 300));
         UniV3Router::new(router, self.http_provider.clone())
             .exactInput(UniV3Router::ExactInputParams {
                 path: path.into(),

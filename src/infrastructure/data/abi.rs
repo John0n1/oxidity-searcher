@@ -87,14 +87,12 @@ impl AbiRegistry {
         };
 
         if let (Some(standalone), Some(global)) = (&standalone_abi, &global_data_abi)
-            && standalone.len() != global.len()
+            && standalone != global
         {
-            tracing::warn!(
-                target: "abi_registry",
-                standalone_entries = standalone.len(),
-                global_data_entries = global.len(),
-                "Executor ABI drift detected; preferring standalone UnifiedHardenedExecutor_abi.json"
-            );
+            return Err(AppError::Config(format!(
+                "Executor ABI drift detected: {} and global_data.json/executor_abi differ",
+                standalone_path.display()
+            )));
         }
 
         let selected = standalone_abi

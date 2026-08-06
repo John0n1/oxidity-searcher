@@ -17,14 +17,14 @@ struct RpcErrorBody {
     message: String,
 }
 
-fn nethermind_http_provider() -> Option<String> {
-    std::env::var("NETHERMIND_HTTP_PROVIDER")
+fn client_http_provider() -> Option<String> {
+    std::env::var("CLIENT_HTTP_PROVIDER")
         .ok()
         .filter(|v| !v.trim().is_empty())
 }
 
-fn nethermind_jwt_secret_path() -> Option<String> {
-    std::env::var("NETHERMIND_JWT_SECRET_PATH")
+fn client_jwt_secret_path() -> Option<String> {
+    std::env::var("CLIENT_JWT_SECRET_PATH")
         .ok()
         .filter(|v| !v.trim().is_empty())
         .or_else(|| {
@@ -34,8 +34,8 @@ fn nethermind_jwt_secret_path() -> Option<String> {
         })
 }
 
-fn nethermind_auth_header() -> Option<String> {
-    let path = nethermind_jwt_secret_path()?;
+fn client_auth_header() -> Option<String> {
+    let path = client_jwt_secret_path()?;
     let secret = JwtSecret::from_file(Path::new(&path))
         .unwrap_or_else(|e| panic!("failed to load JWT secret from {path}: {e}"));
     let token = secret
@@ -76,7 +76,7 @@ fn assert_shape_conformant(method: &str, resp: &RpcResponse) {
         let msg = err.message.to_lowercase();
         assert_ne!(
             err.code, -32601,
-            "{method} missing/unavailable on configured Nethermind node: {}",
+            "{method} missing/unavailable on configured Client node: {}",
             err.message
         );
         assert_ne!(
@@ -102,16 +102,16 @@ fn assert_shape_conformant(method: &str, resp: &RpcResponse) {
 }
 
 #[tokio::test]
-async fn eth_simulate_v1_shape_matches_nethermind_expectations() {
-    let Some(url) = nethermind_http_provider() else {
-        eprintln!("skipping eth_simulateV1 conformance test: NETHERMIND_HTTP_PROVIDER is not set");
+async fn eth_simulate_v1_shape_matches_client_expectations() {
+    let Some(url) = client_http_provider() else {
+        eprintln!("skipping eth_simulateV1 conformance test: CLIENT_HTTP_PROVIDER is not set");
         return;
     };
     let client = Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
         .expect("client");
-    let auth_header = nethermind_auth_header();
+    let auth_header = client_auth_header();
 
     let chain = rpc_call(
         &client,
@@ -125,7 +125,7 @@ async fn eth_simulate_v1_shape_matches_nethermind_expectations() {
     assert_eq!(
         chain_id.as_deref(),
         Some("0x1"),
-        "NETHERMIND_HTTP_PROVIDER must point to Ethereum mainnet"
+        "CLIENT_HTTP_PROVIDER must point to Ethereum mainnet"
     );
 
     let params = json!([
@@ -160,10 +160,10 @@ async fn eth_simulate_v1_shape_matches_nethermind_expectations() {
 }
 
 #[tokio::test]
-async fn debug_trace_call_many_shape_matches_nethermind_expectations() {
-    let Some(url) = nethermind_http_provider() else {
+async fn debug_trace_call_many_shape_matches_client_expectations() {
+    let Some(url) = client_http_provider() else {
         eprintln!(
-            "skipping debug_traceCallMany conformance test: NETHERMIND_HTTP_PROVIDER is not set"
+            "skipping debug_traceCallMany conformance test: CLIENT_HTTP_PROVIDER is not set"
         );
         return;
     };
@@ -171,7 +171,7 @@ async fn debug_trace_call_many_shape_matches_nethermind_expectations() {
         .timeout(Duration::from_secs(20))
         .build()
         .expect("client");
-    let auth_header = nethermind_auth_header();
+    let auth_header = client_auth_header();
 
     let chain = rpc_call(
         &client,
@@ -185,7 +185,7 @@ async fn debug_trace_call_many_shape_matches_nethermind_expectations() {
     assert_eq!(
         chain_id.as_deref(),
         Some("0x1"),
-        "NETHERMIND_HTTP_PROVIDER must point to Ethereum mainnet"
+        "CLIENT_HTTP_PROVIDER must point to Ethereum mainnet"
     );
 
     let params = json!([

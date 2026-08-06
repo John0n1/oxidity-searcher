@@ -20,7 +20,7 @@ use once_cell::sync::Lazy;
 use std::collections::HashMap;
 
 use crate::common::constants::{
-    CHAIN_ARBITRUM, CHAIN_BSC, CHAIN_ETHEREUM, CHAIN_OPTIMISM, CHAIN_POLYGON,
+    CHAIN_ARBITRUM, CHAIN_BSC, CHAIN_ETHEREUM, CHAIN_OPTIMISM, CHAIN_POLYGON, CHAIN_SEPOLIA,
     default_routers_for_chain, native_sentinel_for_chain, wrapped_native_for_chain,
 };
 use crate::services::strategy::routers::{
@@ -71,6 +71,7 @@ static ROUTER_CHAIN_LOOKUP: Lazy<HashMap<Address, u64>> = Lazy::new(|| {
         CHAIN_BSC,
         CHAIN_POLYGON,
         CHAIN_ARBITRUM,
+        CHAIN_SEPOLIA,
     ] {
         for router in default_routers_for_chain(chain_id).values().copied() {
             // First insert wins so canonical chain mappings remain stable on collisions.
@@ -82,14 +83,6 @@ static ROUTER_CHAIN_LOOKUP: Lazy<HashMap<Address, u64>> = Lazy::new(|| {
 
 fn chain_id_for_router(router: Address) -> Option<u64> {
     ROUTER_CHAIN_LOOKUP.get(&router).copied()
-}
-
-fn wrapped_native_for_router(router: Address) -> Option<Address> {
-    chain_id_for_router(router).map(wrapped_native_for_chain)
-}
-
-fn native_sentinel_for_router(router: Address) -> Option<Address> {
-    chain_id_for_router(router).map(native_sentinel_for_chain)
 }
 
 sol! {
@@ -197,8 +190,25 @@ pub fn decode_swap(tx: &Transaction) -> Option<ObservedSwap> {
     decode_swap_input(router, tx.input(), tx.value())
 }
 
+pub fn decode_swap_for_chain(chain_id: u64, tx: &Transaction) -> Option<ObservedSwap> {
+    let router = match tx.kind() {
+        TxKind::Call(addr) => addr,
+        TxKind::Create => return None,
+    };
+    decode_swap_input_for_chain(chain_id, router, tx.input(), tx.value())
+}
+
 pub fn decode_swap_input(router: Address, input: &[u8], eth_value: U256) -> Option<ObservedSwap> {
-    decode_swap_input_inner(router, input, eth_value, 0)
+    decode_swap_input_inner(router, input, eth_value, 0, chain_id_for_router(router))
+}
+
+pub fn decode_swap_input_for_chain(
+    chain_id: u64,
+    router: Address,
+    input: &[u8],
+    eth_value: U256,
+) -> Option<ObservedSwap> {
+    decode_swap_input_inner(router, input, eth_value, 0, Some(chain_id))
 }
 
 pub fn extract_swap_deadline(input: &[u8]) -> Option<u64> {
@@ -295,6 +305,7 @@ fn decode_generic_multicall(
     input: &[u8],
     eth_value: U256,
     depth: usize,
+    chain_id: Option<u64>,
 ) -> Option<ObservedSwap> {
     if depth >= MAX_DECODE_RECURSION {
         return None;
@@ -303,7 +314,7 @@ fn decode_generic_multicall(
     if let Ok(decoded) = GenericMulticall::multicallCall::abi_decode(input) {
         for nested in decoded.data {
             if let Some(observed) =
-                decode_swap_input_inner(router, nested.as_ref(), eth_value, depth + 1)
+                decode_swap_input_inner(router, nested.as_ref(), eth_value, depth + 1, chain_id)
             {
                 return Some(observed);
             }
@@ -313,7 +324,7 @@ fn decode_generic_multicall(
     if let Ok(decoded) = GenericMulticallDeadline::multicallCall::abi_decode(input) {
         for nested in decoded.data {
             if let Some(observed) =
-                decode_swap_input_inner(router, nested.as_ref(), eth_value, depth + 1)
+                decode_swap_input_inner(router, nested.as_ref(), eth_value, depth + 1, chain_id)
             {
                 return Some(observed);
             }
@@ -327,6 +338,7 @@ fn decode_generic_aggregate_multicall(
     input: &[u8],
     eth_value: U256,
     depth: usize,
+    chain_id: Option<u64>,
 ) -> Option<ObservedSwap> {
     if depth >= MAX_DECODE_RECURSION {
         return None;
@@ -334,9 +346,13 @@ fn decode_generic_aggregate_multicall(
 
     if let Ok(decoded) = GenericAggregateMulticall::aggregateCall::abi_decode(input) {
         for call in decoded.calls {
-            if let Some(observed) =
-                decode_swap_input_inner(call.target, call.callData.as_ref(), eth_value, depth + 1)
-            {
+            if let Some(observed) = decode_swap_input_inner(
+                call.target,
+                call.callData.as_ref(),
+                eth_value,
+                depth + 1,
+                chain_id,
+            ) {
                 return Some(observed);
             }
         }
@@ -344,9 +360,13 @@ fn decode_generic_aggregate_multicall(
 
     if let Ok(decoded) = GenericAggregateMulticall::tryAggregateCall::abi_decode(input) {
         for call in decoded.calls {
-            if let Some(observed) =
-                decode_swap_input_inner(call.target, call.callData.as_ref(), eth_value, depth + 1)
-            {
+            if let Some(observed) = decode_swap_input_inner(
+                call.target,
+                call.callData.as_ref(),
+                eth_value,
+                depth + 1,
+                chain_id,
+            ) {
                 return Some(observed);
             }
         }
@@ -354,9 +374,13 @@ fn decode_generic_aggregate_multicall(
 
     if let Ok(decoded) = GenericAggregateMulticall::aggregate3Call::abi_decode(input) {
         for call in decoded.calls {
-            if let Some(observed) =
-                decode_swap_input_inner(call.target, call.callData.as_ref(), eth_value, depth + 1)
-            {
+            if let Some(observed) = decode_swap_input_inner(
+                call.target,
+                call.callData.as_ref(),
+                eth_value,
+                depth + 1,
+                chain_id,
+            ) {
                 return Some(observed);
             }
         }
@@ -364,9 +388,13 @@ fn decode_generic_aggregate_multicall(
 
     if let Ok(decoded) = GenericAggregateMulticall::aggregate3ValueCall::abi_decode(input) {
         for call in decoded.calls {
-            if let Some(observed) =
-                decode_swap_input_inner(call.target, call.callData.as_ref(), call.value, depth + 1)
-            {
+            if let Some(observed) = decode_swap_input_inner(
+                call.target,
+                call.callData.as_ref(),
+                call.value,
+                depth + 1,
+                chain_id,
+            ) {
                 return Some(observed);
             }
         }
@@ -374,9 +402,13 @@ fn decode_generic_aggregate_multicall(
 
     if let Ok(decoded) = GenericAggregateMulticall::blockAndAggregateCall::abi_decode(input) {
         for call in decoded.calls {
-            if let Some(observed) =
-                decode_swap_input_inner(call.target, call.callData.as_ref(), eth_value, depth + 1)
-            {
+            if let Some(observed) = decode_swap_input_inner(
+                call.target,
+                call.callData.as_ref(),
+                eth_value,
+                depth + 1,
+                chain_id,
+            ) {
                 return Some(observed);
             }
         }
@@ -384,9 +416,13 @@ fn decode_generic_aggregate_multicall(
 
     if let Ok(decoded) = GenericAggregateMulticall::tryBlockAndAggregateCall::abi_decode(input) {
         for call in decoded.calls {
-            if let Some(observed) =
-                decode_swap_input_inner(call.target, call.callData.as_ref(), eth_value, depth + 1)
-            {
+            if let Some(observed) = decode_swap_input_inner(
+                call.target,
+                call.callData.as_ref(),
+                eth_value,
+                depth + 1,
+                chain_id,
+            ) {
                 return Some(observed);
             }
         }
@@ -402,6 +438,7 @@ fn decode_swap_input_inner(
     input: &[u8],
     eth_value: U256,
     depth: usize,
+    chain_id: Option<u64>,
 ) -> Option<ObservedSwap> {
     if depth > MAX_DECODE_RECURSION {
         return None;
@@ -409,6 +446,19 @@ fn decode_swap_input_inner(
     if input.len() < 4 {
         return None;
     }
+
+    let observed_aggregator_swap = |router, token_in, token_out, amount_in, min_out, recipient| {
+        observed_aggregator_swap_for_chain(
+            chain_id, router, token_in, token_out, amount_in, min_out, recipient,
+        )
+    };
+    let observed_from_dex_base_request = |router, base_request, recipient| {
+        observed_from_dex_base_request_for_chain(chain_id, router, base_request, recipient)
+    };
+    let observed_transit_v2 =
+        |router, params| observed_transit_v2_for_chain(chain_id, router, params);
+    let normalize_balancer_asset =
+        |router, asset| normalize_balancer_asset_for_chain(chain_id, router, asset);
 
     let selector: [u8; 4] = input[..4].try_into().ok()?;
     match selector {
@@ -570,26 +620,26 @@ fn decode_swap_input_inner(
         }
         RelayRouterV3::multicallCall::SELECTOR => {
             let decoded = RelayRouterV3::multicallCall::abi_decode(input).ok()?;
-            decode_relay_calls(router, decoded.calls, depth, eth_value)
+            decode_relay_calls(router, decoded.calls, depth, eth_value, chain_id)
         }
         RelayApprovalProxyV3::transferAndMulticallCall::SELECTOR => {
             let decoded = RelayApprovalProxyV3::transferAndMulticallCall::abi_decode(input).ok()?;
-            decode_relay_approval_calls(router, decoded.calls, depth, eth_value)
+            decode_relay_approval_calls(router, decoded.calls, depth, eth_value, chain_id)
         }
         RelayApprovalProxyV3::permitTransferAndMulticallCall::SELECTOR => {
             let decoded =
                 RelayApprovalProxyV3::permitTransferAndMulticallCall::abi_decode(input).ok()?;
-            decode_relay_approval_calls(router, decoded.calls, depth, eth_value)
+            decode_relay_approval_calls(router, decoded.calls, depth, eth_value, chain_id)
         }
         RelayApprovalProxyV3::permit3009TransferAndMulticallCall::SELECTOR => {
             let decoded =
                 RelayApprovalProxyV3::permit3009TransferAndMulticallCall::abi_decode(input).ok()?;
-            decode_relay_approval_calls(router, decoded.calls, depth, eth_value)
+            decode_relay_approval_calls(router, decoded.calls, depth, eth_value, chain_id)
         }
         RelayApprovalProxyV3::permit2TransferAndMulticallCall::SELECTOR => {
             let decoded =
                 RelayApprovalProxyV3::permit2TransferAndMulticallCall::abi_decode(input).ok()?;
-            decode_relay_approval_calls(router, decoded.calls, depth, eth_value)
+            decode_relay_approval_calls(router, decoded.calls, depth, eth_value, chain_id)
         }
         BalancerVault::swapCall::SELECTOR => {
             let decoded = BalancerVault::swapCall::abi_decode(input).ok()?;
@@ -834,7 +884,7 @@ fn decode_swap_input_inner(
             let decoded = UniV3Multicall::multicallCall::abi_decode(input).ok()?;
             for nested in decoded.data {
                 if let Some(observed) =
-                    decode_swap_input_inner(router, nested.as_ref(), eth_value, depth + 1)
+                    decode_swap_input_inner(router, nested.as_ref(), eth_value, depth + 1, chain_id)
                 {
                     return Some(observed);
                 }
@@ -845,7 +895,7 @@ fn decode_swap_input_inner(
             let decoded = UniV3MulticallDeadline::multicallCall::abi_decode(input).ok()?;
             for nested in decoded.data {
                 if let Some(observed) =
-                    decode_swap_input_inner(router, nested.as_ref(), eth_value, depth + 1)
+                    decode_swap_input_inner(router, nested.as_ref(), eth_value, depth + 1, chain_id)
                 {
                     return Some(observed);
                 }
@@ -860,30 +910,46 @@ fn decode_swap_input_inner(
             let decoded = UniversalRouterDeadline::executeCall::abi_decode(input).ok()?;
             decode_universal_router(router, decoded.commands, decoded.inputs)
         }
-        _ => decode_generic_multicall(router, input, eth_value, depth)
-            .or_else(|| decode_generic_aggregate_multicall(input, eth_value, depth)),
+        _ => decode_generic_multicall(router, input, eth_value, depth, chain_id)
+            .or_else(|| decode_generic_aggregate_multicall(input, eth_value, depth, chain_id)),
     }
 }
 
-fn normalize_aggregator_token(router: Address, token: Address) -> Option<Address> {
+fn effective_decode_chain(chain_id: Option<u64>, router: Address) -> Option<u64> {
+    chain_id.or_else(|| chain_id_for_router(router))
+}
+
+fn normalize_aggregator_token_for_chain(
+    chain_id: Option<u64>,
+    router: Address,
+    token: Address,
+) -> Option<Address> {
     if token == Address::ZERO {
         return None;
     }
-    let native_sentinel = native_sentinel_for_router(router);
+    let resolved_chain = effective_decode_chain(chain_id, router);
+    let native_sentinel = resolved_chain.map(native_sentinel_for_chain);
     if native_sentinel.is_some() && Some(token) == native_sentinel {
-        return wrapped_native_for_router(router);
+        return resolved_chain.map(wrapped_native_for_chain);
     }
     Some(token)
 }
 
-fn normalize_balancer_asset(router: Address, asset: Address) -> Address {
+fn normalize_balancer_asset_for_chain(
+    chain_id: Option<u64>,
+    router: Address,
+    asset: Address,
+) -> Address {
     if asset == Address::ZERO {
-        return wrapped_native_for_router(router).unwrap_or(Address::ZERO);
+        return effective_decode_chain(chain_id, router)
+            .map(wrapped_native_for_chain)
+            .unwrap_or(Address::ZERO);
     }
     asset
 }
 
-fn observed_aggregator_swap(
+fn observed_aggregator_swap_for_chain(
+    chain_id: Option<u64>,
     router: Address,
     token_in_raw: Address,
     token_out_raw: Address,
@@ -891,8 +957,8 @@ fn observed_aggregator_swap(
     min_out: U256,
     recipient: Address,
 ) -> Option<ObservedSwap> {
-    let token_in = normalize_aggregator_token(router, token_in_raw)?;
-    let token_out = normalize_aggregator_token(router, token_out_raw)?;
+    let token_in = normalize_aggregator_token_for_chain(chain_id, router, token_in_raw)?;
+    let token_out = normalize_aggregator_token_for_chain(chain_id, router, token_out_raw)?;
     if token_in == token_out || amount_in.is_zero() {
         return None;
     }
@@ -918,13 +984,15 @@ fn u256_word_to_address(raw: U256) -> Option<Address> {
     }
 }
 
-fn observed_from_dex_base_request(
+fn observed_from_dex_base_request_for_chain(
+    chain_id: Option<u64>,
     router: Address,
     base_request: DexRouter::DexBaseRequest,
     recipient: Address,
 ) -> Option<ObservedSwap> {
     let token_in = u256_word_to_address(base_request.fromToken)?;
-    observed_aggregator_swap(
+    observed_aggregator_swap_for_chain(
+        chain_id,
         router,
         token_in,
         base_request.toToken,
@@ -934,7 +1002,8 @@ fn observed_from_dex_base_request(
     )
 }
 
-fn observed_transit_v2(
+fn observed_transit_v2_for_chain(
+    chain_id: Option<u64>,
     router: Address,
     params: TransitSwapRouterV5::TransitExactInputV2,
 ) -> Option<ObservedSwap> {
@@ -945,7 +1014,7 @@ fn observed_transit_v2(
         .path
         .iter()
         .copied()
-        .filter_map(|token| normalize_aggregator_token(router, token))
+        .filter_map(|token| normalize_aggregator_token_for_chain(chain_id, router, token))
         .collect();
     if path.len() < 2 {
         return None;
@@ -978,12 +1047,17 @@ fn decode_relay_calls(
     calls: Vec<RelayRouterV3::RelayCall>,
     depth: usize,
     eth_value: U256,
+    chain_id: Option<u64>,
 ) -> Option<ObservedSwap> {
     let _ = router;
     for call in calls.iter() {
-        if let Some(observed) =
-            decode_swap_input_inner(call.target, call.callData.as_ref(), call.value, depth + 1)
-        {
+        if let Some(observed) = decode_swap_input_inner(
+            call.target,
+            call.callData.as_ref(),
+            call.value,
+            depth + 1,
+            chain_id,
+        ) {
             // Some relay wrappers drop per-call value even when the outer tx carries ETH.
             // If we decoded a zero-input ETH route from a zero-value nested leg, retry once
             // with the outer value to avoid silently classifying the swap as amount_in=0.
@@ -995,6 +1069,7 @@ fn decode_relay_calls(
                     call.callData.as_ref(),
                     eth_value,
                     depth + 1,
+                    chain_id,
                 )
                 && !fallback.amount_in.is_zero()
             {
@@ -1005,9 +1080,13 @@ fn decode_relay_calls(
     }
     // Fallback: some relays do not forward per-call value cleanly.
     for call in calls.iter() {
-        if let Some(observed) =
-            decode_swap_input_inner(call.target, call.callData.as_ref(), eth_value, depth + 1)
-        {
+        if let Some(observed) = decode_swap_input_inner(
+            call.target,
+            call.callData.as_ref(),
+            eth_value,
+            depth + 1,
+            chain_id,
+        ) {
             return Some(observed);
         }
     }
@@ -1019,6 +1098,7 @@ fn decode_relay_approval_calls(
     calls: Vec<RelayApprovalProxyV3::RelayApprovalCall>,
     depth: usize,
     eth_value: U256,
+    chain_id: Option<u64>,
 ) -> Option<ObservedSwap> {
     let relay_calls: Vec<RelayRouterV3::RelayCall> = calls
         .into_iter()
@@ -1029,7 +1109,7 @@ fn decode_relay_approval_calls(
             callData: c.callData,
         })
         .collect();
-    decode_relay_calls(router, relay_calls, depth, eth_value)
+    decode_relay_calls(router, relay_calls, depth, eth_value, chain_id)
 }
 
 const UR_CMD_V3_SWAP_EXACT_IN: u8 = 0x00;
@@ -1317,6 +1397,37 @@ mod tests {
             )
         );
         assert_eq!(observed.path[1], dai);
+    }
+
+    #[test]
+    fn explicit_chain_disambiguates_deterministic_balancer_vault_address() {
+        let vault = crate::common::constants::default_balancer_vault_for_chain(
+            crate::common::constants::CHAIN_SEPOLIA,
+        )
+        .expect("Sepolia Balancer vault");
+        let sepolia_weth = normalize_balancer_asset_for_chain(
+            Some(crate::common::constants::CHAIN_SEPOLIA),
+            vault,
+            Address::ZERO,
+        );
+        let mainnet_weth = normalize_balancer_asset_for_chain(
+            Some(crate::common::constants::CHAIN_ETHEREUM),
+            vault,
+            Address::ZERO,
+        );
+        assert_eq!(
+            sepolia_weth,
+            crate::common::constants::wrapped_native_for_chain(
+                crate::common::constants::CHAIN_SEPOLIA
+            )
+        );
+        assert_eq!(
+            mainnet_weth,
+            crate::common::constants::wrapped_native_for_chain(
+                crate::common::constants::CHAIN_ETHEREUM
+            )
+        );
+        assert_ne!(sepolia_weth, mainnet_weth);
     }
 
     #[test]

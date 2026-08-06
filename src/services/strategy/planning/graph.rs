@@ -91,12 +91,24 @@ impl QuoteGraph {
                     {
                         continue;
                     }
-                    // Size adjust expected_out linearly; edge.amount_in > 0 guaranteed by construction.
+                    // Size adjust expected_out with AMM price impact awareness to prevent overestimating outputs.
                     if edge.amount_in.is_zero() {
                         continue;
                     }
-                    let scaled_out =
-                        path.current_amount.saturating_mul(edge.expected_out) / edge.amount_in;
+                    let scaled_out = if path.current_amount == edge.amount_in {
+                        edge.expected_out
+                    } else if path.current_amount < edge.amount_in {
+                        path.current_amount.saturating_mul(edge.expected_out) / edge.amount_in
+                    } else {
+                        // Apply sublinear price impact adjustment for larger trade sizes
+                        let ratio = path.current_amount.saturating_mul(U256::from(1000u64)) / edge.amount_in;
+                        let impact_penalty = ratio.saturating_sub(U256::from(1000u64)) / U256::from(2u64);
+                        let effective_scale = U256::from(1000u64).saturating_sub(impact_penalty).max(U256::from(100u64));
+                        path.current_amount
+                            .saturating_mul(edge.expected_out)
+                            .saturating_mul(effective_scale)
+                            / (edge.amount_in.saturating_mul(U256::from(1000u64)))
+                    };
                     if scaled_out.is_zero() {
                         continue;
                     }

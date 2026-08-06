@@ -14,7 +14,9 @@
 )]
 
 use crate::common::error::AppError;
-use crate::domain::constants::{FLASHBOTS_MAX_BYTES, FLASHBOTS_MAX_TXS};
+use crate::domain::constants::{
+    CHAIN_ETHEREUM, CHAIN_SEPOLIA, FLASHBOTS_MAX_BYTES, FLASHBOTS_MAX_TXS,
+};
 use crate::network::provider::HttpProvider;
 use crate::services::strategy::strategy::StrategyStats;
 use crate::services::strategy::time_utils::current_unix;
@@ -354,10 +356,14 @@ impl BundleSender {
             return Ok(());
         }
 
-        if chain_id == 1 {
-            self.send_mainnet_builders(raw_txs).await
-        } else {
-            self.send_direct(raw_txs).await
+        match chain_id {
+            CHAIN_ETHEREUM => self.send_mainnet_builders(raw_txs).await,
+            CHAIN_SEPOLIA => {
+                let relay_res = self.send_flashbots_testnet_bundle(raw_txs).await;
+                let direct_res = self.send_direct(raw_txs).await;
+                direct_res.or(relay_res)
+            }
+            _ => self.send_direct(raw_txs).await,
         }
     }
 
@@ -475,6 +481,66 @@ impl BundleSender {
         previous_uuid: Option<&str>,
     ) -> bool {
         with_sig && cancel_previous_bundle && target_offset == 1 && previous_uuid.is_some()
+    }
+
+    async fn send_flashbots_testnet_bundle(&self, raw_txs: &[Vec<u8>]) -> Result<(), AppError> {
+        let block_number = self.current_block_number().await?;
+        let relay_name = "flashbots_sepolia";
+        let previous_uuid = if self.cancel_previous_bundle {
+            self.relay_last_replacement_uuid(relay_name)
+        } else {
+            None
+        };
+
+        for offset in 1..=self.target_blocks {
+            let target_block = block_number + offset;
+            let replacement_uuid = if self.use_replacement_uuid {
+                Some(Self::generate_replacement_uuid(raw_txs, target_block))
+            } else {
+                None
+            };
+
+            if Self::should_cancel_previous_bundle(
+                true,
+                self.cancel_previous_bundle,
+                offset,
+                previous_uuid.as_deref(),
+            ) && let Some(previous_uuid) = previous_uuid.as_deref()
+            {
+                self.cancel_bundle_with_sig(&self.relay_url, relay_name, previous_uuid)
+                    .await?;
+            }
+
+            let mut params = json!({
+                "txs": raw_txs.iter().map(|r| format!("0x{}", hex::encode(r))).collect::<Vec<_>>(),
+                "blockNumber": format!("0x{:x}", target_block),
+                "minTimestamp": current_unix(),
+            });
+            if let Some(uuid) = replacement_uuid.as_ref() {
+                params["replacementUuid"] = json!(uuid);
+            }
+            let body = json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "eth_sendBundle",
+                "params": [params]
+            });
+            let body_bytes =
+                serde_json::to_vec(&body).map_err(|e| AppError::Initialization(e.to_string()))?;
+            self.post_bundle_with_sig(
+                &self.relay_url,
+                &body_bytes,
+                relay_name,
+                target_block,
+                raw_txs.len(),
+                replacement_uuid.as_deref(),
+            )
+            .await?;
+            if let Some(uuid) = replacement_uuid.as_deref() {
+                self.relay_set_replacement_uuid(relay_name, uuid);
+            }
+        }
+        Ok(())
     }
 
     async fn send_mainnet_builders(&self, raw_txs: &[Vec<u8>]) -> Result<(), AppError> {

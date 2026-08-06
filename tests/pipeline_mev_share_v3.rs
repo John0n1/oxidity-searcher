@@ -22,11 +22,11 @@ async fn mev_share_v3_pipeline_manual() {
     use std::env;
 
     let Ok(rpc) = env::var("HTTP_PROVIDER_1") else {
-        eprintln!("skip: set HTTP_PROVIDER_1 and WEBSOCKET_PROVIDER_1 (Nethermind/Anvil)");
+        eprintln!("skip: set HTTP_PROVIDER_1 and WEBSOCKET_PROVIDER_1 (Client/Anvil)");
         return;
     };
     let Ok(_ws) = env::var("WEBSOCKET_PROVIDER_1") else {
-        eprintln!("skip: set WEBSOCKET_PROVIDER_1 (Nethermind/Anvil)");
+        eprintln!("skip: set WEBSOCKET_PROVIDER_1 (Client/Anvil)");
         return;
     };
     let wallet_key = env::var("OXIDITY_WALLET_PRIVATE_KEY").unwrap_or_else(|_| {

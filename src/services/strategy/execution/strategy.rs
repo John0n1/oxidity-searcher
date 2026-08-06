@@ -53,12 +53,12 @@ use crate::services::strategy::decode::{ObservedSwap, RouterKind, encode_v3_path
 use crate::services::strategy::execution::work_queue::SharedWorkQueue;
 use crate::services::strategy::routers::{ERC20, UniV3Router};
 use crate::services::strategy::swaps::V3QuoteCacheEntry;
-use alloy::primitives::{Address, B256, Bytes, TxKind, U256, keccak256};
+use alloy::primitives::{Address, B256, Bytes, I256, TxKind, U256, keccak256};
 use alloy::providers::Provider;
-use alloy::rpc::types::Header;
 use alloy::rpc::types::eth::Transaction;
 use alloy::rpc::types::eth::TransactionInput;
 use alloy::rpc::types::eth::TransactionRequest;
+use alloy::rpc::types::{BlockNumberOrTag, Header};
 use alloy::signers::local::PrivateKeySigner;
 use alloy::sol_types::SolCall;
 use dashmap::{DashMap, DashSet};
@@ -189,6 +189,15 @@ pub enum ReceiptStatus {
     UnknownTimeout,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReceiptObservation {
+    pub status: ReceiptStatus,
+    pub block_number: Option<u64>,
+    pub block_hash: Option<B256>,
+    pub gas_used: Option<u64>,
+    pub effective_gas_price: Option<u128>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct RelayOutcomeStats {
     pub attempts: u64,
@@ -270,6 +279,7 @@ pub struct StrategyRuntimeSettings {
     pub atomic_arb_seed_wei: U256,
     pub flashloan_allow_nonflash_fallback: bool,
     pub inventory_public_exit_fallback_enabled: bool,
+    pub testnet_force_execution: bool,
 }
 
 impl Default for StrategyRuntimeSettings {
@@ -297,17 +307,17 @@ impl Default for StrategyRuntimeSettings {
             force_canonical_exec_router: false,
             allow_unknown_router_decode: true,
             profit_floor_abs_wei: U256::ZERO,
-            profit_floor_mult_gas: 1,
+            profit_floor_mult_gas: 0,
             profit_floor_min_usd: None,
             gas_ratio_limit_floor_bps: None,
             flashloan_prefer_wallet_max_wei: U256::from(50_000_000_000_000_000u128),
             flashloan_value_scale_bps: 7_000,
-            flashloan_min_notional_wei: U256::from(30_000_000_000_000u128),
-            flashloan_min_repay_bps: 9_000,
+            flashloan_min_notional_wei: U256::from(1u64),
+            flashloan_min_repay_bps: 10_000,
             flashloan_reverse_input_bps: 10_000,
             flashloan_prefilter_margin_bps: 10,
             flashloan_prefilter_margin_wei: U256::ZERO,
-            flashloan_prefilter_gas_cost_bps: 0,
+            flashloan_prefilter_gas_cost_bps: 10_000,
             flashloan_reject_same_router_negative: true,
             flashloan_force: false,
             flashloan_aggressive: false,
@@ -324,6 +334,7 @@ impl Default for StrategyRuntimeSettings {
             atomic_arb_seed_wei: U256::from(3_000_000_000_000_000u128),
             flashloan_allow_nonflash_fallback: false,
             inventory_public_exit_fallback_enabled: false,
+            testnet_force_execution: false,
         }
     }
 }
@@ -1009,7 +1020,7 @@ impl StrategyExecutor {
             .checked_div(reserve_in.saturating_add(observed.amount_in))
             .unwrap_or(U256::from(10_000u64));
         let max_bps = U256::from(self.max_price_impact_bps());
-        if impact_bps > max_bps {
+        if impact_bps > max_bps && !self.runtime.testnet_force_execution {
             tracing::debug!(
                 target: "risk",
                 impact_bps = %impact_bps,
@@ -1049,9 +1060,35 @@ impl StrategyExecutor {
     }
 
     async fn restore_bundle_state(&self) -> Result<(), AppError> {
+        use alloy::providers::Provider;
+
+        let on_chain_nonce = match self
+            .http_provider
+            .get_transaction_count(self.signer.address())
+            .pending()
+            .await
+        {
+            Ok(n) => Some(n),
+            Err(e) => {
+                tracing::warn!(target: "bundle_state", error=%e, "Failed to fetch on-chain pending nonce from RPC");
+                None
+            }
+        };
+
         match self.db.load_nonce_state(self.chain_id).await {
-            Ok(Some((block, next, touched_raw))) => {
+            Ok(Some((block, mut next, touched_raw))) => {
                 let touched = Self::deserialize_pools(&touched_raw);
+                if let Some(rpc_nonce) = on_chain_nonce {
+                    if rpc_nonce != next {
+                        tracing::info!(
+                            target: "bundle_state",
+                            db_next_nonce = next,
+                            rpc_pending_nonce = rpc_nonce,
+                            "Syncing nonce state with authoritative on-chain RPC pending nonce"
+                        );
+                        next = rpc_nonce;
+                    }
+                }
                 {
                     let mut guard = self.bundle_state.lock().await;
                     *guard = Some(BundleState::with_touched(block, next, touched));
@@ -1062,7 +1099,7 @@ impl StrategyExecutor {
                     target: "bundle_state",
                     block,
                     next_nonce = next,
-                    "🔢 Restored nonce state from DB"
+                    "🔢 Restored nonce state"
                 );
             }
             Ok(None) => {
@@ -1367,7 +1404,7 @@ impl StrategyExecutor {
         let semaphore_size = config.worker_limit.max(1);
         let runtime = config.runtime.clone();
         let profit_floor_abs_wei = runtime.profit_floor_abs_wei;
-        let profit_floor_mult_gas = runtime.profit_floor_mult_gas.clamp(1, 100);
+        let profit_floor_mult_gas = runtime.profit_floor_mult_gas.min(100);
         let profit_floor_min_usd = runtime.profit_floor_min_usd;
         let gas_ratio_limit_floor_bps = runtime.gas_ratio_limit_floor_bps;
         let universal_router = constants::default_uniswap_universal_router(config.chain_id);
@@ -1577,6 +1614,7 @@ impl StrategyExecutor {
     }
 
     async fn block_watcher(self: Arc<Self>) {
+        let mut last_head: Option<(u64, B256)> = None;
         loop {
             let msg = tokio::select! {
                 () = self.shutdown.cancelled() => {
@@ -1593,6 +1631,107 @@ impl StrategyExecutor {
                 Ok(header) => {
                     tracing::debug!("StrategyExecutor: observed new block {:?}", header.hash);
                     let number = header.inner.number;
+                    if let Some((last_number, last_hash)) = last_head {
+                        let same_height_replacement =
+                            number == last_number && header.hash != last_hash;
+                        let non_contiguous_advance = number > last_number
+                            && (number != last_number.saturating_add(1)
+                                || header.inner.parent_hash != last_hash);
+                        if same_height_replacement || non_contiguous_advance {
+                            match self
+                                .http_provider
+                                .get_block_by_number(BlockNumberOrTag::Number(last_number))
+                                .await
+                            {
+                                Ok(Some(canonical)) => {
+                                    let canonical_hash = format!("{:#x}", canonical.header.hash);
+                                    if canonical.header.hash == last_hash {
+                                        tracing::debug!(
+                                            target: "reorg",
+                                            last_number,
+                                            "Head continuity gap was a missed notification, not a reorg"
+                                        );
+                                    } else {
+                                        tracing::error!(
+                                            target: "reorg",
+                                            chain_id = self.chain_id,
+                                            last_number,
+                                            observed_hash = %format!("{last_hash:#x}"),
+                                            canonical_hash,
+                                            "Previously observed head left the canonical chain; latching execution"
+                                        );
+                                        self.safety_guard.report_failure();
+                                        for _ in 1..5 {
+                                            self.safety_guard.report_failure();
+                                        }
+                                        match self
+                                            .db
+                                            .mark_block_settlements_reorged(
+                                                self.chain_id,
+                                                last_number,
+                                                &canonical_hash,
+                                            )
+                                            .await
+                                        {
+                                            Ok(reorged) => {
+                                                for settlement in &reorged {
+                                                    match (
+                                                        settlement
+                                                            .realized_net_delta_wei
+                                                            .parse::<I256>(),
+                                                        settlement
+                                                            .actual_gas_cost_wei
+                                                            .parse::<U256>(),
+                                                    ) {
+                                                        (Ok(net), Ok(gas)) => self
+                                                            .portfolio
+                                                            .reverse_realized_settlement(
+                                                                self.chain_id,
+                                                                net,
+                                                                gas,
+                                                            ),
+                                                        _ => tracing::error!(
+                                                            target: "reorg",
+                                                            net = settlement.realized_net_delta_wei,
+                                                            gas = settlement.actual_gas_cost_wei,
+                                                            "Could not reverse malformed settlement totals"
+                                                        ),
+                                                    }
+                                                }
+                                                tracing::warn!(
+                                                    target: "reorg",
+                                                    chain_id = self.chain_id,
+                                                    block_number = last_number,
+                                                    canonical_hash,
+                                                    changed = reorged.len(),
+                                                    "Reorged settlements marked non-reusable and removed from realized P&L"
+                                                );
+                                            }
+                                            Err(error) => tracing::error!(
+                                                target: "reorg",
+                                                chain_id = self.chain_id,
+                                                block_number = last_number,
+                                                %error,
+                                                "Failed to persist reorg reconciliation"
+                                            ),
+                                        }
+                                    }
+                                }
+                                Ok(None) => tracing::error!(
+                                    target: "reorg",
+                                    block_number = last_number,
+                                    "Canonical block unavailable during reorg reconciliation"
+                                ),
+                                Err(error) => tracing::error!(
+                                    target: "reorg",
+                                    block_number = last_number,
+                                    %error,
+                                    "Canonical block lookup failed during reorg reconciliation"
+                                ),
+                            }
+                        }
+                    }
+                    last_head = Some((number, header.hash));
                     let prev = self.current_block.swap(number, Ordering::Relaxed);
                     if prev != number {
                         let mut guard = self.bundle_state.lock().await;
@@ -1744,7 +1883,7 @@ impl StrategyExecutor {
         }
     }
 
-    fn current_head_or(&self, fallback: u64) -> u64 {
+    pub(in crate::services::strategy) fn current_head_or(&self, fallback: u64) -> u64 {
         let head = self.current_block.load(Ordering::Relaxed);
         if head > 0 { head } else { fallback }
     }
@@ -1754,10 +1893,18 @@ impl StrategyExecutor {
         current_head >= needed_head
     }
 
+    #[cfg(test)]
     pub(in crate::services::strategy) async fn await_receipt(
         &self,
         hash: &B256,
     ) -> Result<ReceiptStatus, AppError> {
+        Ok(self.await_receipt_observation(hash).await?.status)
+    }
+
+    pub(in crate::services::strategy) async fn await_receipt_observation(
+        &self,
+        hash: &B256,
+    ) -> Result<ReceiptObservation, AppError> {
         let timeout = std::time::Duration::from_millis(self.receipt_timeout_ms.max(1));
         let poll = std::time::Duration::from_millis(self.receipt_poll_ms.max(1));
         let started = std::time::Instant::now();
@@ -1797,7 +1944,13 @@ impl StrategyExecutor {
                     }
 
                     if !status {
-                        return Ok(ReceiptStatus::ConfirmedRevert);
+                        return Ok(ReceiptObservation {
+                            status: ReceiptStatus::ConfirmedRevert,
+                            block_number: block_num,
+                            block_hash: rcpt.block_hash,
+                            gas_used: Some(rcpt.gas_used),
+                            effective_gas_price: Some(rcpt.effective_gas_price),
+                        });
                     }
 
                     if let Some(receipt_block) = block_num {
@@ -1806,10 +1959,22 @@ impl StrategyExecutor {
                             receipt_block,
                             self.receipt_confirm_blocks.max(1),
                         ) {
-                            return Ok(ReceiptStatus::ConfirmedSuccess);
+                            return Ok(ReceiptObservation {
+                                status: ReceiptStatus::ConfirmedSuccess,
+                                block_number: block_num,
+                                block_hash: rcpt.block_hash,
+                                gas_used: Some(rcpt.gas_used),
+                                effective_gas_price: Some(rcpt.effective_gas_price),
+                            });
                         }
                     } else {
-                        return Ok(ReceiptStatus::ConfirmedSuccess);
+                        return Ok(ReceiptObservation {
+                            status: ReceiptStatus::ConfirmedSuccess,
+                            block_number: block_num,
+                            block_hash: rcpt.block_hash,
+                            gas_used: Some(rcpt.gas_used),
+                            effective_gas_price: Some(rcpt.effective_gas_price),
+                        });
                     }
                 }
                 Ok(None) => {}
@@ -1826,7 +1991,13 @@ impl StrategyExecutor {
             tokio::time::sleep(poll).await;
         }
 
-        Ok(ReceiptStatus::UnknownTimeout)
+        Ok(ReceiptObservation {
+            status: ReceiptStatus::UnknownTimeout,
+            block_number: None,
+            block_hash: None,
+            gas_used: None,
+            effective_gas_price: None,
+        })
     }
 }
 
@@ -2267,10 +2438,10 @@ mod tests {
         assert!(exec.has_usable_flashloan_provider());
 
         exec.flashloan_providers = vec![FlashloanProvider::Dydx];
-        assert!(exec.has_usable_flashloan_provider());
+        assert!(!exec.has_usable_flashloan_provider());
 
         exec.flashloan_providers = vec![FlashloanProvider::MakerDao];
-        assert!(exec.has_usable_flashloan_provider());
+        assert!(!exec.has_usable_flashloan_provider());
 
         exec.flashloan_providers = vec![FlashloanProvider::UniswapV2];
         assert!(exec.has_usable_flashloan_provider());

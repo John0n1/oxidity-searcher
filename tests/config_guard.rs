@@ -46,6 +46,7 @@ fn is_placeholder_secret(value: &str) -> bool {
         || normalized.contains("placeholder")
         || normalized.contains("dummy")
         || normalized.contains("test")
+        || (normalized.starts_with("${") && normalized.ends_with("}"))
 }
 
 /// Fail CI if config files contain 64-hex private keys or obvious secrets.

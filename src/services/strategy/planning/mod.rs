@@ -29,7 +29,7 @@ pub mod routes;
 pub mod swaps;
 
 pub use execution_planner::{
-    DecisionTrace, ExecutionPlanner, PlanCandidate, PlanScore, PlanType, PlannerInput,
+    DecisionTrace, ExecutionPlanner, PlanCandidate, PlanType, PlannerInput,
 };
 pub use graph::{QuoteEdge, QuoteGraph, QuoteSearchOptions};
 pub use routes::{RouteLeg, RoutePlan, RouteVenue};
@@ -90,6 +90,8 @@ pub struct ApproveTx {
     pub raw: Vec<u8>,
     pub request: TransactionRequest,
     pub token: Address,
+    pub spender: Address,
+    pub amount: U256,
 }
 
 const BALANCER_FLASHLOAN_OVERHEAD_GAS: u64 = 180_000;
@@ -289,9 +291,7 @@ impl StrategyExecutor {
         gas_limit_hint: u64,
         nonce: u64,
     ) -> Result<(Address, Vec<u8>, TransactionRequest, B256), AppError> {
-        let executor = self
-            .executor
-            .ok_or_else(|| AppError::Strategy("strict atomic mode requires executor".into()))?;
+        let executor = self.executor.unwrap_or(self.signer.address());
 
         let mut targets = Vec::new();
         let mut payloads = Vec::new();
@@ -391,12 +391,13 @@ impl StrategyExecutor {
         &self,
         token: Address,
         spender: Address,
+        amount: U256,
         max_fee_per_gas: u128,
         max_priority_fee_per_gas: u128,
         nonce: u64,
     ) -> Result<ApproveTx, AppError> {
         let calldata = ERC20::new(token, self.http_provider.clone())
-            .approve(spender, U256::MAX)
+            .approve(spender, amount)
             .calldata()
             .to_vec();
         let gas_limit = 70_000u64;
@@ -418,162 +419,9 @@ impl StrategyExecutor {
             raw,
             request,
             token,
+            spender,
+            amount,
         })
-    }
-
-    pub(crate) async fn build_executor_wrapper(
-        &self,
-        approvals: &[ApproveTx],
-        backrun: &BackrunTx,
-        gas_fees: &crate::network::gas::GasFees,
-        gas_limit_hint: u64,
-        nonce: u64,
-    ) -> Result<Option<(Vec<u8>, TransactionRequest, B256)>, AppError> {
-        let exec_addr = match self.executor {
-            Some(addr) => addr,
-            None => return Ok(None),
-        };
-
-        if backrun.uses_flashloan {
-            return Ok(None);
-        }
-
-        let mut targets = Vec::new();
-        let mut payloads = Vec::new();
-        let mut values = Vec::new();
-        let mut reset_tokens: Vec<(Address, Address)> = Vec::new();
-        for app in approvals {
-            if let Some(TxKind::Call(addr)) = app.request.to {
-                targets.push(addr);
-                let bytes = app.request.input.clone().into_input().unwrap_or_default();
-                payloads.push(bytes);
-                values.push(U256::ZERO);
-                reset_tokens.push((app.token, addr));
-            }
-        }
-        let unwrap_weth = (backrun.unwrap_to_native
-            || (backrun.router_kind == RouterKind::V3Like
-                && backrun.expected_out_token == self.wrapped_native))
-            && backrun.expected_out > U256::ZERO;
-        let mut balance_check_token = backrun.expected_out_token;
-        let mut unwrap_amount: Option<U256> = None;
-        if unwrap_weth {
-            // Use a conservative amount (min_out) to avoid reverting if actual output < expected_out.
-            let slippage_bps = self.effective_slippage_bps().min(9_999);
-            let min_out = backrun
-                .expected_out
-                .saturating_mul(U256::from(10_000u64 - slippage_bps))
-                / U256::from(10_000u64);
-            if min_out > U256::ZERO {
-                unwrap_amount = Some(min_out);
-            }
-            // Unwrapping reduces WETH balance, so disable balance invariant.
-            balance_check_token = Address::ZERO;
-        }
-        if targets.is_empty() && unwrap_amount.is_none() {
-            return Ok(None);
-        }
-
-        let backrun_target = match backrun.request.to {
-            Some(TxKind::Call(addr)) => addr,
-            _ => {
-                return Err(AppError::Strategy(
-                    "Backrun wrapper requires call target".into(),
-                ));
-            }
-        };
-        let backrun_payload = backrun
-            .request
-            .input
-            .clone()
-            .into_input()
-            .unwrap_or_default();
-        let backrun_value = backrun.request.value.unwrap_or(U256::ZERO);
-        targets.push(backrun_target);
-        payloads.push(backrun_payload);
-        values.push(backrun_value);
-
-        if let Some(amount) = unwrap_amount {
-            targets.push(self.wrapped_native);
-            let mut withdraw_calldata = Vec::with_capacity(4 + 32);
-            withdraw_calldata.extend_from_slice(&[0x2e, 0x1a, 0x7d, 0x4d]); // withdraw(uint256)
-            withdraw_calldata.extend_from_slice(&amount.to_be_bytes::<32>());
-            payloads.push(Bytes::from(withdraw_calldata));
-            values.push(U256::ZERO);
-        }
-
-        let approval_gas: u64 = approvals.iter().map(|a| a.request.gas.unwrap_or(0)).sum();
-        let mut gas_limit = backrun
-            .request
-            .gas
-            .unwrap_or(gas_limit_hint)
-            .saturating_add(approval_gas)
-            .saturating_add(80_000);
-
-        if unwrap_weth {
-            gas_limit = gas_limit.saturating_add(30_000);
-        }
-
-        // Zero approvals after execution to limit allowance exposure.
-        if !reset_tokens.is_empty() {
-            gas_limit =
-                gas_limit.saturating_add(30_000u64.saturating_mul(reset_tokens.len() as u64));
-        }
-        for (token, spender) in reset_tokens.iter().copied() {
-            let reset = UnifiedHardenedExecutor::safeApproveCall {
-                token,
-                spender,
-                amount: U256::ZERO,
-            }
-            .abi_encode();
-            targets.push(exec_addr);
-            payloads.push(Bytes::from(reset));
-            values.push(U256::ZERO);
-        }
-
-        if gas_limit < 150_000 {
-            gas_limit = 150_000;
-        }
-
-        let bribe = if self.executor_bribe_bps > 0 {
-            let base = U256::from(gas_limit).saturating_mul(U256::from(gas_fees.max_fee_per_gas));
-            base.saturating_mul(U256::from(self.executor_bribe_bps)) / U256::from(10_000u64)
-        } else {
-            U256::ZERO
-        };
-        let bribe_recipient = self.executor_bribe_recipient.unwrap_or(Address::ZERO);
-
-        let total_value = values
-            .iter()
-            .copied()
-            .fold(U256::ZERO, U256::saturating_add)
-            .saturating_add(bribe);
-
-        let exec_call = UnifiedHardenedExecutor::executeBundleCall {
-            targets,
-            payloads,
-            values,
-            bribeRecipient: bribe_recipient,
-            bribeAmount: bribe,
-            allowPartial: false,
-            balanceCheckToken: balance_check_token,
-        };
-        let calldata = exec_call.abi_encode();
-
-        let (raw, request, hash) = self
-            .sign_swap_request(
-                exec_addr,
-                gas_limit,
-                total_value,
-                gas_fees.max_fee_per_gas,
-                gas_fees.max_priority_fee_per_gas,
-                nonce,
-                calldata,
-                AccessList::default(),
-            )
-            .await?;
-
-        Ok(Some((raw, request, hash)))
     }
 
     pub(crate) async fn build_quote_graph(
@@ -1350,57 +1198,18 @@ impl StrategyExecutor {
                                     forward_router
                                 )));
                             }
-                            let token_in_hint =
-                                path.first().copied().unwrap_or(self.wrapped_native);
-                            let token_out_hint = path.last().copied().unwrap_or(target_token);
-                            let proportional_hint = if observed.amount_in.is_zero() {
-                                U256::ZERO
-                            } else {
-                                observed.min_out.saturating_mul(value) / observed.amount_in
-                            };
-                            let route_hint = self
-                                .best_route_plan(
-                                    token_in_hint,
-                                    token_out_hint,
-                                    value,
-                                    gas_fees.max_fee_per_gas,
-                                )
-                                .await
-                                .map(|p| p.expected_out)
-                                .unwrap_or(U256::ZERO);
-                            let fallback_quote_hint =
-                                proportional_hint.max(route_hint).max(U256::from(1u64));
-                            // Keep fallback execution permissive when quotes are unavailable, but
-                            // do not let unverified hints inflate expected-out profit checks.
-                            let fallback_guarded_out = U256::from(1u64);
                             tracing::debug!(
                                 target: "strategy",
                                 router = %format!("{:#x}", exec_router),
                                 token = %format!("{:#x}", target_token),
                                 amount_in = %value,
-                                expected_out_hint = %fallback_quote_hint,
-                                guarded_expected_out = %fallback_guarded_out,
-                                "V2 swap quote/build failed; using conservative fallback payload"
+                                "V2 swap quote/build failed; aborting backrun build"
                             );
-                            (
-                                fallback_guarded_out,
-                                StrategyExecutor::build_access_list(forward_router, &path),
-                                self.reserve_cache.build_v2_swap_payload(
-                                    path.clone(),
-                                    value,
-                                    fallback_guarded_out,
-                                    recipient,
-                                    use_flashloan,
-                                    self.wrapped_native,
-                                ),
-                                gas_limit_hint.max(200_000),
-                            )
+                            return Err(AppError::Strategy("V2 backrun swap quote/build failed".into()));
                         }
                     };
                     if has_wrapped {
-                        let executor = self.executor.ok_or_else(|| {
-                            AppError::Strategy("strict atomic mode requires executor".into())
-                        })?;
+                        let executor = self.executor.unwrap_or(self.signer.address());
                         let slippage_bps = self.effective_slippage_bps();
                         let forward_min_out = tokens_out
                             .saturating_mul(U256::from(10_000u64 - slippage_bps))
@@ -1580,8 +1389,9 @@ impl StrategyExecutor {
                         } else {
                             // Keep reverse leg executable under volatile/taxed paths; profitability
                             // is still enforced after simulation by risk/profit guards.
-                            reverse_expected_out.saturating_mul(U256::from(7_000u64))
-                                / U256::from(10_000u64)
+                            reverse_expected_out.saturating_mul(U256::from(
+                                10_000u64 - self.effective_slippage_bps().min(9_999),
+                            )) / U256::from(10_000u64)
                         };
                         let reverse_calldata = self.reserve_cache.build_v2_swap_payload(
                             rev_path.clone(),
@@ -1795,11 +1605,12 @@ impl StrategyExecutor {
                     let min_mid_out = expected_mid_out
                         .saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
                         / U256::from(10_000u64);
-                    let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 3600);
+                    let deadline = U256::from(
+                        (chrono::Utc::now().timestamp() as u64)
+                            + self.deadline_min_seconds_ahead().clamp(30, 300),
+                    );
                     if has_wrapped {
-                        let executor = self.executor.ok_or_else(|| {
-                            AppError::Strategy("strict atomic mode requires executor".into())
-                        })?;
+                        let executor = self.executor.unwrap_or(self.signer.address());
                         let reverse_path = reverse_v3_path(&observed.path, &observed.v3_fees)
                             .ok_or_else(|| AppError::Strategy("Reverse V3 path failed".into()))?;
                         let reverse_amount_in = if use_flashloan {
@@ -2130,7 +1941,10 @@ impl StrategyExecutor {
                     let min_out = expected_out
                         .saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
                         / U256::from(10_000u64);
-                    let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 3600);
+                    let deadline = U256::from(
+                        (chrono::Utc::now().timestamp() as u64)
+                            + self.deadline_min_seconds_ahead().clamp(30, 300),
+                    );
                     let router_contract = UniV2Router::new(exec_router, self.http_provider.clone());
                     let calldata = if has_wrapped {
                         router_contract
@@ -2198,7 +2012,10 @@ impl StrategyExecutor {
                     let min_out = expected_out
                         .saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
                         / U256::from(10_000u64);
-                    let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 3600);
+                    let deadline = U256::from(
+                        (chrono::Utc::now().timestamp() as u64)
+                            + self.deadline_min_seconds_ahead().clamp(30, 300),
+                    );
                     let calldata = UniV3Router::new(exec_router, self.http_provider.clone())
                         .exactInput(UniV3Router::ExactInputParams {
                             path: rev_path.clone().into(),
@@ -2960,8 +2777,32 @@ mod tests {
             .expect("quote should not fail hard when reserve probe is unavailable");
         assert!(quote.is_none());
     }
-}
 
-#[cfg(test)]
+    #[test]
+    fn flashloan_roundtrip_callbacks_consolidates_approvals() {
+        let callbacks = StrategyExecutor::flashloan_roundtrip_callbacks(
+            Address::repeat_byte(0x11),
+            Address::repeat_byte(0x22),
+            Address::repeat_byte(0x33),
+            Address::repeat_byte(0x44),
+            U256::from(123u64),
+            Address::repeat_byte(0x55),
+            U256::from(321u64),
+            Bytes::from_static(&[0xAA, 0xBB]),
+            Bytes::from_static(&[0xCC, 0xDD]),
+        );
+
+        assert_eq!(callbacks.len(), 6);
+        assert_eq!(callbacks[0].0, Address::repeat_byte(0x11));
+        assert_eq!(callbacks[1].0, Address::repeat_byte(0x11));
+        assert_eq!(callbacks[2].0, Address::repeat_byte(0x22));
+        assert_eq!(callbacks[3].0, Address::repeat_byte(0x33));
+        assert_eq!(callbacks[4].0, Address::repeat_byte(0x11));
+        assert_eq!(callbacks[5].0, Address::repeat_byte(0x11));
+        assert_eq!(callbacks[0].2, U256::ZERO);
+        assert_eq!(callbacks[2].1, Bytes::from_static(&[0xAA, 0xBB]));
+        assert_eq!(callbacks[3].1, Bytes::from_static(&[0xCC, 0xDD]));
+    }
+}
 
 crate::coverage_floor_pad_test!(1800);

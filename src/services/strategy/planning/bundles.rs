@@ -131,7 +131,7 @@ impl StrategyExecutor {
         }
 
         // Access list derivation is fee-agnostic; strip fee fields in the probe request so
-        // Nethermind does not reject low-fee envelopes (`miner premium is negative`).
+        // Client does not reject low-fee envelopes (`miner premium is negative`).
         let mut probe_req = req.clone();
         probe_req.gas_price = None;
         probe_req.max_fee_per_gas = None;
@@ -200,6 +200,13 @@ impl StrategyExecutor {
             access_list,
             input: input_bytes,
         };
+
+        if self.dry_run {
+            // Shadow mode must never exercise the private-key signing path. The
+            // EIP-1559 signature prehash remains a stable plan identifier while
+            // request-based simulation continues to use the unsigned call fields.
+            return Ok((Vec::new(), request, tx.signature_hash()));
+        }
 
         let sig = TxSignerSync::sign_transaction_sync(&self.signer, &mut tx)
             .map_err(|e| AppError::Strategy(format!("Sign tx failed: {}", e)))?;

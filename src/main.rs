@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
+use alloy::primitives::U256;
 use alloy::providers::Provider;
 use alloy::signers::local::PrivateKeySigner;
 use clap::Parser;
@@ -43,6 +44,10 @@ struct Cli {
     /// Do not submit transactions/bundles, only simulate/log
     #[arg(long, default_value_t = false)]
     dry_run: bool,
+
+    /// Fail-safe observation mode; forces dry-run behavior regardless of other settings
+    #[arg(long, default_value_t = false)]
+    shadow_mode: bool,
 
     /// Enable strategies (ingest + execute)
     #[arg(long, default_value_t = true)]
@@ -139,6 +144,7 @@ async fn main() -> Result<(), AppError> {
     }
 
     let mut settings = loaded.settings;
+    let shadow_mode = cli.shadow_mode || cli.dry_run || settings.shadow_mode;
     if let Some(data_dir) = cli.data_dir.as_deref()
         && !data_dir.trim().is_empty()
     {
@@ -198,7 +204,6 @@ async fn main() -> Result<(), AppError> {
         settings.chains.clone()
     };
 
-    let relay_url = settings.flashbots_relay_url();
     let bundle_signer = PrivateKeySigner::from_str(&settings.bundle_signer_key())
         .map_err(|e| AppError::Config(format!("Invalid bundle signer key: {e}")))?;
     let slippage_bps = cli.slippage_bps.unwrap_or(settings.slippage_bps);
@@ -281,9 +286,24 @@ async fn main() -> Result<(), AppError> {
             .await?
         };
 
+        let connected_chain_id: u64 = http_provider
+            .get_chain_id()
+            .await
+            .map_err(|e| AppError::Connection(format!("chain_id check failed: {e}")))?;
+        if connected_chain_id != chain_id {
+            return Err(AppError::Config(format!(
+                "Configured chain {chain_id} is connected to RPC chain {connected_chain_id}; refusing to continue"
+            )));
+        }
+
         let portfolio = Arc::new(PortfolioManager::new(http_provider.clone(), wallet_address));
         let nonce_manager = NonceManager::new(http_provider.clone(), wallet_address);
-        let safety_guard = Arc::new(SafetyGuard::new());
+        let safety_guard = Arc::new(SafetyGuard::with_limits(
+            usize::try_from(settings.safety_max_consecutive_failures).unwrap_or(usize::MAX),
+            U256::from(settings.safety_max_tx_gas_wei),
+            U256::from(settings.safety_max_daily_gas_wei),
+            U256::from(settings.safety_max_daily_loss_wei),
+        ));
         let gas_oracle = GasOracle::new(http_provider.clone(), chain_id);
 
         let chainlink_feeds_raw = settings.chainlink_feeds_for_chain(chain_id)?;
@@ -294,8 +314,14 @@ async fn main() -> Result<(), AppError> {
         } else {
             log_chainlink_feed_summary(chain_id, &chainlink_feeds);
         }
-        let wrapped_native =
-            oxidity_searcher::common::constants::wrapped_native_for_chain(chain_id);
+        let wrapped_native = oxidity_searcher::common::constants::try_wrapped_native_for_chain(
+            chain_id,
+        )
+        .ok_or_else(|| {
+            AppError::Config(format!(
+                "No explicit wrapped-native address configured for chain {chain_id}; refusing mainnet fallback"
+            ))
+        })?;
         let price_feed = PriceFeed::new(
             http_provider.clone(),
             chain_id,
@@ -424,11 +450,11 @@ async fn main() -> Result<(), AppError> {
             nonce_manager,
             portfolio,
             safety_guard,
-            dry_run: cli.dry_run,
+            dry_run: shadow_mode,
             gas_oracle,
             price_feed,
             chain_id,
-            relay_url: relay_url.clone(),
+            relay_url: settings.flashbots_relay_url_for_chain(chain_id),
             mev_share_relay_url: settings.mev_share_relay_url(),
             wallet_signer: wallet_signer.clone(),
             bundle_signer: bundle_signer.clone(),
@@ -461,9 +487,9 @@ async fn main() -> Result<(), AppError> {
             allow_non_wrapped_swaps: settings.allow_non_wrapped_swaps,
             mev_share_stream_url: settings.mev_share_stream_url.clone(),
             mev_share_history_limit: settings.mev_share_history_limit,
-            mev_share_enabled: settings.mev_share_enabled,
+            mev_share_enabled: settings.mev_share_enabled_for_chain(chain_id),
             mevshare_builders: settings.mevshare_builders_value(),
-            sandwich_attacks_enabled: settings.sandwich_attacks_enabled,
+            sandwich_attacks_enabled: settings.sandwich_attacks_enabled_for_chain(chain_id),
             simulation_backend: settings.simulation_backend.clone(),
             chainlink_feed_strict: settings.chainlink_feed_audit_strict_for_chain(chain_id),
             bundle_use_replacement_uuid: settings.bundle_use_replacement_uuid_for_chain(chain_id),

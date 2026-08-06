@@ -1226,7 +1226,7 @@ mod tests {
     }
 
     #[test]
-    fn rpc_unavailable_detection_matches_nethermind_patterns() {
+    fn rpc_unavailable_detection_matches_client_patterns() {
         assert!(rpc_method_unavailable_message(
             "RPC error -32601: Method eth_simulateV1 not found"
         ));
@@ -1239,7 +1239,7 @@ mod tests {
     }
 
     #[test]
-    fn rpc_invalid_params_detection_matches_nethermind_patterns() {
+    fn rpc_invalid_params_detection_matches_client_patterns() {
         assert!(rpc_invalid_params_message(
             "RPC error -32602: invalid params: missing value for required argument"
         ));
@@ -1252,7 +1252,7 @@ mod tests {
     }
 
     #[test]
-    fn insufficient_sender_balance_detection_matches_nethermind_patterns() {
+    fn insufficient_sender_balance_detection_matches_client_patterns() {
         assert!(rpc_insufficient_sender_balance_message(
             "error code -38014: insufficient MaxFeePerGas for sender balance"
         ));

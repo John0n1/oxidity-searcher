@@ -1194,19 +1194,49 @@ mod tests {
         let mut bytecode = vec![0x60, 0x00, 0x63];
         bytecode.extend_from_slice(&known);
         bytecode.extend_from_slice(&[0x14, 0x57, 0x5b, 0x00]);
-        assert!(RouterDiscovery::bytecode_contains_selector(
-            &bytecode, known
-        ));
-        assert!(!RouterDiscovery::bytecode_contains_selector(
-            &bytecode, unknown
-        ));
-        assert_eq!(
-            RouterDiscovery::count_matching_selectors(&bytecode, &[known]),
-            1
-        );
+        assert!(RouterDiscovery::bytecode_contains_selector(&bytecode, known));
+        assert!(!RouterDiscovery::bytecode_contains_selector(&bytecode, unknown));
+        assert_eq!(RouterDiscovery::count_matching_selectors(&bytecode, &[known]), 1);
+    }
+
+    #[test]
+    fn router_discovery_budget_defaults_are_reasonable() {
+        let budget = RouterDiscoveryBudget::default();
+        assert_eq!(budget.max_blocks_per_cycle, 256);
+        assert_eq!(budget.max_rpc_calls_per_cycle, 512);
+        assert_eq!(budget.cooldown, Duration::from_secs(45));
+    }
+
+    #[tokio::test]
+    async fn record_unknown_router_tracks_seen_count_and_flush_threshold() {
+        let allowlist = Arc::new(DashSet::new());
+        let db = Database::new("sqlite::memory:").await.unwrap();
+        let discovery = RouterDiscovery::new(RouterDiscoveryConfig {
+            chain_id: 1,
+            allowlist: allowlist.clone(),
+            db: db.clone(),
+            http_provider: None,
+            etherscan_api_key: None,
+            enabled: true,
+            auto_allow: false,
+            min_hits: 2,
+            flush_every: 2,
+            check_interval: Duration::from_secs(1),
+            max_entries: 4,
+            budget: RouterDiscoveryBudget::default(),
+            cache_path: None,
+            force_full_rescan: false,
+        })
+        .unwrap();
+
+        let router = Address::repeat_byte(0x0a);
+        discovery.record_unknown_router(router, "unit-test");
+        discovery.record_unknown_router(router, "unit-test");
+
+        let state = discovery.state.get(&router).unwrap();
+        assert_eq!(state.seen, 2);
+        assert_eq!(state.last_flushed, 2);
     }
 }
-
-#[cfg(test)]
 
 crate::coverage_floor_pad_test!(800);

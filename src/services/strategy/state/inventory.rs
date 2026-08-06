@@ -232,6 +232,7 @@ impl StrategyExecutor {
                 .build_approval_tx(
                     token,
                     router,
+                    sell_amount,
                     gas_fees.max_fee_per_gas,
                     gas_fees.max_priority_fee_per_gas,
                     nonce,
@@ -354,7 +355,7 @@ impl StrategyExecutor {
             return Ok(true);
         }
         let approve_calldata = ERC20::new(token, self.http_provider.clone())
-            .approve(router, U256::MAX)
+            .approve(router, sell_amount)
             .calldata()
             .to_vec();
         let deadline = U256::from((chrono::Utc::now().timestamp() as u64) + 60);
@@ -429,5 +430,32 @@ impl StrategyExecutor {
 }
 
 #[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::strategy::execution::strategy::dummy_executor_for_tests;
+
+    #[tokio::test]
+    async fn record_toxic_probe_failure_marks_token_when_threshold_reached() {
+        let executor = dummy_executor_for_tests().await;
+        let token = Address::repeat_byte(0x09);
+
+        let marked = executor.record_toxic_probe_failure(token, "probe-failed");
+        assert!(!marked);
+        let marked = executor.record_toxic_probe_failure(token, "probe-failed");
+        assert!(!marked);
+        let marked = executor.record_toxic_probe_failure(token, "probe-failed");
+        assert!(marked);
+        assert!(executor.toxic_tokens.contains(&token));
+    }
+
+    #[tokio::test]
+    async fn clear_toxic_probe_failures_removes_tracking_state() {
+        let executor = dummy_executor_for_tests().await;
+        let token = Address::repeat_byte(0x0b);
+        executor.record_toxic_probe_failure(token, "probe-failed");
+        executor.clear_toxic_probe_failures(token);
+        assert!(executor.toxic_probe_failures.get(&token).is_none());
+    }
+}
 
 crate::coverage_floor_pad_test!(420);

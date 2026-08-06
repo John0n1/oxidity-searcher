@@ -64,6 +64,9 @@ pub struct GlobalSettings {
     // General
     #[serde(default = "default_debug")]
     pub debug: bool,
+    /// Observe, plan, and simulate without allowing any RPC/relay submission.
+    #[serde(default = "default_false")]
+    pub shadow_mode: bool,
     #[serde(default = "default_chain", deserialize_with = "deserialize_chain_list")]
     pub chains: Vec<u64>,
     pub database_url: Option<String>,
@@ -96,6 +99,8 @@ pub struct GlobalSettings {
     pub pairs_path: Option<String>,
     pub aave_pools_by_chain: Option<HashMap<String, String>>,
     pub flashbots_relay_url: Option<String>,
+    #[serde(default)]
+    pub flashbots_relays_by_chain: Option<HashMap<String, String>>,
     pub bundle_signer_key: Option<String>,
     #[serde(default = "default_bribe_bps")]
     pub executor_bribe_bps: u64,
@@ -150,6 +155,15 @@ pub struct GlobalSettings {
     pub receipt_confirm_blocks: u64,
     #[serde(default = "default_false")]
     pub emergency_exit_on_unknown_receipt: bool,
+    #[serde(default = "default_safety_max_consecutive_failures")]
+    pub safety_max_consecutive_failures: u64,
+    /// Zero disables the corresponding cap. Values are raw wei.
+    #[serde(default = "default_safety_max_tx_gas_wei")]
+    pub safety_max_tx_gas_wei: u128,
+    #[serde(default = "default_safety_max_daily_gas_wei")]
+    pub safety_max_daily_gas_wei: u128,
+    #[serde(default = "default_safety_max_daily_loss_wei")]
+    pub safety_max_daily_loss_wei: u128,
     #[serde(default = "default_rpc_capability_strict")]
     pub rpc_capability_strict: bool,
     #[serde(default = "default_chainlink_feed_conflict_strict")]
@@ -230,7 +244,7 @@ pub struct GlobalSettings {
     pub flashloan_prefilter_margin_bps: u64,
     #[serde(default)]
     pub flashloan_prefilter_margin_wei: u128,
-    #[serde(default)]
+    #[serde(default = "default_flashloan_prefilter_gas_cost_bps")]
     pub flashloan_prefilter_gas_cost_bps: u64,
     #[serde(default = "default_flashloan_reject_same_router_negative")]
     pub flashloan_reject_same_router_negative: bool,
@@ -264,6 +278,8 @@ pub struct GlobalSettings {
     pub flashloan_allow_nonflash_fallback: bool,
     #[serde(default = "default_false")]
     pub inventory_public_exit_fallback_enabled: bool,
+    #[serde(default = "default_false")]
+    pub testnet_force_execution: bool,
 
     // Router discovery
     #[serde(default = "default_router_discovery_enabled")]
@@ -379,6 +395,18 @@ fn default_receipt_poll_ms() -> u64 {
 fn default_receipt_timeout_ms() -> u64 {
     12_000
 }
+fn default_safety_max_consecutive_failures() -> u64 {
+    3
+}
+fn default_safety_max_tx_gas_wei() -> u128 {
+    3_000_000_000_000_000
+}
+fn default_safety_max_daily_gas_wei() -> u128 {
+    10_000_000_000_000_000
+}
+fn default_safety_max_daily_loss_wei() -> u128 {
+    5_000_000_000_000_000
+}
 fn default_receipt_confirm_blocks() -> u64 {
     4
 }
@@ -467,7 +495,7 @@ fn default_allow_unknown_router_decode() -> bool {
     true
 }
 fn default_profit_floor_mult_gas() -> u64 {
-    1
+    0
 }
 fn default_flashloan_prefer_wallet_max_wei() -> u128 {
     50_000_000_000_000_000u128
@@ -476,16 +504,19 @@ fn default_flashloan_value_scale_bps() -> u64 {
     7_000
 }
 fn default_flashloan_min_notional_wei() -> u128 {
-    30_000_000_000_000u128
+    1
 }
 fn default_flashloan_min_repay_bps() -> u64 {
-    9_000
+    10_000
 }
 fn default_flashloan_reverse_input_bps() -> u64 {
     10_000
 }
 fn default_flashloan_prefilter_margin_bps() -> u64 {
     10
+}
+fn default_flashloan_prefilter_gas_cost_bps() -> u64 {
+    10_000
 }
 fn default_flashloan_reject_same_router_negative() -> bool {
     true
@@ -577,6 +608,22 @@ where
             parse_chain_list(v).map_err(E::custom)
         }
 
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: Error,
+        {
+            Ok(vec![value])
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: Error,
+        {
+            u64::try_from(value)
+                .map(|chain| vec![chain])
+                .map_err(|_| E::custom("chain id must be non-negative"))
+        }
+
         fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
         where
             A: SeqAccess<'de>,
@@ -622,7 +669,7 @@ impl EnvFieldSpec {
                 field: "executor_address",
                 target_env_key: "executor_address",
                 canonical_key: "OXIDITY_FLASHLOAN_CONTRACT_ADDRESS",
-                required: true,
+                required: false,
                 redact: false,
             },
             EnvFieldSpec {
@@ -636,6 +683,20 @@ impl EnvFieldSpec {
                 field: "log_level",
                 target_env_key: "log_level",
                 canonical_key: "OXIDITY_LOG_LEVEL",
+                required: false,
+                redact: false,
+            },
+            EnvFieldSpec {
+                field: "debug",
+                target_env_key: "debug",
+                canonical_key: "OXIDITY_DEBUG",
+                required: false,
+                redact: false,
+            },
+            EnvFieldSpec {
+                field: "shadow_mode",
+                target_env_key: "shadow_mode",
+                canonical_key: "OXIDITY_SHADOW_MODE",
                 required: false,
                 redact: false,
             },
@@ -679,6 +740,7 @@ fn redact_value(raw: &str, redact: bool) -> String {
 fn is_passthrough_env_key(key: &str) -> bool {
     const EXACT: &[&str] = &[
         "CHAINS",
+        "SHADOW_MODE",
         "DATABASE_URL",
         "FLASHBOTS_RELAY_URL",
         "MEV_SHARE_RELAY_URL",
@@ -694,6 +756,8 @@ fn is_passthrough_env_key(key: &str) -> bool {
         "CHAINLINK_FEEDS_PATH",
         "PROVIDER_JWT_SECRET_PATH",
         "STRATEGY_WORKERS",
+        "STRATEGY_ENABLED",
+        "SANDWICH_ATTACKS_ENABLED",
         "ETHERSCAN_API_KEY",
         "BINANCE_API_KEY",
         "COINMARKETCAP_API_KEY",
@@ -760,6 +824,10 @@ fn is_passthrough_env_key(key: &str) -> bool {
         "FEED_AUDIT_RECHECK_SECS",
         "FEED_AUDIT_PUBLIC_RPC_URL",
         "FEED_AUDIT_PUBLIC_TIP_LAG_BLOCKS",
+        "SAFETY_MAX_CONSECUTIVE_FAILURES",
+        "SAFETY_MAX_TX_GAS_WEI",
+        "SAFETY_MAX_DAILY_GAS_WEI",
+        "SAFETY_MAX_DAILY_LOSS_WEI",
     ];
     const PREFIXES: &[&str] = &[
         "HTTP_PROVIDER",
@@ -868,7 +936,15 @@ fn resolve_env_contract() -> EnvResolution {
             }
             continue;
         }
-        if is_passthrough_env_key(&key) {
+        if key == "CHAIN" {
+            if !resolution.overrides.contains_key("CHAINS") {
+                resolution.overrides.insert("CHAINS".to_string(), value);
+                resolution.warnings.push(
+                    "CHAIN is deprecated; treating it as CHAINS. Rename the environment key to CHAINS"
+                        .to_string(),
+                );
+            }
+        } else if is_passthrough_env_key(&key) {
             resolution.overrides.insert(key.clone(), value);
         }
     }
@@ -958,6 +1034,10 @@ impl GlobalSettings {
         );
 
         let mut settings: GlobalSettings = builder.build()?.try_deserialize()?;
+
+        if settings.executor_address == Some(Address::ZERO) {
+            settings.executor_address = None;
+        }
 
         // Allow CHAINS env to be comma/space separated string (e.g. "1,137")
         if let Some(chains_str) = env_resolution.overrides.get("CHAINS") {
@@ -1297,7 +1377,25 @@ impl GlobalSettings {
         self.flashbots_relay_url
             .clone()
             .or_else(|| std::env::var("FLASHBOTS_RELAY_URL").ok())
-            .unwrap_or_else(|| "https://relay.flashbots.net".to_string())
+            .unwrap_or_else(|| constants::FLASHBOTS_MAINNET_RELAY_URL.to_string())
+    }
+
+    /// Select a relay without allowing a generic mainnet relay setting to leak into Sepolia.
+    pub fn flashbots_relay_url_for_chain(&self, chain_id: u64) -> String {
+        let chain_env_key = format!("FLASHBOTS_RELAY_URL_{chain_id}");
+        if let Some(url) = Self::first_non_empty_env([chain_env_key]) {
+            return url;
+        }
+        if let Some(url) =
+            Self::provider_from_map(self.flashbots_relays_by_chain.as_ref(), chain_id)
+            && !url.trim().is_empty()
+        {
+            return url;
+        }
+        if chain_id == constants::CHAIN_SEPOLIA {
+            return constants::FLASHBOTS_SEPOLIA_RELAY_URL.to_string();
+        }
+        self.flashbots_relay_url()
     }
 
     pub fn router_discovery_check_interval(&self) -> std::time::Duration {
@@ -1395,7 +1493,9 @@ impl GlobalSettings {
             }
         }
         if out.is_empty() && auto {
-            out = vec![AaveV3, Balancer, Dydx, MakerDao, UniswapV3, UniswapV2];
+            // Production auto-selection is deliberately limited to providers with
+            // canonical dependencies and maintained integration coverage.
+            out = vec![AaveV3, Balancer];
         }
         if out.is_empty() {
             out = vec![Balancer];
@@ -1550,6 +1650,14 @@ impl GlobalSettings {
         self.mev_share_stream_url.clone()
     }
 
+    pub fn mev_share_enabled_for_chain(&self, chain_id: u64) -> bool {
+        self.mev_share_enabled && chain_id == constants::CHAIN_ETHEREUM
+    }
+
+    pub fn sandwich_attacks_enabled_for_chain(&self, chain_id: u64) -> bool {
+        self.sandwich_attacks_enabled && chain_id == constants::CHAIN_ETHEREUM
+    }
+
     pub fn mevshare_builders_value(&self) -> Vec<String> {
         let mut out: Vec<String> = self
             .mevshare_builders
@@ -1690,7 +1798,7 @@ impl GlobalSettings {
             force_canonical_exec_router: self.force_canonical_exec_router,
             allow_unknown_router_decode: self.allow_unknown_router_decode,
             profit_floor_abs_wei,
-            profit_floor_mult_gas: self.profit_floor_mult_gas.clamp(1, 100),
+            profit_floor_mult_gas: self.profit_floor_mult_gas.min(100),
             profit_floor_min_usd: self
                 .profit_floor_min_usd
                 .filter(|v| v.is_finite() && *v > 0.0),
@@ -1698,7 +1806,7 @@ impl GlobalSettings {
             flashloan_prefer_wallet_max_wei: U256::from(self.flashloan_prefer_wallet_max_wei),
             flashloan_value_scale_bps: self.flashloan_value_scale_bps.clamp(50, 10_000),
             flashloan_min_notional_wei: U256::from(self.flashloan_min_notional_wei),
-            flashloan_min_repay_bps: self.flashloan_min_repay_bps.clamp(7_000, 12_000),
+            flashloan_min_repay_bps: self.flashloan_min_repay_bps.clamp(10_000, 12_000),
             flashloan_reverse_input_bps: self.flashloan_reverse_input_bps.clamp(9_500, 10_000),
             flashloan_prefilter_margin_bps: self.flashloan_prefilter_margin_bps.clamp(0, 2_000),
             flashloan_prefilter_margin_wei: U256::from(self.flashloan_prefilter_margin_wei),
@@ -1721,6 +1829,7 @@ impl GlobalSettings {
             atomic_arb_seed_wei: U256::from(self.atomic_arb_seed_wei),
             flashloan_allow_nonflash_fallback: self.flashloan_allow_nonflash_fallback,
             inventory_public_exit_fallback_enabled: self.inventory_public_exit_fallback_enabled,
+            testnet_force_execution: self.testnet_force_execution,
         }
     }
 
@@ -2106,6 +2215,7 @@ mod tests {
     fn base_settings() -> GlobalSettings {
         GlobalSettings {
             debug: default_debug(),
+            shadow_mode: default_false(),
             chains: Vec::new(),
             database_url: None,
             wallet_key: "0x0".to_string(),
@@ -2123,6 +2233,7 @@ mod tests {
             chainlink_feeds_path: None,
             pairs_path: None,
             flashbots_relay_url: None,
+            flashbots_relays_by_chain: None,
             bundle_signer_key: None,
             executor_bribe_bps: default_bribe_bps(),
             executor_bribe_recipient: None,
@@ -2153,6 +2264,10 @@ mod tests {
             receipt_timeout_ms: default_receipt_timeout_ms(),
             receipt_confirm_blocks: default_receipt_confirm_blocks(),
             emergency_exit_on_unknown_receipt: default_false(),
+            safety_max_consecutive_failures: default_safety_max_consecutive_failures(),
+            safety_max_tx_gas_wei: default_safety_max_tx_gas_wei(),
+            safety_max_daily_gas_wei: default_safety_max_daily_gas_wei(),
+            safety_max_daily_loss_wei: default_safety_max_daily_loss_wei(),
             rpc_capability_strict: default_rpc_capability_strict(),
             chainlink_feed_conflict_strict: default_chainlink_feed_conflict_strict(),
             chainlink_feed_audit_strict: default_chainlink_feed_audit_strict(),
@@ -2195,7 +2310,7 @@ mod tests {
             flashloan_reverse_input_bps: default_flashloan_reverse_input_bps(),
             flashloan_prefilter_margin_bps: default_flashloan_prefilter_margin_bps(),
             flashloan_prefilter_margin_wei: 0,
-            flashloan_prefilter_gas_cost_bps: 0,
+            flashloan_prefilter_gas_cost_bps: default_flashloan_prefilter_gas_cost_bps(),
             flashloan_reject_same_router_negative: default_flashloan_reject_same_router_negative(),
             flashloan_force: false,
             flashloan_aggressive: false,
@@ -2239,6 +2354,7 @@ mod tests {
             etherscan_api_key: None,
             massive_api_key: None,
             masive_api_key: None,
+            testnet_force_execution: default_false(),
         }
     }
 
@@ -2342,6 +2458,47 @@ mod tests {
     }
 
     #[test]
+    fn sepolia_relay_is_chain_specific_and_mainnet_safe() {
+        let _env_lock = env_lock_guard();
+        let snapshot = stash_env(&["FLASHBOTS_RELAY_URL", "FLASHBOTS_RELAY_URL_11155111"]);
+        unsafe {
+            std::env::set_var("FLASHBOTS_RELAY_URL", "https://mainnet-only.example");
+            std::env::remove_var("FLASHBOTS_RELAY_URL_11155111");
+        }
+
+        let settings = base_settings();
+        assert_eq!(
+            settings.flashbots_relay_url_for_chain(constants::CHAIN_SEPOLIA),
+            constants::FLASHBOTS_SEPOLIA_RELAY_URL
+        );
+        assert_eq!(
+            settings.flashbots_relay_url_for_chain(constants::CHAIN_ETHEREUM),
+            "https://mainnet-only.example"
+        );
+
+        unsafe {
+            std::env::set_var(
+                "FLASHBOTS_RELAY_URL_11155111",
+                "https://custom-sepolia.example",
+            );
+        }
+        assert_eq!(
+            settings.flashbots_relay_url_for_chain(constants::CHAIN_SEPOLIA),
+            "https://custom-sepolia.example"
+        );
+        restore_env(snapshot);
+    }
+
+    #[test]
+    fn mainnet_only_mev_modes_are_disabled_on_sepolia() {
+        let settings = base_settings();
+        assert!(settings.mev_share_enabled_for_chain(constants::CHAIN_ETHEREUM));
+        assert!(!settings.mev_share_enabled_for_chain(constants::CHAIN_SEPOLIA));
+        assert!(settings.sandwich_attacks_enabled_for_chain(constants::CHAIN_ETHEREUM));
+        assert!(!settings.sandwich_attacks_enabled_for_chain(constants::CHAIN_SEPOLIA));
+    }
+
+    #[test]
     fn flashloan_providers_ignore_removed_aave_v2_aliases() {
         use crate::services::strategy::strategy::FlashloanProvider::Balancer;
 
@@ -2352,16 +2509,11 @@ mod tests {
 
     #[test]
     fn flashloan_providers_auto_uses_supported_provider_set_only() {
-        use crate::services::strategy::strategy::FlashloanProvider::{
-            AaveV3, Balancer, Dydx, MakerDao, UniswapV2, UniswapV3,
-        };
+        use crate::services::strategy::strategy::FlashloanProvider::{AaveV3, Balancer};
 
         let mut settings = base_settings();
         settings.flashloan_provider = "auto,aavev2".to_string();
-        assert_eq!(
-            settings.flashloan_providers(),
-            vec![AaveV3, Balancer, Dydx, MakerDao, UniswapV3, UniswapV2]
-        );
+        assert_eq!(settings.flashloan_providers(), vec![AaveV3, Balancer]);
     }
 
     #[test]

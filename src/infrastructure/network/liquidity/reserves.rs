@@ -31,7 +31,7 @@ use alloy::rpc::types::eth::{Filter, Log};
 use alloy::sol;
 use alloy_sol_types::SolCall;
 use dashmap::{DashMap, DashSet};
-use futures::StreamExt;
+use futures::{StreamExt, future::join_all};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::convert::TryFrom;
@@ -51,6 +51,12 @@ sol! {
         function token0() external view returns (address);
         function token1() external view returns (address);
         function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
+    }
+
+    #[sol(rpc)]
+    contract UniswapV2Factory {
+        function allPairsLength() external view returns (uint256);
+        function allPairs(uint256 index) external view returns (address);
     }
 }
 
@@ -642,6 +648,96 @@ impl ReserveCache {
         Ok(())
     }
 
+    /// Bootstrap V2 pairs directly from a canonical factory without historical logs or a node sync.
+    pub async fn bootstrap_v2_factory_pairs(
+        &self,
+        factory_address: Address,
+        max_pairs: usize,
+    ) -> Result<usize, AppError> {
+        if max_pairs == 0 {
+            return Ok(0);
+        }
+        let factory = UniswapV2Factory::new(factory_address, self.http_provider.clone());
+        let total: U256 = factory.allPairsLength().call().await.map_err(|e| {
+            AppError::Connection(format!(
+                "Uniswap V2 factory allPairsLength failed for {factory_address:#x}: {e}"
+            ))
+        })?;
+        let capped_total = total.min(U256::from(max_pairs));
+        let count = capped_total.to::<usize>();
+        let start = total.saturating_sub(capped_total);
+        let mut discovered = 0usize;
+        let mut failed = 0usize;
+
+        // Keep the public-RPC path deliberately gentle; authenticated providers may still
+        // parallelize the three reads for each individual pair.
+        const BATCH_SIZE: usize = 4;
+        for batch_start in (0..count).step_by(BATCH_SIZE) {
+            let batch_end = (batch_start + BATCH_SIZE).min(count);
+            let requests = (batch_start..batch_end).map(|offset| {
+                let provider = self.http_provider.clone();
+                async move {
+                    let factory = UniswapV2Factory::new(factory_address, provider.clone());
+                    let index = start.saturating_add(U256::from(offset));
+                    let pair: Address = factory.allPairs(index).call().await.ok()?;
+                    if pair == Address::ZERO {
+                        return None;
+                    }
+                    let contract = UniswapV2Pair::new(pair, provider);
+                    let token0_call = contract.token0();
+                    let token1_call = contract.token1();
+                    let reserves_call = contract.getReserves();
+                    let (token0, token1, reserves) =
+                        tokio::join!(token0_call.call(), token1_call.call(), reserves_call.call(),);
+                    let (Ok(token0), Ok(token1), Ok(reserves)) = (token0, token1, reserves) else {
+                        return None;
+                    };
+                    if token0 == Address::ZERO || token1 == Address::ZERO || token0 == token1 {
+                        return None;
+                    }
+                    Some((pair, token0, token1, reserves))
+                }
+            });
+
+            for result in join_all(requests).await {
+                let Some((pair, token0, token1, reserves)) = result else {
+                    failed = failed.saturating_add(1);
+                    continue;
+                };
+                self.register_v2_pair_for_tokens(Self::token_pair_key(token0, token1), pair);
+                self.v2_pair_fee_bps.insert(pair, DEFAULT_V2_FEE_BPS);
+                self.v2_reserves.insert(
+                    pair,
+                    V2Reserves {
+                        token0,
+                        token1,
+                        reserve0: U256::from(reserves.reserve0.to::<u128>()),
+                        reserve1: U256::from(reserves.reserve1.to::<u128>()),
+                    },
+                );
+                discovered = discovered.saturating_add(1);
+            }
+            if batch_end < count {
+                sleep(Duration::from_millis(75)).await;
+            }
+        }
+
+        tracing::info!(
+            target: "reserves",
+            factory = %format!("{factory_address:#x}"),
+            total = %total,
+            inspected = count,
+            discovered,
+            failed,
+            "✔ Bootstrapped V2 pairs from factory calls"
+        );
+        Ok(discovered)
+    }
+
+    pub fn v2_pair_count(&self) -> usize {
+        self.v2_reserves.len()
+    }
+
     pub async fn run_v2_log_listener(self: Arc<Self>, ws: WsProvider, shutdown: CancellationToken) {
         // Seed a small set of pairs if none are known yet.
         if self.v2_reserves.is_empty() {
@@ -998,8 +1094,8 @@ impl ReserveCache {
         use_flashloan: bool,
         wrapped_native: Address,
     ) -> Vec<u8> {
-        // Give bundled execution enough time across relay delays and node clock drift.
-        let deadline = U256::from(current_unix().saturating_add(3600));
+        // Generated plans are short-lived and must be rebuilt against fresh state.
+        let deadline = U256::from(current_unix().saturating_add(120));
 
         let starts_with_wrapped = path.first().copied() == Some(wrapped_native);
         let ends_with_wrapped = path.last().copied() == Some(wrapped_native);
