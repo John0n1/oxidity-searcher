@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-forge_bin=${FORGE_BIN:-/home/john/.foundry/bin/forge}
+forge_bin=${FORGE_BIN:-/home/${USER}/.foundry/bin/forge}
 
 cd "$repo_dir"
 "$forge_bin" build --force >/dev/null
