@@ -11,7 +11,7 @@ executor=$2
 expected_owner=$3
 expected_weth=$4
 expected_vault=$5
-cast_bin=${CAST_BIN:-/home/john/.foundry/bin/cast}
+cast_bin=${CAST_BIN:-/home/${USER}/.foundry/bin/cast}
 
 code=$($cast_bin code "$executor" --rpc-url "$rpc_url")
 if [[ "$code" == "0x" ]]; then
