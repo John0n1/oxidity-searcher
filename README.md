@@ -2,10 +2,6 @@
 
 Ultra-low-latency, multi-strategy MEV infrastructure written in Rust
 
-""Rust" (https://img.shields.io/badge/Rust-1.78%2B-000000?logo=rust&logoColor=white)" (https://www.rust-lang.org/)
-""Ethereum" (https://img.shields.io/badge/Ethereum-Mainnet-627EEA?logo=ethereum&logoColor=white)" (https://ethereum.org/)
-""EVM" (https://img.shields.io/badge/EVM-Compatible-3C3C3D)" (https://ethereum.org/en/developers/docs/evm/)
-
 
 Stream pending transactions. Decode DEX activity. Generate opportunities. Simulate atomically. Submit privately.
 
