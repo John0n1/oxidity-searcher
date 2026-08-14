@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
-use alloy::primitives::{address, Address, U256};
+use alloy::primitives::{Address, U256, address};
 use oxidity_searcher::services::strategy::ingest::decode::{ObservedSwap, RouterKind};
 
 #[test]
@@ -15,14 +15,18 @@ fn test_sandwich_slippage_headroom_detection() {
         path: vec![token_in, token_out],
         v3_fees: Vec::new(),
         v3_path: None,
+        v4_path: Vec::new(),
         amount_in: U256::from(20_000_000_000_000_000_000u128), // 20 ETH victim trade
-        min_out: U256::from(1u64),                            // Un-guarded slippage (min_out = 1)
+        min_out: U256::from(1u64),                             // Un-guarded slippage (min_out = 1)
         recipient: Address::ZERO,
         router_kind: RouterKind::V2Like,
     };
 
     let is_slippage_rich = victim_swap.min_out <= U256::from(100u64);
-    assert!(is_slippage_rich, "Victim swap should be classified as sandwich candidate due to high slippage headroom");
+    assert!(
+        is_slippage_rich,
+        "Victim swap should be classified as sandwich candidate due to high slippage headroom"
+    );
 }
 
 #[test]
@@ -31,7 +35,7 @@ fn test_sandwich_bundle_sequence_ordering() {
     let victim_tx_id = "tx_victim_2";
     let backrun_tx_id = "tx_backrun_3";
 
-    let bundle = vec![frontrun_tx_id, victim_tx_id, backrun_tx_id];
+    let bundle = [frontrun_tx_id, victim_tx_id, backrun_tx_id];
 
     assert_eq!(bundle.len(), 3);
     assert_eq!(bundle[0], "tx_frontrun_1");

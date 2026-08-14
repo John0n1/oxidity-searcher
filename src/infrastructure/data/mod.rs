@@ -5,5 +5,6 @@ pub mod abi;
 pub mod address_registry;
 pub mod db;
 pub mod executor;
+pub mod pool_index;
 pub mod schema;
 pub mod token_manager;

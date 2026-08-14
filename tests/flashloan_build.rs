@@ -205,6 +205,57 @@ async fn flashloan_builder_uses_aave_selector() {
     );
 }
 
+/// Ensure the runtime provider strategy builds the V4 PoolManager entrypoint and
+/// preserves its zero-premium flash-accounting semantics.
+#[tokio::test]
+async fn flashloan_builder_uses_uniswap_v4_selector() {
+    let executor_addr = Address::from([0x35; 20]);
+    let exec =
+        build_flashloan_executor(executor_addr, vec![FlashloanProvider::UniswapV4], None).await;
+    let gas_fees = GasFees {
+        max_fee_per_gas: 30_000_000_000,
+        max_priority_fee_per_gas: 2_000_000_000,
+        next_base_fee_per_gas: 28_000_000_000,
+        base_fee_per_gas: 28_000_000_000,
+        p50_priority_fee_per_gas: None,
+        p90_priority_fee_per_gas: None,
+        gas_used_ratio: None,
+        suggested_max_fee_per_gas: None,
+    };
+
+    let built = exec
+        .build_flashloan_transaction(
+            executor_addr,
+            wrapped_native_for_chain(CHAIN_ETHEREUM),
+            U256::from(1_000_000u64),
+            vec![(
+                Address::from([0x36; 20]),
+                Bytes::from(vec![0x44]),
+                U256::ZERO,
+            )],
+            250_000,
+            &gas_fees,
+            12,
+        )
+        .await;
+    let (_raw, request, _hash, premium, overhead) = match built {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("skipping Uniswap V4 selector test: {err}");
+            return;
+        }
+    };
+
+    let input = request.input.into_input().expect("input bytes");
+    let decoded = UnifiedHardenedExecutor::executeUniswapV4FlashLoanCall::abi_decode(&input)
+        .expect("decode V4 envelope");
+    assert_eq!(decoded.asset, wrapped_native_for_chain(CHAIN_ETHEREUM));
+    assert_eq!(decoded.amount, U256::from(1_000_000u64));
+    assert_ne!(decoded.poolManager, Address::ZERO);
+    assert_eq!(premium, U256::ZERO);
+    assert_eq!(overhead, 230_000);
+}
+
 /// Live smoke check against a deployed executor on mainnet RPC.
 /// Run manually with:
 /// `cargo test live_executor_flashloan_smoke_mainnet -- --ignored --nocapture`

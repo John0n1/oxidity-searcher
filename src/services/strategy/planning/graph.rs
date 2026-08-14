@@ -101,9 +101,13 @@ impl QuoteGraph {
                         path.current_amount.saturating_mul(edge.expected_out) / edge.amount_in
                     } else {
                         // Apply sublinear price impact adjustment for larger trade sizes
-                        let ratio = path.current_amount.saturating_mul(U256::from(1000u64)) / edge.amount_in;
-                        let impact_penalty = ratio.saturating_sub(U256::from(1000u64)) / U256::from(2u64);
-                        let effective_scale = U256::from(1000u64).saturating_sub(impact_penalty).max(U256::from(100u64));
+                        let ratio = path.current_amount.saturating_mul(U256::from(1000u64))
+                            / edge.amount_in;
+                        let impact_penalty =
+                            ratio.saturating_sub(U256::from(1000u64)) / U256::from(2u64);
+                        let effective_scale = U256::from(1000u64)
+                            .saturating_sub(impact_penalty)
+                            .max(U256::from(100u64));
                         path.current_amount
                             .saturating_mul(edge.expected_out)
                             .saturating_mul(effective_scale)

@@ -344,11 +344,7 @@ impl Engine {
         client_version
     }
 
-    fn log_client_tuning_hint(
-        &self,
-        client_version: Option<&str>,
-        capabilities: &RpcCapabilities,
-    ) {
+    fn log_client_tuning_hint(&self, client_version: Option<&str>, capabilities: &RpcCapabilities) {
         let Some(version) = client_version else {
             return;
         };
@@ -858,6 +854,16 @@ impl Engine {
                     "Failed to warm V2 reserves from preloaded pairs"
                 );
             }
+            if let Err(error) = reserve_cache
+                .load_curated_pools_from_file_validated(pairs_path, self.chain_id)
+                .await
+            {
+                tracing::warn!(
+                    target: "reserves",
+                    %error,
+                    "Failed to load curated multi-protocol pool index"
+                );
+            }
         }
         if (reserve_cache.v2_pair_count() == 0
             || self.chain_id == crate::common::constants::CHAIN_SEPOLIA)
@@ -983,14 +989,23 @@ impl Engine {
                 .token_manager
                 .validate_chain_addresses(&self.http_provider, self.chain_id)
                 .await;
+            let configured = self.token_manager.chain_token_count(self.chain_id);
             if invalid > 0 {
                 tracing::warn!(
                     target: "token_manager",
                     chain_id = self.chain_id,
                     invalid,
-                    "Tokenlist contains addresses without code; filtered"
+                    "Tokenlist contains invalid ERC-20 code or decimals metadata; filtered"
                 );
             }
+            tracing::info!(
+                target: "token_manager",
+                chain_id = self.chain_id,
+                configured,
+                eligible = configured.saturating_sub(invalid),
+                invalid,
+                "✔ Tokenlist on-chain validation completed"
+            );
 
             let strategy = StrategyExecutor::from_config(StrategyConfig {
                 work_queue: work_queue.clone(),
@@ -1120,7 +1135,8 @@ mod tests {
             safety_guard: Arc::new(SafetyGuard::new()),
             dry_run: false,
             gas_oracle: GasOracle::new(http.clone(), 1),
-            price_feed: PriceFeed::new(http.clone(), 1, HashMap::new(), PriceApiKeys::default()).unwrap(),
+            price_feed: PriceFeed::new(http.clone(), 1, HashMap::new(), PriceApiKeys::default())
+                .unwrap(),
             chain_id: 1,
             relay_url: "http://127.0.0.1:8545".to_string(),
             mev_share_relay_url: "http://127.0.0.1:8545".to_string(),

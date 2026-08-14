@@ -29,15 +29,18 @@ sol! {
             bytes calldata params
         ) external;
 
+        function approvedProviders(address provider) external view returns (bool);
         function safeApprove(address token, address spender, uint256 amount) external;
         function setProfitReceiver(address newReceiver) external;
         function setSweepPreference(bool sweepToEth) external;
+        function setApprovedProvider(address provider, bool approved) external;
         function setPaused(bool newPaused) external;
         function transferOwnership(address newOwner) external;
         function cancelOwnershipTransfer() external;
         function acceptOwnership() external;
         function sweepToken(address token) external;
         function sweepETH() external;
+        function sweepProfitToEth() external view returns (bool);
 
         // Aave v3 simple flashloan entry
         function executeAaveFlashLoanSimple(
@@ -75,6 +78,13 @@ sol! {
             bytes calldata params
         ) external;
 
+        function executeUniswapV4FlashLoan(
+            address poolManager,
+            address asset,
+            uint256 amount,
+            bytes calldata params
+        ) external;
+
         error OnlyOwner();
         error OnlyPendingOwner();
         error ContractPaused();
@@ -96,6 +106,7 @@ sol! {
         error OnlyMakerFlashLender();
         error OnlyUniswapV2Pair();
         error OnlyUniswapV3Pool();
+        error OnlyUniswapV4PoolManager();
         error InvalidPool();
         error InvalidFlashloanPair();
         error InvalidFlashloanLender();
@@ -120,6 +131,11 @@ sol! {
         error UniswapV3LoanNotActive();
         error UniswapV3LoanContextMismatch();
         error UniswapV3CallbackNotReceived();
+        error UniswapV4LoanNotActive();
+        error UniswapV4LoanContextMismatch();
+        error UniswapV4CallbackNotReceived();
+        error UniswapV4SettlementMismatch(uint256 expected, uint256 actual);
+        error ProviderNotApproved();
     }
 
     // Matches abi.decode(userData, (address[], uint256[], bytes[])) in receiveFlashLoan

@@ -1,0 +1,23 @@
+{
+  "chain_id": 1,
+  "start_block": 25724135,
+  "end_block": 25725134,
+  "blocks": 1000,
+  "transactions": 323676,
+  "configured_address_candidates": 8716,
+  "configured_address_decoded": 1934,
+  "configured_candidate_decode_rate": 0.2218907756,
+  "all_address_candidates": 186269,
+  "all_address_decoded": 3545,
+  "all_candidate_decode_rate": 0.0190316156,
+  "unconfigured_address_decoded": 1611,
+  "configured_share_of_decodable": 0.5455571227,
+  "unconfigured_share_of_decodable": 0.4544428773,
+  "decoded_v2_like": 3326,
+  "decoded_v3_like": 219,
+  "notes": [
+    "The include-unknown candidate denominator contains general contract calls and is not a swap-recall denominator.",
+    "V2-like includes aggregator calls normalized to the canonical V2 execution path; it is not a protocol market-share label.",
+    "Both replay runs used the same mainnet block range and trace simulation was disabled."
+  ]
+}

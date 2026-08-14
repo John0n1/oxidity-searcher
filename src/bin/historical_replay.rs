@@ -17,6 +17,7 @@ use oxidity_searcher::common::parsing;
 use oxidity_searcher::domain::error::AppError;
 use oxidity_searcher::infrastructure::data::db::Database;
 use oxidity_searcher::services::strategy::decode::{RouterKind, decode_swap_input_for_chain};
+use oxidity_searcher::services::strategy::strategy::{AllowlistCategory, classify_allowlist_entry};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -117,6 +118,7 @@ struct WindowReport {
     decode_rate: f64,
     decoded_v2: u64,
     decoded_v3: u64,
+    decoded_v4: u64,
     unique_candidate_routers: usize,
     base_fee_gwei_p50: f64,
     base_fee_gwei_p95: f64,
@@ -161,6 +163,7 @@ struct ReplaySummary {
     decode_rate: f64,
     decoded_v2: u64,
     decoded_v3: u64,
+    decoded_v4: u64,
     trace_sim_enabled: bool,
     trace_attempted: u64,
     trace_success: u64,
@@ -436,8 +439,10 @@ async fn main() -> Result<(), AppError> {
 
     let mut routers: HashSet<Address> = settings
         .routers_for_chain(chain_id)?
-        .values()
-        .copied()
+        .into_iter()
+        .filter_map(|(name, address)| {
+            (classify_allowlist_entry(&name) == AllowlistCategory::Routers).then_some(address)
+        })
         .collect();
     let db = Database::new(&settings.database_url()).await?;
     if let Ok(dynamic_approved) = db.approved_routers(chain_id).await {
@@ -601,6 +606,7 @@ async fn replay_window(
     let mut tx_decoded = 0u64;
     let mut decoded_v2 = 0u64;
     let mut decoded_v3 = 0u64;
+    let mut decoded_v4 = 0u64;
     let mut candidate_routers = HashSet::new();
     let mut base_fees_gwei = Vec::new();
     let mut gas_ratios = Vec::new();
@@ -645,6 +651,7 @@ async fn replay_window(
                 match observed.router_kind {
                     RouterKind::V2Like => decoded_v2 = decoded_v2.saturating_add(1),
                     RouterKind::V3Like => decoded_v3 = decoded_v3.saturating_add(1),
+                    RouterKind::V4Like => decoded_v4 = decoded_v4.saturating_add(1),
                 }
                 if trace_cfg.enabled
                     && trace_available
@@ -735,6 +742,7 @@ async fn replay_window(
         decode_rate,
         decoded_v2,
         decoded_v3,
+        decoded_v4,
         unique_candidate_routers: candidate_routers.len(),
         base_fee_gwei_p50: base_fee_p50,
         base_fee_gwei_p95: base_fee_p95,
@@ -768,6 +776,7 @@ fn summarize(
     let mut tx_decoded = 0u64;
     let mut decoded_v2 = 0u64;
     let mut decoded_v3 = 0u64;
+    let mut decoded_v4 = 0u64;
     let mut trace_attempted = 0u64;
     let mut trace_success = 0u64;
     let mut trace_revert = 0u64;
@@ -783,6 +792,7 @@ fn summarize(
         tx_decoded = tx_decoded.saturating_add(w.tx_decoded);
         decoded_v2 = decoded_v2.saturating_add(w.decoded_v2);
         decoded_v3 = decoded_v3.saturating_add(w.decoded_v3);
+        decoded_v4 = decoded_v4.saturating_add(w.decoded_v4);
         trace_attempted = trace_attempted.saturating_add(w.trace_attempted);
         trace_success = trace_success.saturating_add(w.trace_success);
         trace_revert = trace_revert.saturating_add(w.trace_revert);
@@ -822,6 +832,7 @@ fn summarize(
         decode_rate,
         decoded_v2,
         decoded_v3,
+        decoded_v4,
         trace_sim_enabled,
         trace_attempted,
         trace_success,

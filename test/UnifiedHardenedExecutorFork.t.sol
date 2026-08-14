@@ -13,6 +13,7 @@ contract UnifiedHardenedExecutorForkTest {
     ForkVm private constant vm = ForkVm(address(uint160(uint256(keccak256("hevm cheat code")))));
     address private constant MAINNET_WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
     address private constant BALANCER_VAULT = 0xBA12222222228d8Ba445958a75a0704d566BF2C8;
+    address private constant UNISWAP_V4_POOL_MANAGER = 0x000000000004444c5dc75cB358380D2e3dE08A90;
     uint256 private constant PINNED_BLOCK = 25_662_000;
 
     UnifiedHardenedExecutor private executor;
@@ -60,5 +61,32 @@ contract UnifiedHardenedExecutorForkTest {
         require(IERC20(MAINNET_WETH).balanceOf(address(this)) - beforeBalance == 0.01 ether, "profit delta");
         require(IERC20(MAINNET_WETH).balanceOf(address(executor)) == 0, "executor token dust");
         require(address(executor).balance == 0, "executor ETH dust");
+    }
+
+    function testPinnedUniswapV4FlashAccountingAndRepayment() public {
+        require(UNISWAP_V4_POOL_MANAGER.code.length > 0, "V4 PoolManager code");
+        executor.setApprovedProvider(UNISWAP_V4_POOL_MANAGER, true);
+        vm.deal(address(executor), 0.01 ether);
+
+        address[] memory targets = new address[](1);
+        targets[0] = MAINNET_WETH;
+        uint256[] memory values = new uint256[](1);
+        values[0] = 0.01 ether;
+        bytes[] memory payloads = new bytes[](1);
+        payloads[0] = abi.encodeCall(IWETH.deposit, ());
+
+        uint256 managerBalanceBefore = IERC20(MAINNET_WETH).balanceOf(UNISWAP_V4_POOL_MANAGER);
+        uint256 receiverBalanceBefore = IERC20(MAINNET_WETH).balanceOf(address(this));
+
+        executor.executeUniswapV4FlashLoan(
+            UNISWAP_V4_POOL_MANAGER, MAINNET_WETH, 0.01 ether, abi.encode(targets, values, payloads)
+        );
+
+        require(
+            IERC20(MAINNET_WETH).balanceOf(UNISWAP_V4_POOL_MANAGER) == managerBalanceBefore, "V4 principal not restored"
+        );
+        require(IERC20(MAINNET_WETH).balanceOf(address(this)) - receiverBalanceBefore == 0.01 ether, "V4 profit delta");
+        require(IERC20(MAINNET_WETH).balanceOf(address(executor)) == 0, "executor V4 token dust");
+        require(address(executor).balance == 0, "executor V4 ETH dust");
     }
 }

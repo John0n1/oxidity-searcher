@@ -19,6 +19,7 @@
 
 use crate::common::error::AppError;
 use crate::common::global_data::parse_global_data_file;
+use crate::infrastructure::data::pool_index::{PoolProtocol, load_pool_index};
 use crate::network::provider::{HttpProvider, WsProvider};
 use crate::services::strategy::routers::{
     BalancerPoolId, BalancerStablePool, BalancerVault, BalancerWeightedPool, CurvePoolLike,
@@ -48,9 +49,28 @@ sol! {
     #[derive(Debug, PartialEq, Eq)]
     #[sol(rpc)]
     contract UniswapV2Pair {
+        function factory() external view returns (address);
         function token0() external view returns (address);
         function token1() external view returns (address);
         function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
+    }
+
+    #[sol(rpc)]
+    contract UniswapV3PoolIdentity {
+        function factory() external view returns (address);
+        function token0() external view returns (address);
+        function token1() external view returns (address);
+        function fee() external view returns (uint24);
+    }
+
+    #[sol(rpc)]
+    contract UniswapV4StateView {
+        function getLiquidity(bytes32 poolId) external view returns (uint128);
+    }
+
+    #[sol(rpc)]
+    contract CurvePoolCoins {
+        function coins(uint256 index) external view returns (address);
     }
 
     #[sol(rpc)]
@@ -68,12 +88,18 @@ pub struct V2Reserves {
     pub reserve1: U256,
 }
 
+type CuratedV4Pool = (B256, u32, i32);
+
 #[derive(Clone)]
 pub struct ReserveCache {
     http_provider: HttpProvider,
     v2_reserves: DashMap<Address, V2Reserves>,
     v2_pairs_by_tokens: DashMap<(Address, Address), Vec<Address>>,
     v2_pair_fee_bps: DashMap<Address, u32>,
+    v2_pair_factory: DashMap<Address, Address>,
+    curated_v3_pools: DashMap<(Address, Address), Vec<(Address, u32)>>,
+    curated_v4_pools: DashMap<(Address, Address), Vec<CuratedV4Pool>>,
+    curated_curve_pools: DashSet<Address>,
     inflight_pairs: DashSet<Address>,
     lookup_permits: std::sync::Arc<tokio::sync::Semaphore>,
     curve_registry: DashSet<Address>,
@@ -168,6 +194,10 @@ impl ReserveCache {
             v2_reserves: DashMap::new(),
             v2_pairs_by_tokens: DashMap::new(),
             v2_pair_fee_bps: DashMap::new(),
+            v2_pair_factory: DashMap::new(),
+            curated_v3_pools: DashMap::new(),
+            curated_v4_pools: DashMap::new(),
+            curated_curve_pools: DashSet::new(),
             inflight_pairs: DashSet::new(),
             lookup_permits: std::sync::Arc::new(tokio::sync::Semaphore::new(32)),
             curve_registry: DashSet::new(),
@@ -182,11 +212,32 @@ impl ReserveCache {
     }
 
     pub fn curve_known_pools(&self) -> Vec<Address> {
-        self.curve_pool_coins.iter().map(|e| *e.key()).collect()
+        let mut pools: Vec<Address> = self.curated_curve_pools.iter().map(|e| *e.key()).collect();
+        pools.extend(self.curve_pool_coins.iter().map(|e| *e.key()));
+        pools.sort();
+        pools.dedup();
+        pools
     }
 
     pub fn balancer_known_pools(&self) -> Vec<Address> {
         self.balancer_pool_meta.iter().map(|e| *e.key()).collect()
+    }
+
+    pub fn curated_v3_pools_for_tokens(
+        &self,
+        token0: Address,
+        token1: Address,
+    ) -> Vec<(Address, u32)> {
+        self.curated_v3_pools
+            .get(&Self::token_pair_key(token0, token1))
+            .map(|entry| entry.value().clone())
+            .unwrap_or_default()
+    }
+
+    pub fn curated_v4_supports_token(&self, token: Address) -> bool {
+        self.curated_v4_pools
+            .iter()
+            .any(|entry| entry.key().0 == token || entry.key().1 == token)
     }
 
     // ------------------------------------------------------------------
@@ -413,7 +464,9 @@ impl ReserveCache {
         chain_id: u64,
     ) -> Result<Vec<PairEntryResolved>, AppError> {
         let mut out = Vec::new();
-        let mut seen_by_key: HashMap<(Address, Address), Vec<PairMetadata>> = HashMap::new();
+        // A token combination can legitimately have several V2 pools (for example
+        // Uniswap and SushiSwap). Deduplicate by pool address, not by token pair.
+        let mut seen_pairs: HashMap<Address, (Address, Address, PairMetadata)> = HashMap::new();
         for (idx, entry) in entries.into_iter().enumerate() {
             match entry.chain_id {
                 Some(entry_chain) if entry_chain != chain_id => continue,
@@ -479,29 +532,25 @@ impl ReserveCache {
                 chain_id: entry.chain_id,
             };
 
-            let key = Self::token_pair_key(token0, token1);
-            let seen = seen_by_key.entry(key).or_default();
-            if seen.iter().any(|existing| existing == &metadata) {
-                tracing::debug!(
-                    target: "reserves",
-                    pair = %format!("{:#x}", pair),
-                    token0 = %format!("{:#x}", token0),
-                    token1 = %format!("{:#x}", token1),
-                    "Duplicate global_data.pairs entry with identical metadata; skipping duplicate"
-                );
-                continue;
+            if let Some((existing_token0, existing_token1, existing_metadata)) =
+                seen_pairs.get(&pair)
+            {
+                if *existing_token0 == token0
+                    && *existing_token1 == token1
+                    && *existing_metadata == metadata
+                {
+                    tracing::debug!(
+                        target: "reserves",
+                        pair = %format!("{:#x}", pair),
+                        "Duplicate global_data.pairs pool entry; skipping exact duplicate"
+                    );
+                    continue;
+                }
+                return Err(AppError::Config(format!(
+                    "Conflicting duplicate pool address in global_data.pairs at index {idx}: {pair:#x}"
+                )));
             }
-            if metadata.is_empty() && seen.iter().any(PairMetadata::is_empty) {
-                tracing::warn!(
-                    target: "reserves",
-                    pair = %format!("{:#x}", pair),
-                    token0 = %format!("{:#x}", token0),
-                    token1 = %format!("{:#x}", token1),
-                    "Duplicate token pair without disambiguating metadata; skipping ambiguous entry"
-                );
-                continue;
-            }
-            seen.push(metadata.clone());
+            seen_pairs.insert(pair, (token0, token1, metadata.clone()));
             out.push(PairEntryResolved {
                 pair,
                 token0,
@@ -525,6 +574,9 @@ impl ReserveCache {
             let metadata = entry.metadata;
             let key = Self::token_pair_key(token0, token1);
             self.register_v2_pair_for_tokens(key, pair);
+            if let Some(factory) = metadata.factory {
+                self.v2_pair_factory.insert(pair, factory);
+            }
             if let Some(fee_bps) = metadata.fee_bps {
                 self.v2_pair_fee_bps.insert(pair, fee_bps);
             }
@@ -559,9 +611,16 @@ impl ReserveCache {
             let token1 = entry.token1;
             let metadata = entry.metadata;
 
-            let pair_code = provider.get_code_at(pair).await;
-            let t0_code = provider.get_code_at(token0).await;
-            let t1_code = provider.get_code_at(token1).await;
+            let pair_contract = UniswapV2Pair::new(pair, provider.clone());
+            let token0_call = pair_contract.token0();
+            let token1_call = pair_contract.token1();
+            let (pair_code, t0_code, t1_code, actual_token0, actual_token1) = tokio::join!(
+                provider.get_code_at(pair),
+                provider.get_code_at(token0),
+                provider.get_code_at(token1),
+                token0_call.call(),
+                token1_call.call(),
+            );
             if pair_code.map(|c| c.is_empty()).unwrap_or(true)
                 || t0_code.map(|c| c.is_empty()).unwrap_or(true)
                 || t1_code.map(|c| c.is_empty()).unwrap_or(true)
@@ -575,9 +634,73 @@ impl ReserveCache {
                 );
                 continue;
             }
+            let (Ok(actual_token0), Ok(actual_token1)) = (actual_token0, actual_token1) else {
+                tracing::warn!(
+                    target: "reserves",
+                    pair = %format!("{:#x}", pair),
+                    "global_data.pairs entry does not expose the V2 pair token interface; skipping"
+                );
+                continue;
+            };
+            if actual_token0 != token0 || actual_token1 != token1 {
+                tracing::warn!(
+                    target: "reserves",
+                    pair = %format!("{:#x}", pair),
+                    declared_token0 = %format!("{:#x}", token0),
+                    declared_token1 = %format!("{:#x}", token1),
+                    actual_token0 = %format!("{:#x}", actual_token0),
+                    actual_token1 = %format!("{:#x}", actual_token1),
+                    "global_data.pairs token identity mismatch; skipping"
+                );
+                continue;
+            }
+            let actual_factory = match pair_contract.factory().call().await {
+                Ok(factory) => factory,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "reserves",
+                        pair = %format!("{:#x}", pair),
+                        %error,
+                        "global_data.pairs factory probe failed; skipping"
+                    );
+                    continue;
+                }
+            };
+            let mut allowed_factories = Vec::new();
+            if let Some(declared_factory) = metadata.factory
+                && actual_factory != declared_factory
+            {
+                tracing::warn!(
+                    target: "reserves",
+                    pair = %format!("{:#x}", pair),
+                    declared_factory = %format!("{:#x}", declared_factory),
+                    actual_factory = %format!("{:#x}", actual_factory),
+                    "global_data.pairs factory mismatch; skipping"
+                );
+                continue;
+            }
+            if let Some(factory) = crate::common::constants::default_uniswap_v2_factory(chain_id) {
+                allowed_factories.push(factory);
+            }
+            if let Some(factory) = crate::common::constants::default_sushiswap_v2_factory(chain_id)
+            {
+                allowed_factories.push(factory);
+            }
+            allowed_factories.sort();
+            allowed_factories.dedup();
+            if allowed_factories.is_empty() || !allowed_factories.contains(&actual_factory) {
+                tracing::warn!(
+                    target: "reserves",
+                    pair = %format!("{:#x}", pair),
+                    actual_factory = %format!("{:#x}", actual_factory),
+                    "global_data.pairs pool was not created by an approved V2 factory; skipping"
+                );
+                continue;
+            }
 
             let key = Self::token_pair_key(token0, token1);
             self.register_v2_pair_for_tokens(key, pair);
+            self.v2_pair_factory.insert(pair, actual_factory);
             if let Some(fee_bps) = metadata.fee_bps {
                 self.v2_pair_fee_bps.insert(pair, fee_bps);
             }
@@ -602,6 +725,150 @@ impl ReserveCache {
             "✔ Validated global_data.pairs entries loaded"
         );
         Ok(())
+    }
+
+    /// Load only pipeline-curated pools and revalidate protocol identity against the active node.
+    pub async fn load_curated_pools_from_file_validated(
+        &self,
+        path: &str,
+        chain_id: u64,
+    ) -> Result<usize, AppError> {
+        let records = load_pool_index(Path::new(path), chain_id)?;
+        let expected_v3_factory = crate::common::constants::default_uniswap_v3_factory(chain_id);
+        let expected_v4_manager =
+            crate::common::constants::default_uniswap_v4_pool_manager(chain_id);
+        let v4_state_view = crate::common::constants::default_uniswap_v4_state_view(chain_id);
+        let expected_balancer_vault =
+            crate::common::constants::default_balancer_vault_for_chain(chain_id);
+        let mut kept = 0usize;
+
+        for record in records {
+            match record.protocol {
+                PoolProtocol::UniswapV3 => {
+                    let Some(factory) = expected_v3_factory else {
+                        continue;
+                    };
+                    if record.canonical_source != factory || record.tokens.len() != 2 {
+                        continue;
+                    }
+                    let pool = UniswapV3PoolIdentity::new(record.pool, self.http_provider.clone());
+                    let factory_call = pool.factory();
+                    let token0_call = pool.token0();
+                    let token1_call = pool.token1();
+                    let fee_call = pool.fee();
+                    let (actual_factory, token0, token1, fee) = tokio::join!(
+                        factory_call.call(),
+                        token0_call.call(),
+                        token1_call.call(),
+                        fee_call.call(),
+                    );
+                    let (Ok(actual_factory), Ok(token0), Ok(token1), Ok(fee)) =
+                        (actual_factory, token0, token1, fee)
+                    else {
+                        continue;
+                    };
+                    let fee = fee.to::<u32>();
+                    if actual_factory != factory
+                        || token0 != record.tokens[0]
+                        || token1 != record.tokens[1]
+                        || record.fee != Some(fee)
+                    {
+                        continue;
+                    }
+                    self.curated_v3_pools
+                        .entry(Self::token_pair_key(token0, token1))
+                        .and_modify(|pools| {
+                            if !pools.contains(&(record.pool, fee)) {
+                                pools.push((record.pool, fee));
+                            }
+                        })
+                        .or_insert_with(|| vec![(record.pool, fee)]);
+                    kept = kept.saturating_add(1);
+                }
+                PoolProtocol::UniswapV4 => {
+                    let (Some(manager), Some(state_view), Some(pool_id)) =
+                        (expected_v4_manager, v4_state_view, record.pool_id)
+                    else {
+                        continue;
+                    };
+                    if record.pool != manager || record.canonical_source != manager {
+                        continue;
+                    }
+                    let liquidity = UniswapV4StateView::new(state_view, self.http_provider.clone())
+                        .getLiquidity(pool_id)
+                        .call()
+                        .await;
+                    if liquidity.is_ok_and(|value| value > 0) {
+                        let Some(fee) = record.fee else {
+                            continue;
+                        };
+                        let tick_spacing = record.tick_spacing.unwrap_or_default();
+                        self.curated_v4_pools
+                            .entry(Self::token_pair_key(record.tokens[0], record.tokens[1]))
+                            .and_modify(|pools| {
+                                let value = (pool_id, fee, tick_spacing);
+                                if !pools.contains(&value) {
+                                    pools.push(value);
+                                }
+                            })
+                            .or_insert_with(|| vec![(pool_id, fee, tick_spacing)]);
+                        kept = kept.saturating_add(1);
+                    }
+                }
+                PoolProtocol::BalancerV2 => {
+                    let (Some(vault), Some(pool_id)) = (expected_balancer_vault, record.pool_id)
+                    else {
+                        continue;
+                    };
+                    if record.canonical_source != vault {
+                        continue;
+                    }
+                    self.set_balancer_vault(vault).await;
+                    let actual_id = BalancerPoolId::new(record.pool, self.http_provider.clone())
+                        .getPoolId()
+                        .call()
+                        .await;
+                    if !matches!(actual_id, Ok(actual) if actual == pool_id) {
+                        continue;
+                    }
+                    let Some(meta) = self.discover_balancer_pool(record.pool).await else {
+                        continue;
+                    };
+                    if meta.tokens != record.tokens {
+                        self.balancer_pool_meta.remove(&record.pool);
+                        continue;
+                    }
+                    kept = kept.saturating_add(1);
+                }
+                PoolProtocol::Curve => {
+                    if record.tokens.len() < 2 {
+                        continue;
+                    }
+                    let pool = CurvePoolCoins::new(record.pool, self.http_provider.clone());
+                    let mut actual = Vec::new();
+                    for index in 0..record.tokens.len() {
+                        let Ok(token) = pool.coins(U256::from(index)).call().await else {
+                            actual.clear();
+                            break;
+                        };
+                        actual.push(token);
+                    }
+                    if actual != record.tokens {
+                        continue;
+                    }
+                    self.curated_curve_pools.insert(record.pool);
+                    self.curve_pool_coins.insert(record.pool, actual);
+                    kept = kept.saturating_add(1);
+                }
+            }
+        }
+        tracing::info!(
+            target: "reserves",
+            chain_id,
+            kept,
+            "✔ Curated multi-protocol pool index loaded and revalidated"
+        );
+        Ok(kept)
     }
 
     /// Warm cached reserves by calling getReserves on preloaded V2 pairs.
@@ -706,6 +973,7 @@ impl ReserveCache {
                 };
                 self.register_v2_pair_for_tokens(Self::token_pair_key(token0, token1), pair);
                 self.v2_pair_fee_bps.insert(pair, DEFAULT_V2_FEE_BPS);
+                self.v2_pair_factory.insert(pair, factory_address);
                 self.v2_reserves.insert(
                     pair,
                     V2Reserves {
@@ -840,11 +1108,12 @@ impl ReserveCache {
             .unwrap_or_default()
     }
 
-    fn quote_v2_hop_best(
+    fn quote_v2_hop_best_for_factory(
         &self,
         token_in: Address,
         token_out: Address,
         amount_in: U256,
+        factory: Option<Address>,
     ) -> Option<(U256, Address)> {
         let key = Self::token_pair_key(token_in, token_out);
         let pairs = self.v2_pairs_for_tokens(key);
@@ -854,6 +1123,11 @@ impl ReserveCache {
 
         let mut best: Option<(U256, Address)> = None;
         for pair in pairs {
+            if let Some(expected_factory) = factory
+                && self.v2_pair_factory.get(&pair).map(|v| *v) != Some(expected_factory)
+            {
+                continue;
+            }
             let Some(reserves) = self.v2_reserves.get(&pair).map(|r| r.clone()) else {
                 continue;
             };
@@ -893,6 +1167,101 @@ impl ReserveCache {
             }
         }
         best
+    }
+
+    fn quote_v2_hop_best(
+        &self,
+        token_in: Address,
+        token_out: Address,
+        amount_in: U256,
+    ) -> Option<(U256, Address)> {
+        self.quote_v2_hop_best_for_factory(token_in, token_out, amount_in, None)
+    }
+
+    /// Quote a path using only pairs created by `factory`.
+    ///
+    /// A V2 router is bound to its factory, so mixing the best pool across factories with an
+    /// unrelated router produces a quote that cannot be executed reliably.
+    pub fn quote_v2_path_for_factory(
+        &self,
+        path: &[Address],
+        amount_in: U256,
+        factory: Address,
+    ) -> Option<U256> {
+        if path.len() < 2 {
+            return None;
+        }
+        let mut amount = amount_in;
+        for window in path.windows(2) {
+            let (hop_out, _pair) =
+                self.quote_v2_hop_best_for_factory(window[0], window[1], amount, Some(factory))?;
+            amount = hop_out;
+        }
+        Some(amount)
+    }
+
+    /// Quote a direct reverse swap after a direct victim swap has changed the same V2 pool.
+    ///
+    /// Ordinary `getAmountsOut`/reserve quotes describe the pre-victim state and therefore
+    /// systematically erase the price impact that a backrun is intended to capture.
+    pub fn quote_v2_reverse_after_victim_for_factory(
+        &self,
+        victim_path: &[Address],
+        victim_amount_in: U256,
+        reverse_amount_in: U256,
+        factory: Address,
+    ) -> Option<U256> {
+        if victim_path.len() != 2 || victim_amount_in.is_zero() || reverse_amount_in.is_zero() {
+            return None;
+        }
+        let token_in = victim_path[0];
+        let token_out = victim_path[1];
+        let (_, pair) = self.quote_v2_hop_best_for_factory(
+            token_in,
+            token_out,
+            victim_amount_in,
+            Some(factory),
+        )?;
+        let reserves = self.v2_reserves.get(&pair)?.clone();
+        let (reserve_in, reserve_out) = if token_in == reserves.token0 {
+            (reserves.reserve0, reserves.reserve1)
+        } else if token_in == reserves.token1 {
+            (reserves.reserve1, reserves.reserve0)
+        } else {
+            return None;
+        };
+        if reserve_in.is_zero() || reserve_out.is_zero() {
+            return None;
+        }
+        let fee_bps = self
+            .v2_pair_fee_bps
+            .get(&pair)
+            .map(|value| *value)
+            .unwrap_or(DEFAULT_V2_FEE_BPS);
+        if fee_bps >= 10_000 {
+            return None;
+        }
+        let denominator_bps = U256::from(10_000u64);
+        let fee_multiplier = U256::from((10_000u32 - fee_bps) as u64);
+        let amount_out = |amount_in: U256, reserve_in: U256, reserve_out: U256| {
+            let amount_in_with_fee = amount_in.saturating_mul(fee_multiplier);
+            let denominator = reserve_in
+                .saturating_mul(denominator_bps)
+                .saturating_add(amount_in_with_fee);
+            (!denominator.is_zero())
+                .then(|| amount_in_with_fee.saturating_mul(reserve_out) / denominator)
+        };
+        let victim_amount_out = amount_out(victim_amount_in, reserve_in, reserve_out)?;
+        if victim_amount_out >= reserve_out {
+            return None;
+        }
+        let post_victim_reverse_reserve_in = reserve_out.saturating_sub(victim_amount_out);
+        let post_victim_reverse_reserve_out = reserve_in.saturating_add(victim_amount_in);
+        amount_out(
+            reverse_amount_in,
+            post_victim_reverse_reserve_in,
+            post_victim_reverse_reserve_out,
+        )
     }
 
     pub fn quote_v2_path(&self, path: &[Address], amount_in: U256) -> Option<U256> {
@@ -1060,6 +1429,7 @@ impl ReserveCache {
         };
         let provider = self.http_provider.clone();
         let pairs_map = self.v2_pairs_by_tokens.clone();
+        let factory_map = self.v2_pair_factory.clone();
         let reserves_map = self.v2_reserves.clone();
         let inflight = self.inflight_pairs.clone();
         tokio::spawn(async move {
@@ -1067,9 +1437,12 @@ impl ReserveCache {
             let token0: Result<Address, _> = contract.token0().call().await;
             let contract = UniswapV2Pair::new(pair, provider.clone());
             let token1: Result<Address, _> = contract.token1().call().await;
-            if let (Ok(t0), Ok(t1)) = (token0, token1) {
+            let contract = UniswapV2Pair::new(pair, provider.clone());
+            let factory: Result<Address, _> = contract.factory().call().await;
+            if let (Ok(t0), Ok(t1), Ok(factory)) = (token0, token1, factory) {
                 let key = if t0 < t1 { (t0, t1) } else { (t1, t0) };
                 ReserveCache::register_v2_pair_for_tokens_map(&pairs_map, key, pair);
+                factory_map.insert(pair, factory);
                 reserves_map.insert(
                     pair,
                     V2Reserves {
@@ -1251,7 +1624,92 @@ mod tests {
     }
 
     #[test]
-    fn pairs_loader_dedupes_ambiguous_duplicates_without_metadata() {
+    fn quote_v2_path_for_factory_does_not_cross_venue_reserves() {
+        let cache = cache();
+        let token0 = Address::from([2u8; 20]);
+        let token1 = Address::from([3u8; 20]);
+        let factory_a = Address::from([4u8; 20]);
+        let factory_b = Address::from([5u8; 20]);
+        let pair_a = Address::from([11u8; 20]);
+        let pair_b = Address::from([12u8; 20]);
+        let key = ReserveCache::token_pair_key(token0, token1);
+
+        for (pair, factory, reserve1) in [
+            (pair_a, factory_a, 5_000u64),
+            (pair_b, factory_b, 50_000u64),
+        ] {
+            cache.register_v2_pair_for_tokens(key, pair);
+            cache.v2_pair_factory.insert(pair, factory);
+            cache.v2_reserves.insert(
+                pair,
+                V2Reserves {
+                    token0,
+                    token1,
+                    reserve0: U256::from(10_000u64),
+                    reserve1: U256::from(reserve1),
+                },
+            );
+        }
+
+        let quote_a = cache
+            .quote_v2_path_for_factory(&[token0, token1], U256::from(1_000u64), factory_a)
+            .expect("factory A quote");
+        let quote_b = cache
+            .quote_v2_path_for_factory(&[token0, token1], U256::from(1_000u64), factory_b)
+            .expect("factory B quote");
+
+        assert!(quote_b > quote_a);
+        assert!(
+            cache
+                .quote_v2_path_for_factory(
+                    &[token0, token1],
+                    U256::from(1_000u64),
+                    Address::from([6u8; 20]),
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn reverse_quote_includes_direct_victim_price_impact() {
+        let cache = cache();
+        let weth = Address::from([2u8; 20]);
+        let token = Address::from([3u8; 20]);
+        let factory = Address::from([4u8; 20]);
+        let pair = Address::from([11u8; 20]);
+        cache.register_v2_pair_for_tokens(ReserveCache::token_pair_key(weth, token), pair);
+        cache.v2_pair_factory.insert(pair, factory);
+        cache.v2_reserves.insert(
+            pair,
+            V2Reserves {
+                token0: weth,
+                token1: token,
+                reserve0: U256::from(100_000u64),
+                reserve1: U256::from(100_000u64),
+            },
+        );
+
+        let reverse_in = U256::from(1_000u64);
+        let before = cache
+            .quote_v2_path_for_factory(&[token, weth], reverse_in, factory)
+            .expect("pre-victim reverse quote");
+        let after = cache
+            .quote_v2_reverse_after_victim_for_factory(
+                &[weth, token],
+                U256::from(10_000u64),
+                reverse_in,
+                factory,
+            )
+            .expect("post-victim reverse quote");
+
+        assert!(
+            after > before,
+            "victim buy should improve the reverse sell quote"
+        );
+    }
+
+    #[test]
+    fn pairs_loader_keeps_distinct_pools_for_the_same_tokens() {
         let raw = r#"
 [
   {"pair":"0x1111111111111111111111111111111111111111","token0":"0x2222222222222222222222222222222222222222","token1":"0x3333333333333333333333333333333333333333"},
@@ -1259,7 +1717,34 @@ mod tests {
 ]
 "#;
         let parsed = ReserveCache::parse_pairs_entries(raw, 1).expect("parse");
+        assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn pairs_loader_dedupes_exact_pool_entries() {
+        let raw = r#"
+[
+  {"pair":"0x1111111111111111111111111111111111111111","token0":"0x2222222222222222222222222222222222222222","token1":"0x3333333333333333333333333333333333333333"},
+  {"pair":"0x1111111111111111111111111111111111111111","token0":"0x2222222222222222222222222222222222222222","token1":"0x3333333333333333333333333333333333333333"}
+]
+"#;
+        let parsed = ReserveCache::parse_pairs_entries(raw, 1).expect("parse");
         assert_eq!(parsed.len(), 1);
+    }
+
+    #[test]
+    fn pairs_loader_rejects_conflicting_pool_entries() {
+        let raw = r#"
+[
+  {"pair":"0x1111111111111111111111111111111111111111","token0":"0x2222222222222222222222222222222222222222","token1":"0x3333333333333333333333333333333333333333"},
+  {"pair":"0x1111111111111111111111111111111111111111","token0":"0x2222222222222222222222222222222222222222","token1":"0x4444444444444444444444444444444444444444"}
+]
+"#;
+        let err = ReserveCache::parse_pairs_entries(raw, 1).expect_err("conflict must fail");
+        assert!(
+            err.to_string()
+                .contains("Conflicting duplicate pool address")
+        );
     }
 
     #[test]

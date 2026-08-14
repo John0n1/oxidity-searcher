@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
-use alloy::primitives::U256;
+use alloy::primitives::{Address, U256};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlanType {
@@ -24,7 +24,9 @@ impl PlanType {
 pub struct PlannerInput {
     pub wallet_balance: U256,
     pub gas_cost_estimate: U256,
-    pub has_wrapped_path: bool,
+    /// Settlement asset for an atomic route that starts and ends in the same borrowable ERC-20.
+    /// `None` means no closed flashloan cycle can be constructed for this opportunity.
+    pub flashloan_asset: Option<Address>,
     pub flashloan_available: bool,
     pub base_trade_hint: U256,
     pub min_size: U256,
@@ -36,6 +38,7 @@ pub struct PlannerInput {
 #[derive(Clone, Debug)]
 pub struct PlanCandidate {
     pub plan_type: PlanType,
+    pub funding_asset: Option<Address>,
     pub size_wei: U256,
     pub funding_headroom_wei: U256,
     pub rejected_reason: Option<String>,
@@ -80,15 +83,17 @@ impl ExecutionPlanner {
             let size = requested_size.min(owned_budget);
             candidates.push(PlanCandidate {
                 plan_type: PlanType::OwnCapital,
+                funding_asset: None,
                 size_wei: size,
                 funding_headroom_wei: owned_budget.saturating_sub(size),
                 rejected_reason: None,
             });
         }
 
-        if input.flashloan_available && input.has_wrapped_path {
+        if input.flashloan_available && input.flashloan_asset.is_some() {
             candidates.push(PlanCandidate {
                 plan_type: PlanType::Flashloan,
+                funding_asset: input.flashloan_asset,
                 size_wei: requested_size,
                 funding_headroom_wei: input.wallet_balance.saturating_sub(gas_reserve),
                 rejected_reason: None,
@@ -102,11 +107,10 @@ impl ExecutionPlanner {
             .iter()
             .find(|candidate| candidate.plan_type == PlanType::Flashloan)
             .or_else(|| {
-                candidates
-                    .iter()
-                    .find(|candidate| {
-                        candidate.plan_type == PlanType::OwnCapital && candidate.size_wei == requested_size
-                    })
+                candidates.iter().find(|candidate| {
+                    candidate.plan_type == PlanType::OwnCapital
+                        && candidate.size_wei == requested_size
+                })
             })
             .or_else(|| candidates.first())
             .cloned();
@@ -130,7 +134,7 @@ mod tests {
         PlannerInput {
             wallet_balance: U256::from(100_000_000_000_000_000u128),
             gas_cost_estimate: U256::from(200_000_000_000_000u64),
-            has_wrapped_path: true,
+            flashloan_asset: Some(Address::from([0x11; 20])),
             flashloan_available: true,
             base_trade_hint: U256::from(15_000_000_000_000_000u64),
             min_size: U256::from(1u64),
@@ -156,9 +160,21 @@ mod tests {
         let mut input = input();
         input.wallet_balance = U256::from(500_000_000_000_000u64);
         let decision = ExecutionPlanner.plan(&input);
-        assert_eq!(
-            decision.best_plan.expect("plan").plan_type,
-            PlanType::Flashloan
+        let plan = decision.best_plan.expect("plan");
+        assert_eq!(plan.plan_type, PlanType::Flashloan);
+        assert_eq!(plan.funding_asset, input.flashloan_asset);
+    }
+
+    #[test]
+    fn does_not_offer_flashloan_without_closed_cycle_asset() {
+        let mut input = input();
+        input.flashloan_asset = None;
+        let decision = ExecutionPlanner.plan(&input);
+        assert!(
+            decision
+                .candidates
+                .iter()
+                .all(|candidate| candidate.plan_type != PlanType::Flashloan)
         );
     }
 

@@ -63,7 +63,7 @@ use alloy::rpc::types::eth::{Transaction, TransactionInput, TransactionRequest};
 use alloy_sol_types::SolCall;
 
 enum SwapDecodeOutcome {
-    Observed(ObservedSwap),
+    Observed(Box<ObservedSwap>),
     Skip,
     UnknownRouter,
     DecodeFailed,
@@ -134,8 +134,7 @@ impl StrategyExecutor {
                 if self.allow_unknown_router_decode() {
                     let decoded =
                         decode_swap_input_for_chain(self.chain_id, router, input, tx_value);
-                    self.stats
-                        .record_decode_attempt(AllowlistCategory::Routers, decoded.is_some());
+                    self.stats.record_unknown_router_decode(decoded.is_some());
                     decode_recorded = true;
                     if let Some(mut observed) = decoded
                         && let Some(exec_router) =
@@ -156,10 +155,23 @@ impl StrategyExecutor {
                     }
                 }
                 if predecoded_unknown_router.is_none() {
+                    let selector = Self::selector(input)
+                        .map(|value| format!("0x{}", hex::encode(value)))
+                        .unwrap_or_else(|| "0x".to_string());
                     if let Some(discovery) = &self.router_discovery {
                         discovery.record_unknown_router(router, unknown_source);
                     }
-                    self.log_skip(SkipReason::UnknownRouter, &format!("to={router:#x}"));
+                    tracing::debug!(
+                        target: "router_decode",
+                        router = %format!("{router:#x}"),
+                        %selector,
+                        source = unknown_source,
+                        "Unknown router selector was not decoded"
+                    );
+                    self.log_skip(
+                        SkipReason::UnknownRouter,
+                        &format!("to={router:#x} selector={selector}"),
+                    );
                     return SwapDecodeOutcome::UnknownRouter;
                 }
             }
@@ -169,13 +181,32 @@ impl StrategyExecutor {
             .or_else(|| decode_swap_input_for_chain(self.chain_id, router, input, tx_value));
         if !decode_recorded {
             self.stats
-                .record_decode_attempt(AllowlistCategory::Routers, observed_swap.is_some());
+                .record_known_router_decode(observed_swap.is_some());
         }
 
         match observed_swap {
-            Some(observed) => SwapDecodeOutcome::Observed(observed),
+            Some(observed) => SwapDecodeOutcome::Observed(Box::new(observed)),
             None => {
-                self.log_skip(SkipReason::DecodeFailed, "unable to decode swap input");
+                let selector = Self::selector(input)
+                    .map(|value| format!("0x{}", hex::encode(value)))
+                    .unwrap_or_else(|| "0x".to_string());
+                // Pending transaction calldata is public chain data. Keep a bounded prefix in
+                // debug logs so newly deployed router revisions can be classified and covered
+                // without logging unbounded payloads.
+                let input_prefix = format!("0x{}", hex::encode(&input[..input.len().min(2_048)]));
+                tracing::debug!(
+                    target: "router_decode",
+                    router = %format!("{router:#x}"),
+                    %selector,
+                    category = ?category,
+                    input_len = input.len(),
+                    %input_prefix,
+                    "Known router selector was not decoded"
+                );
+                self.log_skip(
+                    SkipReason::DecodeFailed,
+                    &format!("unable_to_decode router={router:#x} selector={selector}"),
+                );
                 SwapDecodeOutcome::DecodeFailed
             }
         }
@@ -609,8 +640,15 @@ impl StrategyExecutor {
         }
 
         for token in candidates.into_iter().take(max_attempts) {
-            let dynamic_amount_in = if let Some(res) = self.reserve_cache.reserves_for_pair(self.wrapped_native, token) {
-                let native_reserve = if res.token0 == self.wrapped_native { res.reserve0 } else { res.reserve1 };
+            let dynamic_amount_in = if let Some(res) = self
+                .reserve_cache
+                .reserves_for_pair(self.wrapped_native, token)
+            {
+                let native_reserve = if res.token0 == self.wrapped_native {
+                    res.reserve0
+                } else {
+                    res.reserve1
+                };
                 let max_bps = U256::from(self.max_price_impact_bps());
                 let max_allowed = if max_bps < U256::from(10_000u64) {
                     max_bps.saturating_mul(native_reserve) / (U256::from(10_000u64) - max_bps)
@@ -628,7 +666,10 @@ impl StrategyExecutor {
                 seed_floor.max(U256::from(1u64))
             };
 
-            let min_out = if let Some(quoted_out) = self.reserve_cache.quote_v2_path(&[self.wrapped_native, token], dynamic_amount_in) {
+            let min_out = if let Some(quoted_out) = self
+                .reserve_cache
+                .quote_v2_path(&[self.wrapped_native, token], dynamic_amount_in)
+            {
                 quoted_out.saturating_mul(U256::from(9950u64)) / U256::from(10000u64)
             } else {
                 U256::from(1u64)
@@ -639,6 +680,7 @@ impl StrategyExecutor {
                 path: vec![self.wrapped_native, token],
                 v3_fees: Vec::new(),
                 v3_path: None,
+                v4_path: Vec::new(),
                 amount_in: dynamic_amount_in,
                 min_out,
                 recipient: self.signer.address(),
@@ -844,14 +886,18 @@ impl StrategyExecutor {
         if observed.min_out <= U256::from(1u64) {
             return true;
         }
-        if observed.path.len() >= 2 {
-            if let Some(_res) = self.reserve_cache.reserves_for_pair(observed.path[0], observed.path[1]) {
-                if let Some(expected_out) = self.reserve_cache.quote_v2_path(&observed.path, observed.amount_in) {
-                    if observed.min_out < expected_out.saturating_mul(U256::from(9000u64)) / U256::from(10000u64) {
-                        return true;
-                    }
-                }
-            }
+        if observed.path.len() >= 2
+            && self
+                .reserve_cache
+                .reserves_for_pair(observed.path[0], observed.path[1])
+                .is_some()
+            && let Some(expected_out) = self
+                .reserve_cache
+                .quote_v2_path(&observed.path, observed.amount_in)
+            && observed.min_out
+                < expected_out.saturating_mul(U256::from(9000u64)) / U256::from(10000u64)
+        {
+            return true;
         }
         false
     }
@@ -964,6 +1010,69 @@ impl StrategyExecutor {
         value_and_bribe.saturating_add(gas_cost_wei)
     }
 
+    fn wallet_principal_wei(
+        backrun_value_wei: U256,
+        bribe_wei: U256,
+        front_run_value_wei: U256,
+    ) -> U256 {
+        // Executor bundle value contains both trade capital and the bribe. Remove
+        // the bribe here because it is accounted as a direct cost below.
+        backrun_value_wei
+            .saturating_sub(bribe_wei)
+            .saturating_add(front_run_value_wei)
+    }
+
+    fn economic_principal_wei(wallet_principal_wei: U256, flashloan_principal_wei: U256) -> U256 {
+        wallet_principal_wei.saturating_add(flashloan_principal_wei)
+    }
+
+    fn direct_execution_cost_wei(
+        gas_cost_wei: U256,
+        bribe_wei: U256,
+        flashloan_premium_wei: U256,
+    ) -> U256 {
+        gas_cost_wei
+            .saturating_add(bribe_wei)
+            .saturating_add(flashloan_premium_wei)
+    }
+
+    fn signer_paid_simulated_gas(
+        bundle_requests: &[TransactionRequest],
+        bundle_sims: &[crate::services::strategy::simulation::SimulationOutcome],
+        signer: Address,
+    ) -> u64 {
+        bundle_requests
+            .iter()
+            .zip(bundle_sims)
+            .filter(|(request, _)| request.from == Some(signer))
+            .fold(0u64, |total, (_, simulation)| {
+                total.saturating_add(simulation.gas_used)
+            })
+    }
+
+    fn signer_gas_limit_fallback(
+        bundle_requests: &[TransactionRequest],
+        signer: Address,
+        shared_gas_limit_hint: u64,
+    ) -> u64 {
+        let mut explicit_total = 0u64;
+        let mut has_missing_limit = false;
+        for request in bundle_requests
+            .iter()
+            .filter(|request| request.from == Some(signer))
+        {
+            match request.gas {
+                Some(gas) => explicit_total = explicit_total.saturating_add(gas),
+                None => has_missing_limit = true,
+            }
+        }
+        explicit_total.saturating_add(if has_missing_limit {
+            shared_gas_limit_hint
+        } else {
+            0
+        })
+    }
+
     fn tx_max_upfront_wei(
         req: &TransactionRequest,
         fallback_max_fee_per_gas: u128,
@@ -1035,6 +1144,7 @@ impl StrategyExecutor {
         let router_floor = match observed_swap.router_kind {
             RouterKind::V2Like => 130_000u64,
             RouterKind::V3Like => 150_000u64,
+            RouterKind::V4Like => 210_000u64,
         };
         estimate = estimate.max(router_floor);
         if allow_front_run {
@@ -1264,6 +1374,22 @@ impl StrategyExecutor {
                 .stats
                 .skip_backrun_build_failed
                 .load(std::sync::atomic::Ordering::Relaxed);
+            let known_decode_attempts = self
+                .stats
+                .decode_attempts_known_router
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let known_decode_success = self
+                .stats
+                .decode_success_known_router
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let unknown_decode_attempts = self
+                .stats
+                .decode_attempts_unknown_router
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let unknown_decode_success = self
+                .stats
+                .decode_success_unknown_router
+                .load(std::sync::atomic::Ordering::Relaxed);
 
             let pct_of = |value: u64, total: u64| -> f64 {
                 if total == 0 {
@@ -1447,6 +1573,15 @@ impl StrategyExecutor {
                         color_enabled
                     ),
                 ));
+                lines.push(format!(
+                    "router decode: known={}/{} ({:.2}%) unknown-fallback={}/{} ({:.2}%)",
+                    known_decode_success,
+                    known_decode_attempts,
+                    pct_of(known_decode_success, known_decode_attempts),
+                    unknown_decode_success,
+                    unknown_decode_attempts,
+                    pct_of(unknown_decode_success, unknown_decode_attempts),
+                ));
                 lines
             };
 
@@ -1518,22 +1653,25 @@ impl StrategyExecutor {
                 return None;
             }
         };
-        if self.toxic_tokens.contains(&target_token) {
-            self.log_skip(
-                SkipReason::ToxicToken,
-                &format!("token={:#x}", target_token),
-            );
+        if let Some(toxic_token) = observed_swap
+            .path
+            .iter()
+            .copied()
+            .find(|token| self.toxic_tokens.contains(token))
+        {
+            self.log_skip(SkipReason::ToxicToken, &format!("token={toxic_token:#x}"));
             return None;
         }
         if self.runtime.strategy_require_tokenlist
-            && self
-                .token_manager
-                .info(self.chain_id, target_token)
-                .is_none()
+            && let Some(missing_token) = observed_swap
+                .path
+                .iter()
+                .copied()
+                .find(|token| self.token_manager.info(self.chain_id, *token).is_none())
         {
             self.log_skip(
                 SkipReason::DecodeFailed,
-                &format!("token_not_in_tokenlist={:#x}", target_token),
+                &format!("token_not_in_tokenlist={missing_token:#x}"),
             );
             return None;
         }
@@ -1669,19 +1807,19 @@ impl StrategyExecutor {
 
         if observed_swap.router_kind == RouterKind::V3Like
             && observed_swap.amount_in >= U256::from(1_000_000_000_000_000_000u64)
+            && let Some(submitted) = self
+                .try_jit_liquidity(tx, &observed_swap, received_at)
+                .await?
         {
-            if let Some(submitted) = self.try_jit_liquidity(tx, &observed_swap, received_at).await? {
-                return Ok(Some(submitted));
-            }
+            return Ok(Some(submitted));
         }
 
-        if self.is_unguarded_competitor_swap(&observed_swap) {
-            if let Some(submitted) = self
+        if self.is_unguarded_competitor_swap(&observed_swap)
+            && let Some(submitted) = self
                 .try_bot_trapping_bait_arb(tx, &observed_swap, direction, target_token, received_at)
                 .await?
-            {
-                return Ok(Some(submitted));
-            }
+        {
+            return Ok(Some(submitted));
         }
 
         let parts = match self
@@ -2325,10 +2463,25 @@ impl StrategyExecutor {
         }
 
         let planner = ExecutionPlanner;
+        let flashloan_asset = if observed_swap.path.len() == 2
+            && observed_swap.v3_fees.len() == 1
+            && observed_swap.router_kind == RouterKind::V3Like
+        {
+            Some(StrategyExecutor::cross_venue_borrow_asset(
+                observed_swap.path[0],
+                observed_swap.path[1],
+                self.wrapped_native,
+            ))
+        } else if has_wrapped {
+            // Preserve the existing WETH-denominated V2 roundtrip family.
+            Some(self.wrapped_native)
+        } else {
+            None
+        };
         let planner_input = PlannerInput {
             wallet_balance: wallet_chain_balance,
             gas_cost_estimate: min_bundle_gas_cost,
-            has_wrapped_path: has_wrapped,
+            flashloan_asset,
             flashloan_available: self.has_usable_flashloan_provider(),
             base_trade_hint: observed_swap.amount_in.max(victim_value),
             min_size: U256::from(1u64),
@@ -2380,8 +2533,13 @@ impl StrategyExecutor {
             return Ok(None);
         };
         let planned_plan_type = best_plan.plan_type;
+        let planned_funding_asset = best_plan.funding_asset;
         let planned_trade_size = best_plan.size_wei.max(U256::from(1u64));
-        let allow_front_run = allow_front_run && planned_plan_type == PlanType::OwnCapital;
+        // V3 opportunities are handled as cross-venue backruns. Building a same-venue
+        // sandwich first would consume the token override and bypass the V3/V2 route.
+        let allow_front_run = allow_front_run
+            && planned_plan_type == PlanType::OwnCapital
+            && observed_swap.router_kind != RouterKind::V3Like;
 
         let mut attack_value_eth = U256::ZERO;
         let mut front_run: Option<FrontRunTx> = None;
@@ -2452,13 +2610,19 @@ impl StrategyExecutor {
             approvals.clear();
             attack_value_eth = U256::ZERO;
         }
-        let use_flashloan =
-            has_wrapped && planned_plan_type == PlanType::Flashloan && front_run.is_none();
+        let use_flashloan = planned_plan_type == PlanType::Flashloan && front_run.is_none();
+        debug_assert_eq!(use_flashloan, planned_funding_asset.is_some());
         let trade_balance = if use_flashloan {
-            let flashloan_floor = U256::from(5_000_000_000_000_000u128); // 0.005 ETH
-            planned_trade_size
-                .max(wallet_chain_balance.saturating_add(victim_value))
-                .max(flashloan_floor)
+            if has_wrapped {
+                let flashloan_floor = U256::from(5_000_000_000_000_000u128); // 0.005 WETH
+                planned_trade_size
+                    .max(wallet_chain_balance.saturating_add(victim_value))
+                    .max(flashloan_floor)
+            } else {
+                // Non-wrapped notionals are denominated in the decoded input token. Never mix
+                // the signer's native wei balance into an arbitrary ERC-20 amount.
+                planned_trade_size.max(U256::from(1u64))
+            }
         } else {
             planned_trade_size.min(wallet_chain_balance.max(U256::from(1u64)))
         };
@@ -2486,11 +2650,7 @@ impl StrategyExecutor {
                         || err_msg.contains("Flashloan same-router roundtrip non-positive")
                         || err_msg.contains("Flashloan same-router V3 roundtrip non-positive"));
                 if flashloan_insolvent_like {
-                    let flashloan_asset = observed_swap
-                        .path
-                        .first()
-                        .copied()
-                        .unwrap_or(self.wrapped_native);
+                    let flashloan_asset = planned_funding_asset.unwrap_or(self.wrapped_native);
                     self.record_flashloan_insolvency(flashloan_asset, &err_msg);
                 }
 
@@ -2533,6 +2693,14 @@ impl StrategyExecutor {
                                 break 'adaptive_retry Some(backrun);
                             }
                             Err(inner) => {
+                                // Advance the per-asset principal scale between retries. The
+                                // caller-side balance cap is only guaranteed to bind token-unit
+                                // routes; WETH victim-based pool sizing may otherwise select the
+                                // same notional repeatedly.
+                                self.record_flashloan_insolvency(
+                                    planned_funding_asset.unwrap_or(self.wrapped_native),
+                                    &inner.to_string(),
+                                );
                                 tracing::debug!(
                                     target: "strategy",
                                     scale_bps,
@@ -2540,6 +2708,12 @@ impl StrategyExecutor {
                                     retry_error = %inner,
                                     "Adaptive flashloan downshift retry failed"
                                 );
+                                let asset = planned_funding_asset.unwrap_or(self.wrapped_native);
+                                if self.flashloan_asset_scale_bps(asset)
+                                    <= self.flashloan_adaptive_min_scale_bps()
+                                {
+                                    break;
+                                }
                             }
                         }
                     }
@@ -3014,11 +3188,61 @@ impl StrategyExecutor {
         }
         self.record_router_sim(router, true);
 
-        let mut gas_used_total = 0u64;
-        for sim in &bundle_sims {
-            gas_used_total = gas_used_total.saturating_add(sim.gas_used);
+        let simulated_settled_profit_amount = bundle_sims
+            .iter()
+            .flat_map(|simulation| simulation.settled_profits.iter())
+            .filter(|profit| {
+                profit.emitter == backrun.to && profit.token == backrun.expected_out_token
+            })
+            .fold(U256::ZERO, |total, profit| {
+                total.saturating_add(profit.amount)
+            });
+        let simulated_settled_profit_wei = if simulated_settled_profit_amount.is_zero() {
+            U256::ZERO
+        } else {
+            let Some(native_profit) = self
+                .estimate_settlement_native_out(
+                    simulated_settled_profit_amount,
+                    backrun.expected_out_token,
+                )
+                .await
+            else {
+                self.log_skip(
+                    SkipReason::ProfitOrGasGuard,
+                    &format!(
+                        "unpriced_simulated_profit token={:#x} amount={}",
+                        backrun.expected_out_token, simulated_settled_profit_amount
+                    ),
+                );
+                return Ok(None);
+            };
+            native_profit
+        };
+
+        // Flashloan callbacks settle principal and provider premium before ProfitSettled is
+        // emitted. A successful simulation without that event has no demonstrated profit and must
+        // never fall back to a stale pre-victim quote, especially for token-denominated cycles.
+        if backrun.uses_flashloan && simulated_settled_profit_amount.is_zero() {
+            self.log_skip(
+                SkipReason::ProfitOrGasGuard,
+                &format!(
+                    "flashloan_simulation_missing_positive_settlement token={:#x}",
+                    backrun.expected_out_token
+                ),
+            );
+            return Ok(None);
         }
-        let bundle_gas_limit = gas_used_total.max(gas_limit_hint);
+
+        // Victim transactions are simulated for state continuity but their gas is
+        // paid by the victim, not by our signer. Charge only signer-owned requests.
+        let simulated_signer_gas =
+            Self::signer_paid_simulated_gas(&bundle_requests, &bundle_sims, self.signer.address());
+        let gas_used_total = if simulated_signer_gas == 0 {
+            Self::signer_gas_limit_fallback(&bundle_requests, self.signer.address(), gas_limit_hint)
+        } else {
+            simulated_signer_gas
+        };
+        let bundle_gas_limit = gas_used_total;
 
         // EIP-1559 effective fee actually paid: base_fee + min(tip, max_fee - base_fee).
         let paid_tip = gas_fees.max_priority_fee_per_gas.min(
@@ -3036,12 +3260,15 @@ impl StrategyExecutor {
         let gas_cost_wei = U256::from(gas_used_total).saturating_mul(U256::from(paid_fee));
         self.safety_guard.check_transaction_gas(gas_cost_wei)?;
 
-        // Principal for upfront-balance checks is native value actually transferred by the tx.
+        // Separate wallet funding from economic principal. Flashloan principal is
+        // not required upfront, but it must still be removed from full swap output
+        // before the result can be called profit.
         let backrun_value = backrun.request.value.unwrap_or(U256::ZERO);
-        let principal_wei = backrun_value.saturating_add(attack_value_eth);
+        let wallet_principal_wei =
+            Self::wallet_principal_wei(backrun_value, bribe_wei, attack_value_eth);
         let upfront_need = Self::required_wallet_upfront_wei(
             backrun.uses_flashloan,
-            principal_wei,
+            wallet_principal_wei,
             bribe_wei,
             gas_cost_wei,
         );
@@ -3059,30 +3286,69 @@ impl StrategyExecutor {
             );
             return Ok(None);
         }
-        let Some(native_out) = self
-            .estimate_settlement_native_out(backrun.expected_out, backrun.expected_out_token)
-            .await
-        else {
+        let native_out = if simulated_settled_profit_wei.is_zero() {
+            let Some(native_out) = self
+                .estimate_settlement_native_out(backrun.expected_out, backrun.expected_out_token)
+                .await
+            else {
+                self.log_skip(
+                    SkipReason::ProfitOrGasGuard,
+                    &format!(
+                        "unpriced_settlement_token_out token={:#x} amount={}",
+                        backrun.expected_out_token, backrun.expected_out
+                    ),
+                );
+                return Ok(None);
+            };
+            native_out
+        } else {
+            U256::ZERO
+        };
+        let economic_principal_wei =
+            Self::economic_principal_wei(wallet_principal_wei, backrun.flashloan_principal);
+        let flashloan_premium_native_wei = if backrun.flashloan_premium.is_zero() {
+            U256::ZERO
+        } else {
+            let Some(value) = self
+                .estimate_settlement_native_out(
+                    backrun.flashloan_premium,
+                    backrun.expected_out_token,
+                )
+                .await
+            else {
+                self.log_skip(
+                    SkipReason::ProfitOrGasGuard,
+                    &format!(
+                        "unpriced_flashloan_premium token={:#x} amount={}",
+                        backrun.expected_out_token, backrun.flashloan_premium
+                    ),
+                );
+                return Ok(None);
+            };
+            value
+        };
+        // ProfitSettled is emitted after principal and provider premium have been repaid. Prefer
+        // that definitive stateful result over pre-victim route quotes whenever it is available.
+        let (gross_profit_wei, charged_flashloan_premium) =
+            if simulated_settled_profit_wei.is_zero() {
+                (
+                    native_out.saturating_sub(economic_principal_wei),
+                    flashloan_premium_native_wei,
+                )
+            } else {
+                (simulated_settled_profit_wei, U256::ZERO)
+            };
+
+        let effective_cost_wei =
+            Self::direct_execution_cost_wei(gas_cost_wei, bribe_wei, charged_flashloan_premium);
+        if effective_cost_wei >= gross_profit_wei {
             self.log_skip(
                 SkipReason::ProfitOrGasGuard,
-                &format!(
-                    "unpriced_settlement_token_out token={:#x} amount={}",
-                    backrun.expected_out_token, backrun.expected_out
-                ),
+                "Direct execution costs >= gross profit",
             );
-            return Ok(None);
-        };
-        // Gross profit excludes execution costs; net profit applies gas/bribe/premium exactly once.
-        let gross_profit_wei = native_out.saturating_sub(principal_wei);
-
-        if gas_cost_wei > gross_profit_wei {
-            self.log_skip(SkipReason::ProfitOrGasGuard, "Gas > Gross Profit");
             return Ok(None);
         }
 
-        let effective_cost_wei = gas_cost_wei
-            .saturating_add(bribe_wei)
-            .saturating_add(backrun.flashloan_premium);
         let net_profit_wei = gross_profit_wei.saturating_sub(effective_cost_wei);
         let native_symbol = crate::common::constants::native_symbol_for_chain(self.chain_id);
         let price_symbol = format!("{native_symbol}USD");
@@ -3102,7 +3368,7 @@ impl StrategyExecutor {
             }
         };
         let base_profit_floor = StrategyExecutor::dynamic_profit_floor(wallet_chain_balance);
-        let extra_costs = bribe_wei.saturating_add(backrun.flashloan_premium);
+        let extra_costs = bribe_wei.saturating_add(charged_flashloan_premium);
         let min_usd_floor_wei = self.min_usd_floor_wei(eth_quote.price);
         let adaptive_base_bps = self.adaptive_base_floor_bps(gas_fees);
         let adaptive_cost_bps = self.adaptive_cost_floor_bps(gas_fees);
@@ -3159,7 +3425,8 @@ impl StrategyExecutor {
             gross_profit_wei,
             wallet_chain_balance,
             gas_fees,
-        ) && !self.runtime.testnet_force_execution {
+        ) && !self.runtime.testnet_force_execution
+        {
             self.log_skip(SkipReason::ProfitOrGasGuard, "Bad Risk/Reward");
             return Ok(None);
         }
@@ -3174,7 +3441,7 @@ impl StrategyExecutor {
             gross_profit_wei,
             net_profit_wei,
             bribe_wei,
-            flashloan_premium_wei: backrun.flashloan_premium,
+            flashloan_premium_wei: flashloan_premium_native_wei,
             effective_cost_wei,
             profit_eth_f64,
             gas_cost_eth_f64,
@@ -3284,6 +3551,98 @@ mod tests {
             U256::from(5u64),
         );
         assert_eq!(upfront, U256::from(15u64));
+    }
+
+    #[test]
+    fn principal_accounting_separates_bribe_and_flashloan_funding() {
+        // The transaction carries 110: 100 trade capital plus a 10 bribe.
+        let wallet_principal = StrategyExecutor::wallet_principal_wei(
+            U256::from(110u64),
+            U256::from(10u64),
+            U256::from(20u64),
+        );
+        assert_eq!(wallet_principal, U256::from(120u64));
+
+        // Borrowed principal is excluded from upfront funding but included in the
+        // economic input subtracted from full swap output.
+        let economic = StrategyExecutor::economic_principal_wei(U256::ZERO, U256::from(1_000u64));
+        assert_eq!(economic, U256::from(1_000u64));
+    }
+
+    #[test]
+    fn direct_execution_costs_are_summed_once() {
+        let costs = StrategyExecutor::direct_execution_cost_wei(
+            U256::from(100u64),
+            U256::from(20u64),
+            U256::from(3u64),
+        );
+        assert_eq!(costs, U256::from(123u64));
+    }
+
+    #[test]
+    fn simulated_gas_charges_only_signer_owned_transactions() {
+        use crate::services::strategy::simulation::SimulationOutcome;
+
+        let signer = Address::from([0x11; 20]);
+        let victim = Address::from([0x22; 20]);
+        let requests = vec![
+            TransactionRequest {
+                from: Some(victim),
+                ..Default::default()
+            },
+            TransactionRequest {
+                from: Some(signer),
+                ..Default::default()
+            },
+        ];
+        let simulations = vec![
+            SimulationOutcome {
+                success: true,
+                gas_used: 500_000,
+                return_data: Vec::new(),
+                reason: None,
+                settled_profits: Vec::new(),
+            },
+            SimulationOutcome {
+                success: true,
+                gas_used: 125_000,
+                return_data: Vec::new(),
+                reason: None,
+                settled_profits: Vec::new(),
+            },
+        ];
+
+        assert_eq!(
+            StrategyExecutor::signer_paid_simulated_gas(&requests, &simulations, signer),
+            125_000
+        );
+    }
+
+    #[test]
+    fn signer_gas_fallback_applies_shared_hint_only_once() {
+        let signer = Address::from([0x11; 20]);
+        let requests = vec![
+            TransactionRequest {
+                from: Some(signer),
+                gas: None,
+                ..Default::default()
+            },
+            TransactionRequest {
+                from: Some(signer),
+                gas: None,
+                ..Default::default()
+            },
+            TransactionRequest {
+                from: Some(signer),
+                gas: Some(25_000),
+                ..Default::default()
+            },
+        ];
+
+        assert_eq!(
+            StrategyExecutor::signer_gas_limit_fallback(&requests, signer, 100_000),
+            125_000
+        );
     }
 
     #[test]
@@ -3465,6 +3824,7 @@ mod tests {
             expected_out_token: Address::ZERO,
             unwrap_to_native: false,
             uses_flashloan: true,
+            flashloan_principal: U256::from(1_000u64),
             flashloan_premium: U256::ZERO,
             flashloan_overhead_gas: 200_000,
             router_kind: crate::services::strategy::decode::RouterKind::V2Like,

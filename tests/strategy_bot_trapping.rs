@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
-use alloy::primitives::{address, Address, U256};
+use alloy::primitives::{Address, U256, address};
 use oxidity_searcher::services::strategy::ingest::decode::{ObservedSwap, RouterKind};
 
 #[test]
@@ -15,14 +15,18 @@ fn test_bot_trapping_unguarded_competitor_swap_detection() {
         path: vec![token_in, token_out],
         v3_fees: Vec::new(),
         v3_path: None,
+        v4_path: Vec::new(),
         amount_in: U256::from(5_000_000_000_000_000_000u64), // 5 ETH swap
-        min_out: U256::from(0u64),                            // Zero slippage protection
+        min_out: U256::from(0u64),                           // Zero slippage protection
         recipient: Address::ZERO,
         router_kind: RouterKind::V2Like,
     };
 
     let is_unguarded = naive_bot_swap.min_out <= U256::from(1u64);
-    assert!(is_unguarded, "Competitor swap with min_out <= 1 must be flagged for MEV Bot Trapping extraction");
+    assert!(
+        is_unguarded,
+        "Competitor swap with min_out <= 1 must be flagged for MEV Bot Trapping extraction"
+    );
 }
 
 #[test]
@@ -31,7 +35,7 @@ fn test_counter_trap_bundle_structure() {
     let competitor_tx = "naive_competitor_swap";
     let extraction_backrun = "counter_trap_backrun_extract_capital";
 
-    let bundle = vec![bait_frontrun, competitor_tx, extraction_backrun];
+    let bundle = [bait_frontrun, competitor_tx, extraction_backrun];
 
     assert_eq!(bundle.len(), 3);
     assert_eq!(bundle[1], "naive_competitor_swap");

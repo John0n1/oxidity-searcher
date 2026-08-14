@@ -14,11 +14,13 @@ use alloy::primitives::{Address, Bytes, U256};
 pub enum RouteVenue {
     UniV2,
     UniV3,
+    UniV4,
     Sushi,
     CurvePool,
     BalancerPool,
     AaveV3Flash,
     BalancerFlash,
+    UniswapV4Flash,
 }
 
 /// One hop or action in a composed route.

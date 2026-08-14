@@ -45,7 +45,9 @@ forge create --rpc-url http://127.0.0.1:8545 \
 
 1. Open [Remix IDE](https://remix.ethereum.org/).
 2. Upload `contracts/UnifiedHardenedExecutor.sol`.
-3. Select Solidity Compiler version `0.8.24` (Enable EVM version `paris` or `shanghai`, 200 runs optimization).
+3. Select Solidity Compiler version `0.8.34`, EVM version `cancun`, enable optimization with
+   200 runs, and enable **Use configuration from compiler JSON / viaIR**. Compiling this unified
+   executor without IR can exceed Ethereum's 24,576-byte EIP-170 runtime limit.
 4. Connect Remix to **Injected Provider (Metamask)** or **Custom External HTTP Provider** (`http://127.0.0.1:8545`).
 5. Deploy `UnifiedHardenedExecutor` and copy the resulting deployed contract address.
 
@@ -65,3 +67,8 @@ After deployment:
    ```toml
    flashloan_enabled = true
    ```
+5. Before enabling a provider other than the constructor-configured Balancer vault,
+   call `setApprovedProvider(provider, true)` as the executor owner. For Uniswap V4,
+   `provider` is the chain's canonical `UNISWAP_V4_POOL_MANAGER` from
+   `data/global_data.json`. The runtime verifies this approval and PoolManager token
+   liquidity before selecting V4.

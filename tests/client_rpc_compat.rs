@@ -162,9 +162,7 @@ async fn eth_simulate_v1_shape_matches_client_expectations() {
 #[tokio::test]
 async fn debug_trace_call_many_shape_matches_client_expectations() {
     let Some(url) = client_http_provider() else {
-        eprintln!(
-            "skipping debug_traceCallMany conformance test: CLIENT_HTTP_PROVIDER is not set"
-        );
+        eprintln!("skipping debug_traceCallMany conformance test: CLIENT_HTTP_PROVIDER is not set");
         return;
     };
     let client = Client::builder()

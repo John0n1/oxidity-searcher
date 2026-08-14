@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
-use alloy::primitives::{address, Address, U256};
+use alloy::primitives::{Address, U256, address};
 use oxidity_searcher::services::strategy::ingest::decode::{ObservedSwap, RouterKind};
 
 #[test]
@@ -15,6 +15,7 @@ fn test_backrun_candidate_validation() {
         path: vec![token_in, token_out],
         v3_fees: Vec::new(),
         v3_path: None,
+        v4_path: Vec::new(),
         amount_in: U256::from(5_000_000_000_000_000_000u64), // 5 ETH
         min_out: U256::from(10_000_000_000_000_000_000_000u128), // 10,000 DAI
         recipient: Address::ZERO,
@@ -32,7 +33,7 @@ fn test_triangular_arbitrage_path_topology() {
     let token_b = address!("a0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"); // USDC
     let token_c = address!("6b175474e89094c44da98b954eedeac495271d0f"); // DAI
 
-    let path = vec![token_a, token_b, token_c, token_a];
+    let path = [token_a, token_b, token_c, token_a];
 
     assert_eq!(path.len(), 4);
     assert_eq!(path[0], path[3]); // Closed loop A -> B -> C -> A

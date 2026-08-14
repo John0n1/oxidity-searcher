@@ -36,7 +36,8 @@ pub use routes::{RouteLeg, RoutePlan, RouteVenue};
 
 use crate::common::constants::{
     default_balancer_vault_for_chain, default_dydx_solo_margin, default_maker_flash_lender,
-    default_uniswap_v2_factory, default_uniswap_v3_factory,
+    default_uniswap_permit2, default_uniswap_v2_factory, default_uniswap_v3_factory,
+    default_uniswap_v4_pool_manager,
 };
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
@@ -47,11 +48,12 @@ use crate::services::strategy::decode::{
 };
 use crate::services::strategy::routers::{
     AavePool, BalancerProtocolFees, BalancerVaultFees, DydxSoloMarginGetters, ERC20,
-    ERC3156FlashLender, UniV2Router, UniV3Router, UniswapV2Factory, UniswapV3Factory,
-    registry_v2_router_addresses, registry_v2_router_candidates,
+    ERC3156FlashLender, Permit2AllowanceTransfer, UniV2Router, UniV3Router, UniswapV2Factory,
+    UniswapV3Factory, registry_v2_router_addresses, registry_v2_router_candidates,
 };
 use crate::services::strategy::strategy::{FlashloanProvider, StrategyExecutor};
 use alloy::eips::eip2930::AccessList;
+use alloy::primitives::aliases::{U48, U160};
 use alloy::primitives::{Address, B256, Bytes, TxKind, U256};
 use alloy::rpc::types::eth::{TransactionInput, TransactionRequest};
 use alloy::sol_types::{SolCall, SolValue};
@@ -69,6 +71,9 @@ pub struct BackrunTx {
     pub expected_out_token: Address,
     pub unwrap_to_native: bool,
     pub uses_flashloan: bool,
+    /// Borrowed principal returned by the executor. This is an economic input even
+    /// though it is not funded through transaction value.
+    pub flashloan_principal: U256,
     pub flashloan_premium: U256,
     pub flashloan_overhead_gas: u64,
     pub router_kind: RouterKind,
@@ -94,13 +99,17 @@ pub struct ApproveTx {
     pub amount: U256,
 }
 
+type ExecutorCallback = (Address, Bytes, U256);
+
 const BALANCER_FLASHLOAN_OVERHEAD_GAS: u64 = 180_000;
 const AAVE_FLASHLOAN_OVERHEAD_GAS: u64 = 200_000;
 const DYDX_FLASHLOAN_OVERHEAD_GAS: u64 = 240_000;
 const MAKER_FLASHLOAN_OVERHEAD_GAS: u64 = 220_000;
 const UNISWAP_V2_FLASHLOAN_OVERHEAD_GAS: u64 = 240_000;
 const UNISWAP_V3_FLASHLOAN_OVERHEAD_GAS: u64 = 260_000;
+const UNISWAP_V4_FLASHLOAN_OVERHEAD_GAS: u64 = 230_000;
 const V2_SWAP_OVERHEAD_GAS: u64 = 160_000;
+const V3_SWAP_OVERHEAD_GAS: u64 = 190_000;
 const CURVE_SWAP_OVERHEAD_GAS: u64 = 220_000;
 const BALANCER_SWAP_OVERHEAD_GAS: u64 = 200_000;
 const FEE_TTL: Duration = Duration::from_mins(5);
@@ -111,6 +120,18 @@ static AAVE_ATOKEN_CACHE: Lazy<DashMap<(Address, Address), (Address, std::time::
     Lazy::new(DashMap::new);
 
 impl StrategyExecutor {
+    pub(crate) fn cross_venue_borrow_asset(
+        token_in: Address,
+        token_out: Address,
+        wrapped_native: Address,
+    ) -> Address {
+        if token_in == wrapped_native || token_out != wrapped_native {
+            token_in
+        } else {
+            token_out
+        }
+    }
+
     fn flashloan_value_scale_bps(&self) -> u64 {
         self.runtime.flashloan_value_scale_bps
     }
@@ -163,21 +184,70 @@ impl StrategyExecutor {
         self.runtime.flashloan_reject_same_router_negative
     }
 
+    fn v2_factory_for_router(&self, router: Address) -> Option<Address> {
+        registry_v2_router_candidates(self.chain_id)
+            .into_iter()
+            .find_map(|(name, candidate)| {
+                if candidate != router {
+                    return None;
+                }
+                if name.contains("sushi") {
+                    crate::common::constants::default_sushiswap_v2_factory(self.chain_id)
+                } else if name.contains("uniswap_v2") {
+                    crate::common::constants::default_uniswap_v2_factory(self.chain_id)
+                } else {
+                    None
+                }
+            })
+    }
+
+    fn quote_v2_reverse_after_victim(
+        &self,
+        observed: &ObservedSwap,
+        reverse_router: Address,
+        reverse_amount_in: U256,
+    ) -> Option<U256> {
+        // Signal-driven scans construct a synthetic swap owned by our signer and do not place
+        // that swap before the candidate. Only real external victims may contribute impact.
+        if observed.router != reverse_router || observed.recipient == self.signer.address() {
+            return None;
+        }
+        let factory = self.v2_factory_for_router(reverse_router)?;
+        self.reserve_cache
+            .quote_v2_reverse_after_victim_for_factory(
+                &observed.path,
+                observed.amount_in,
+                reverse_amount_in,
+                factory,
+            )
+    }
+
     pub(in crate::services::strategy) async fn quote_v2_path_with_router_fallback(
         &self,
         router: Address,
         path: &[Address],
         amount_in: U256,
     ) -> Option<U256> {
-        if let Some(q) = self.reserve_cache.quote_v2_path(path, amount_in) {
-            return Some(q);
+        for (_name, candidate) in registry_v2_router_candidates(self.chain_id) {
+            if candidate != router {
+                continue;
+            }
+            let factory = self.v2_factory_for_router(router);
+            if let Some(factory) = factory
+                && let Some(q) = self
+                    .reserve_cache
+                    .quote_v2_path_for_factory(path, amount_in, factory)
+            {
+                return Some(q);
+            }
+            break;
         }
         if path.len() < 2 || amount_in.is_zero() {
             return None;
         }
         let quote_contract = UniV2Router::new(router, self.http_provider.clone());
         let quote_path = path.to_vec();
-        let quote: Vec<U256> = retry_async(
+        let quote: Vec<U256> = match retry_async(
             move |_| {
                 let c = quote_contract.clone();
                 let p = quote_path.clone();
@@ -187,7 +257,20 @@ impl StrategyExecutor {
             Duration::from_millis(75),
         )
         .await
-        .ok()?;
+        {
+            Ok(quote) => quote,
+            Err(err) => {
+                tracing::debug!(
+                    target: "strategy",
+                    router = %format!("{router:#x}"),
+                    path = ?path.iter().map(|token| format!("{token:#x}")).collect::<Vec<_>>(),
+                    amount_in = %amount_in,
+                    error = %err,
+                    "V2 router getAmountsOut fallback failed"
+                );
+                return None;
+            }
+        };
         quote.last().copied()
     }
 
@@ -257,6 +340,57 @@ impl StrategyExecutor {
         callbacks
     }
 
+    fn v4_permit2_approval_callbacks(
+        executor: Address,
+        permit2: Address,
+        universal_router: Address,
+        token: Address,
+        amount: U256,
+    ) -> Result<(Vec<ExecutorCallback>, Vec<ExecutorCallback>), AppError> {
+        if amount > U160::MAX.to::<U256>() {
+            return Err(AppError::Strategy(
+                "V4 Permit2 amount exceeds uint160".into(),
+            ));
+        }
+        let permit_amount = amount.to::<U160>();
+        let approve_token = UnifiedHardenedExecutor::safeApproveCall {
+            token,
+            spender: permit2,
+            amount,
+        }
+        .abi_encode();
+        let approve_router = Permit2AllowanceTransfer::approveCall {
+            token,
+            spender: universal_router,
+            amount: permit_amount,
+            expiration: U48::MAX,
+        }
+        .abi_encode();
+        let reset_router = Permit2AllowanceTransfer::approveCall {
+            token,
+            spender: universal_router,
+            amount: U160::ZERO,
+            expiration: U48::ZERO,
+        }
+        .abi_encode();
+        let reset_token = UnifiedHardenedExecutor::safeApproveCall {
+            token,
+            spender: permit2,
+            amount: U256::ZERO,
+        }
+        .abi_encode();
+        Ok((
+            vec![
+                (executor, Bytes::from(approve_token), U256::ZERO),
+                (permit2, Bytes::from(approve_router), U256::ZERO),
+            ],
+            vec![
+                (permit2, Bytes::from(reset_router), U256::ZERO),
+                (executor, Bytes::from(reset_token), U256::ZERO),
+            ],
+        ))
+    }
+
     fn single_leg_route(
         venue: RouteVenue,
         target: Address,
@@ -276,7 +410,10 @@ impl StrategyExecutor {
             min_out,
             fee,
             params,
-            is_flash_leg: matches!(venue, RouteVenue::AaveV3Flash | RouteVenue::BalancerFlash),
+            is_flash_leg: matches!(
+                venue,
+                RouteVenue::AaveV3Flash | RouteVenue::BalancerFlash | RouteVenue::UniswapV4Flash
+            ),
         }])
     }
 
@@ -367,6 +504,81 @@ impl StrategyExecutor {
             .await?;
         Ok((executor, raw, request, hash))
     }
+
+    async fn build_atomic_executor_callbacks_tx(
+        &self,
+        callbacks: Vec<(Address, Bytes, U256)>,
+        capital_value: U256,
+        gas_fees: &GasFees,
+        gas_limit_hint: u64,
+        nonce: u64,
+    ) -> Result<(Address, Vec<u8>, TransactionRequest, B256), AppError> {
+        let executor = self.executor.unwrap_or(self.signer.address());
+        let mut targets = Vec::with_capacity(callbacks.len());
+        let mut payloads = Vec::with_capacity(callbacks.len());
+        let mut values = Vec::with_capacity(callbacks.len());
+        for (target, payload, value) in callbacks {
+            targets.push(target);
+            payloads.push(payload);
+            values.push(value);
+        }
+
+        let gas_limit = gas_limit_hint
+            .saturating_add(340_000)
+            .saturating_add((targets.len() as u64).saturating_mul(35_000))
+            .clamp(420_000, 1_800_000);
+        let bribe_amount = if self.executor_bribe_bps > 0 {
+            U256::from(gas_limit)
+                .saturating_mul(U256::from(gas_fees.max_fee_per_gas))
+                .saturating_mul(U256::from(self.executor_bribe_bps))
+                / U256::from(10_000u64)
+        } else {
+            U256::ZERO
+        };
+        let exec_call = UnifiedHardenedExecutor::executeBundleCall {
+            targets,
+            payloads,
+            values,
+            bribeRecipient: self.executor_bribe_recipient.unwrap_or(Address::ZERO),
+            bribeAmount: bribe_amount,
+            allowPartial: false,
+            balanceCheckToken: self.wrapped_native,
+        };
+        let total_value = capital_value.saturating_add(bribe_amount);
+        let (raw, request, hash) = self
+            .sign_swap_request(
+                executor,
+                gas_limit,
+                total_value,
+                gas_fees.max_fee_per_gas,
+                gas_fees.max_priority_fee_per_gas,
+                nonce,
+                exec_call.abi_encode(),
+                AccessList::default(),
+            )
+            .await?;
+        Ok((executor, raw, request, hash))
+    }
+
+    async fn best_v2_router_quote(
+        &self,
+        path: &[Address],
+        amount_in: U256,
+    ) -> Option<(Address, U256)> {
+        let mut best = None;
+        for router in registry_v2_router_addresses(self.chain_id) {
+            let Some(out) = self
+                .quote_v2_path_with_router_fallback(router, path, amount_in)
+                .await
+            else {
+                continue;
+            };
+            if best.map(|(_, best_out)| out > best_out).unwrap_or(true) {
+                best = Some((router, out));
+            }
+        }
+        best
+    }
     pub(crate) async fn needs_approval(
         &self,
         token: Address,
@@ -434,14 +646,25 @@ impl StrategyExecutor {
     ) -> QuoteGraph {
         let mut graph = QuoteGraph::default();
 
-        // Registry-driven V2-like routers (UniV2/Sushi/Pancake/etc), reusing V2 cache.
-        if let Some(out) = self
-            .reserve_cache
-            .quote_v2_path(&[token_in, token_out], amount_in)
-        {
-            let min_out = out.saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
-                / U256::from(10_000u64);
-            for (name, router) in registry_v2_router_candidates(self.chain_id) {
+        // Registry-driven V2 routers, using only pools created by each router's factory.
+        for (name, router) in registry_v2_router_candidates(self.chain_id) {
+            let factory = if name.contains("sushi") {
+                crate::common::constants::default_sushiswap_v2_factory(self.chain_id)
+            } else if name.contains("uniswap_v2") {
+                crate::common::constants::default_uniswap_v2_factory(self.chain_id)
+            } else {
+                None
+            };
+            if let Some(factory) = factory
+                && let Some(out) = self.reserve_cache.quote_v2_path_for_factory(
+                    &[token_in, token_out],
+                    amount_in,
+                    factory,
+                )
+            {
+                let min_out = out
+                    .saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
+                    / U256::from(10_000u64);
                 let venue = if name.contains("sushi") {
                     RouteVenue::Sushi
                 } else {
@@ -460,6 +683,39 @@ impl StrategyExecutor {
                     params: None,
                     is_flash: false,
                 });
+            }
+        }
+
+        // Curated Uniswap V3 fee tiers. The canonical quoter resolves the exact pool selected by
+        // factory+token pair+fee; only tiers backed by a revalidated index record are considered.
+        if let Some(router) = crate::common::constants::default_uniswap_v3_router(self.chain_id) {
+            for (_pool, fee) in self
+                .reserve_cache
+                .curated_v3_pools_for_tokens(token_in, token_out)
+            {
+                let Some(path) = encode_v3_path(&[token_in, token_out], &[fee]) else {
+                    continue;
+                };
+                if let Ok(out) = self.quote_v3_path(&path, amount_in).await
+                    && !out.is_zero()
+                {
+                    let min_out = out
+                        .saturating_mul(U256::from(10_000u64 - self.effective_slippage_bps()))
+                        / U256::from(10_000u64);
+                    graph.add_edge(QuoteEdge {
+                        venue: RouteVenue::UniV3,
+                        pool: router,
+                        token_in,
+                        token_out,
+                        amount_in,
+                        expected_out: out,
+                        min_out,
+                        gas_overhead: V3_SWAP_OVERHEAD_GAS,
+                        fee: Some(fee),
+                        params: Some(Bytes::from(path)),
+                        is_flash: false,
+                    });
+                }
             }
         }
 
@@ -559,6 +815,25 @@ impl StrategyExecutor {
                     is_flash: true,
                 });
             }
+            if self
+                .flashloan_providers
+                .contains(&FlashloanProvider::UniswapV4)
+                && let Some(pool_manager) = default_uniswap_v4_pool_manager(self.chain_id)
+            {
+                graph.add_edge(QuoteEdge {
+                    venue: RouteVenue::UniswapV4Flash,
+                    pool: pool_manager,
+                    token_in,
+                    token_out: token_in,
+                    amount_in,
+                    expected_out: amount_in,
+                    min_out: amount_in,
+                    gas_overhead: UNISWAP_V4_FLASHLOAN_OVERHEAD_GAS,
+                    fee: Some(0),
+                    params: None,
+                    is_flash: true,
+                });
+            }
         }
 
         // Optional pruning by ratio
@@ -599,16 +874,42 @@ impl StrategyExecutor {
         gas_fees: &GasFees,
         nonce: u64,
     ) -> Result<(Vec<u8>, TransactionRequest, B256, U256, u64), AppError> {
+        self.build_flashloan_transaction_with_exclusion(
+            executor,
+            asset,
+            amount,
+            callbacks,
+            gas_limit_hint,
+            gas_fees,
+            nonce,
+            None,
+        )
+        .await
+    }
+
+    async fn build_flashloan_transaction_with_exclusion(
+        &self,
+        executor: Address,
+        asset: Address,
+        amount: U256,
+        callbacks: Vec<ExecutorCallback>,
+        gas_limit_hint: u64,
+        gas_fees: &GasFees,
+        nonce: u64,
+        excluded_provider: Option<FlashloanProvider>,
+    ) -> Result<(Vec<u8>, TransactionRequest, B256, U256, u64), AppError> {
         let provider = match self
-            .select_flashloan_provider(asset, amount, gas_fees)
+            .select_flashloan_provider(asset, amount, gas_fees, excluded_provider)
             .await?
         {
             Some(provider) => provider,
             None if self.dry_run => {
-                let fallback =
-                    self.flashloan_providers.first().copied().ok_or_else(|| {
-                        AppError::Strategy("No flashloan provider available".into())
-                    })?;
+                let fallback = self
+                    .flashloan_providers
+                    .iter()
+                    .copied()
+                    .find(|provider| Some(*provider) != excluded_provider)
+                    .ok_or_else(|| AppError::Strategy("No flashloan provider available".into()))?;
                 tracing::debug!(
                     target: "flashloan",
                     provider = ?fallback,
@@ -753,6 +1054,23 @@ impl StrategyExecutor {
                     premium,
                 )
             }
+            FlashloanProvider::UniswapV4 => {
+                let pool_manager =
+                    default_uniswap_v4_pool_manager(self.chain_id).ok_or_else(|| {
+                        AppError::Strategy("Uniswap V4 PoolManager not configured".into())
+                    })?;
+                let exec_call = UnifiedHardenedExecutor::executeUniswapV4FlashLoanCall {
+                    poolManager: pool_manager,
+                    asset,
+                    amount,
+                    params: Bytes::from(params.clone()),
+                };
+                (
+                    exec_call.abi_encode(),
+                    UNISWAP_V4_FLASHLOAN_OVERHEAD_GAS,
+                    U256::ZERO,
+                )
+            }
         };
 
         let mut gas_limit = gas_limit_hint.saturating_add(overhead);
@@ -825,6 +1143,11 @@ impl StrategyExecutor {
     ) -> Result<Option<FrontRunTx>, AppError> {
         if wallet_balance.is_zero() {
             return Ok(None);
+        }
+        if observed.path.first().copied() != Some(self.wrapped_native) {
+            return Err(AppError::Strategy(
+                "Front-run requires WETH/native as the input asset".into(),
+            ));
         }
         let target_token = target_token(&observed.path, self.wrapped_native)
             .ok_or_else(|| AppError::Strategy("Unable to derive target token".into()))?;
@@ -940,6 +1263,7 @@ impl StrategyExecutor {
                         input_token,
                     )
                 }
+                RouterKind::V4Like => return Ok(None),
             };
 
         let (raw, request, hash) = self
@@ -967,6 +1291,551 @@ impl StrategyExecutor {
         }))
     }
 
+    async fn build_v3_v2_cross_venue_backrun(
+        &self,
+        observed: &ObservedSwap,
+        gas_fees: &GasFees,
+        mut value: U256,
+        gas_limit_hint: u64,
+        use_flashloan: bool,
+        nonce: u64,
+    ) -> Result<BackrunTx, AppError> {
+        if observed.path.len() != 2 || observed.v3_fees.len() != 1 {
+            return Err(AppError::Strategy(
+                "Cross-venue V3/V2 backrun currently requires a direct V3 path".into(),
+            ));
+        }
+        let token_in = observed.path[0];
+        let token_out = observed.path[1];
+        if value.is_zero() {
+            return Err(AppError::Strategy("Cross-venue notional is zero".into()));
+        }
+
+        // Prefer WETH settlement when it is one endpoint. Otherwise borrow the victim input token
+        // and close the cycle in that token: token_in -> token_out on V2, then token_out ->
+        // token_in on the victim-impacted V3 pool. The latter is the inventory-free token/token
+        // backrun path.
+        let borrow_asset = Self::cross_venue_borrow_asset(token_in, token_out, self.wrapped_native);
+        let borrow_input = borrow_asset == token_in;
+        if !borrow_input {
+            // `value` arrived in token_in units, while this orientation borrows token_out (WETH).
+            // Convert the intended input notional through the current V3 quote before sizing the
+            // loan; never reinterpret arbitrary ERC-20 base units as wei.
+            let forward_path = observed
+                .v3_path
+                .clone()
+                .or_else(|| encode_v3_path(&observed.path, &observed.v3_fees))
+                .ok_or_else(|| AppError::Strategy("Unable to encode victim V3 path".into()))?;
+            value = self.quote_v3_path(&forward_path, value).await?;
+            if value.is_zero() {
+                return Err(AppError::Strategy(
+                    "Cross-venue converted borrow notional is zero".into(),
+                ));
+            }
+        }
+        if use_flashloan {
+            value = self.apply_adaptive_flashloan_scale(
+                self.maybe_scale_flashloan_value(value),
+                borrow_asset,
+            );
+        }
+
+        let target_token = if borrow_input { token_out } else { token_in };
+        let executor = self.executor.unwrap_or(self.signer.address());
+        let v3_router = self
+            .exec_router_v3
+            .ok_or_else(|| AppError::Strategy("No canonical V3 execution router".into()))?;
+        let slippage_bps = self.effective_slippage_bps();
+
+        let (
+            forward_router,
+            reverse_router,
+            forward_approval_token,
+            forward_approval_amount,
+            reverse_approval_token,
+            reverse_approval_amount,
+            forward_payload,
+            reverse_payload,
+            expected_out,
+        ) = if borrow_input {
+            // Victim moves the V3 price up. Buy on the best V2 venue, then sell into the
+            // victim-impacted V3 pool.
+            let v2_buy_path = [borrow_asset, target_token];
+            let (v2_router, target_amount) = self
+                .best_v2_router_quote(&v2_buy_path, value)
+                .await
+                .ok_or_else(|| {
+                AppError::Strategy("No V2 buy quote for V3 victim target".into())
+            })?;
+            let v3_sell_path = reverse_v3_path(&observed.path, &observed.v3_fees)
+                .ok_or_else(|| AppError::Strategy("Unable to reverse victim V3 path".into()))?;
+            let current_v3_out = self.quote_v3_path(&v3_sell_path, target_amount).await?;
+            let v2_min_out = target_amount.saturating_mul(U256::from(10_000u64 - slippage_bps))
+                / U256::from(10_000u64);
+            let v3_min_out = current_v3_out.saturating_mul(U256::from(10_000u64 - slippage_bps))
+                / U256::from(10_000u64);
+            (
+                v2_router,
+                v3_router,
+                borrow_asset,
+                value,
+                target_token,
+                target_amount,
+                Bytes::from(self.reserve_cache.build_v2_swap_payload(
+                    v2_buy_path.to_vec(),
+                    value,
+                    v2_min_out,
+                    executor,
+                    true,
+                    borrow_asset,
+                )),
+                Bytes::from(self.build_v3_swap_payload(
+                    v3_router,
+                    v3_sell_path,
+                    target_amount,
+                    v3_min_out,
+                    executor,
+                )),
+                current_v3_out,
+            )
+        } else {
+            // Victim moves the V3 price down. Use exact-output on V3 so the improved price
+            // leaves unused WETH in the executor, then sell the fixed token amount on V2.
+            let v3_buy_path = reverse_v3_path(&observed.path, &observed.v3_fees)
+                .ok_or_else(|| AppError::Strategy("Unable to reverse victim V3 path".into()))?;
+            let quoted_target = self.quote_v3_path(&v3_buy_path, value).await?;
+            let target_amount = quoted_target.saturating_mul(U256::from(10_000u64 - slippage_bps))
+                / U256::from(10_000u64);
+            if target_amount.is_zero() {
+                return Err(AppError::Strategy("V3 exact-output target is zero".into()));
+            }
+            let v2_sell_path = [target_token, borrow_asset];
+            let (v2_router, current_v2_out) = self
+                .best_v2_router_quote(&v2_sell_path, target_amount)
+                .await
+                .ok_or_else(|| {
+                    AppError::Strategy("No V2 sell quote for V3 victim target".into())
+                })?;
+            let v2_min_out = current_v2_out.saturating_mul(U256::from(10_000u64 - slippage_bps))
+                / U256::from(10_000u64);
+            let exact_output_path = observed
+                .v3_path
+                .clone()
+                .or_else(|| encode_v3_path(&observed.path, &observed.v3_fees))
+                .ok_or_else(|| {
+                    AppError::Strategy("Unable to encode V3 exact-output path".into())
+                })?;
+            (
+                v3_router,
+                v2_router,
+                self.wrapped_native,
+                value,
+                target_token,
+                target_amount,
+                Bytes::from(self.build_v3_exact_output_payload(
+                    v3_router,
+                    exact_output_path,
+                    target_amount,
+                    value,
+                    executor,
+                )),
+                Bytes::from(self.reserve_cache.build_v2_swap_payload(
+                    v2_sell_path.to_vec(),
+                    target_amount,
+                    v2_min_out,
+                    executor,
+                    true,
+                    borrow_asset,
+                )),
+                current_v2_out,
+            )
+        };
+
+        let route_plan = RoutePlan::try_new(vec![
+            RouteLeg {
+                venue: if forward_router == v3_router {
+                    RouteVenue::UniV3
+                } else {
+                    RouteVenue::UniV2
+                },
+                target: forward_router,
+                token_in: borrow_asset,
+                token_out: target_token,
+                amount_in: value,
+                min_out: reverse_approval_amount,
+                fee: (forward_router == v3_router).then_some(observed.v3_fees[0]),
+                params: Some(forward_payload.clone()),
+                is_flash_leg: false,
+            },
+            RouteLeg {
+                venue: if reverse_router == v3_router {
+                    RouteVenue::UniV3
+                } else {
+                    RouteVenue::UniV2
+                },
+                target: reverse_router,
+                token_in: target_token,
+                token_out: borrow_asset,
+                amount_in: reverse_approval_amount,
+                min_out: expected_out,
+                fee: (reverse_router == v3_router).then_some(observed.v3_fees[0]),
+                params: Some(reverse_payload.clone()),
+                is_flash_leg: false,
+            },
+        ]);
+        debug_assert!(route_plan.as_ref().is_some_and(|plan| {
+            plan.legs.first().map(|leg| leg.token_in) == Some(borrow_asset)
+                && plan.legs.last().map(|leg| leg.token_out) == Some(borrow_asset)
+        }));
+
+        let callbacks = Self::flashloan_roundtrip_callbacks(
+            executor,
+            forward_router,
+            reverse_router,
+            forward_approval_token,
+            forward_approval_amount,
+            reverse_approval_token,
+            reverse_approval_amount,
+            forward_payload,
+            reverse_payload,
+        );
+        tracing::debug!(
+            target: "strategy",
+            victim_router = %format!("{:#x}", observed.router),
+            forward_router = %format!("{forward_router:#x}"),
+            reverse_router = %format!("{reverse_router:#x}"),
+            borrow_asset = %format!("{borrow_asset:#x}"),
+            borrow_input,
+            principal = %value,
+            expected_out = %expected_out,
+            "Built cross-venue V3/V2 backrun"
+        );
+
+        if use_flashloan {
+            let (raw, request, hash, premium, overhead_gas) = self
+                .build_flashloan_transaction(
+                    executor,
+                    borrow_asset,
+                    value,
+                    callbacks,
+                    gas_limit_hint,
+                    gas_fees,
+                    nonce,
+                )
+                .await?;
+            return Ok(BackrunTx {
+                raw,
+                hash,
+                to: executor,
+                value: U256::ZERO,
+                request,
+                expected_out,
+                expected_out_token: borrow_asset,
+                unwrap_to_native: false,
+                uses_flashloan: true,
+                flashloan_principal: value,
+                flashloan_premium: premium,
+                flashloan_overhead_gas: overhead_gas,
+                router_kind: RouterKind::V3Like,
+                route_plan,
+            });
+        }
+
+        if borrow_asset != self.wrapped_native {
+            return Err(AppError::Strategy(
+                "Owned-capital token-denominated cross-venue backrun requires inventory".into(),
+            ));
+        }
+
+        // Convert the native capital sent with executeBundle into WETH before token-funded swaps.
+        let mut owned_callbacks = Vec::with_capacity(callbacks.len() + 1);
+        owned_callbacks.push((
+            self.wrapped_native,
+            Bytes::from(vec![0xd0, 0xe3, 0x0d, 0xb0]), // WETH9.deposit()
+            value,
+        ));
+        owned_callbacks.extend(callbacks);
+        let (_executor, raw, request, hash) = self
+            .build_atomic_executor_callbacks_tx(
+                owned_callbacks,
+                value,
+                gas_fees,
+                gas_limit_hint,
+                nonce,
+            )
+            .await?;
+        Ok(BackrunTx {
+            raw,
+            hash,
+            to: executor,
+            value,
+            request,
+            expected_out,
+            expected_out_token: self.wrapped_native,
+            unwrap_to_native: false,
+            uses_flashloan: false,
+            flashloan_principal: U256::ZERO,
+            flashloan_premium: U256::ZERO,
+            flashloan_overhead_gas: 0,
+            router_kind: RouterKind::V3Like,
+            route_plan,
+        })
+    }
+
+    async fn build_v4_v2_cross_venue_backrun(
+        &self,
+        observed: &ObservedSwap,
+        gas_fees: &GasFees,
+        wallet_balance: U256,
+        gas_limit_hint: u64,
+        use_flashloan: bool,
+        nonce: u64,
+    ) -> Result<BackrunTx, AppError> {
+        if !use_flashloan {
+            return Err(AppError::Strategy(
+                "V4/V2 cross-venue execution currently requires an atomic flashloan".into(),
+            ));
+        }
+        if observed.path.len() != 2 || observed.v4_path.len() != 1 {
+            return Err(AppError::Strategy(
+                "Cross-venue V4/V2 execution requires one preserved V4 pool hop".into(),
+            ));
+        }
+        let victim_hop = &observed.v4_path[0];
+        if victim_hop.pool_key.currency0 == Address::ZERO
+            || victim_hop.pool_key.currency1 == Address::ZERO
+        {
+            return Err(AppError::Strategy(
+                "Native-currency V4 pools require WETH unwrap/rewrap support".into(),
+            ));
+        }
+
+        let token_in = observed.path[0];
+        let token_out = observed.path[1];
+        let borrow_asset = Self::cross_venue_borrow_asset(token_in, token_out, self.wrapped_native);
+        let borrow_input = borrow_asset == token_in;
+        let target_token = if borrow_input { token_out } else { token_in };
+        let mut principal = if token_in == self.wrapped_native || token_out == self.wrapped_native {
+            StrategyExecutor::dynamic_backrun_value(
+                observed.amount_in,
+                wallet_balance,
+                self.effective_slippage_bps(),
+                gas_limit_hint,
+                gas_fees.max_fee_per_gas,
+            )?
+        } else {
+            // Native wallet wei is not a valid size for token/token pools. Anchor the loan to the
+            // victim's input units and let the configured flashloan scale cap the exposure.
+            observed.amount_in / U256::from(8u64)
+        };
+        if !borrow_input {
+            principal = self
+                .quote_v4_exact_input_single(victim_hop, principal)
+                .await?;
+        }
+        principal = self.apply_adaptive_flashloan_scale(
+            self.maybe_scale_flashloan_value(principal),
+            borrow_asset,
+        );
+        if principal.is_zero() {
+            return Err(AppError::Strategy(
+                "V4/V2 flashloan principal is zero".into(),
+            ));
+        }
+
+        let executor = self.executor.unwrap_or(self.signer.address());
+        let universal_router = observed.router;
+        let permit2 = default_uniswap_permit2(self.chain_id).ok_or_else(|| {
+            AppError::Strategy("Permit2 is not configured for V4 execution".into())
+        })?;
+        let slippage_bps = self.effective_slippage_bps();
+        let reverse_hop = Self::reverse_v4_hop(victim_hop);
+
+        let (
+            forward_router,
+            reverse_router,
+            forward_token,
+            forward_amount,
+            reverse_token,
+            reverse_amount,
+            forward_payload,
+            reverse_payload,
+            expected_out,
+            v4_is_forward,
+        ) = if borrow_input {
+            let v2_path = [borrow_asset, target_token];
+            let (v2_router, target_amount) =
+                self.best_v2_router_quote(&v2_path, principal)
+                    .await
+                    .ok_or_else(|| AppError::Strategy("No V2 quote for V4 victim pair".into()))?;
+            let v4_out = self
+                .quote_v4_exact_input_single(&reverse_hop, target_amount)
+                .await?;
+            let v2_min = target_amount.saturating_mul(U256::from(10_000u64 - slippage_bps))
+                / U256::from(10_000u64);
+            let v4_min =
+                v4_out.saturating_mul(U256::from(10_000u64 - slippage_bps)) / U256::from(10_000u64);
+            (
+                v2_router,
+                universal_router,
+                borrow_asset,
+                principal,
+                target_token,
+                target_amount,
+                Bytes::from(self.reserve_cache.build_v2_swap_payload(
+                    v2_path.to_vec(),
+                    principal,
+                    v2_min,
+                    executor,
+                    true,
+                    borrow_asset,
+                )),
+                Self::build_v4_exact_input_single_payload(&reverse_hop, target_amount, v4_min)?,
+                v4_out,
+                false,
+            )
+        } else {
+            let target_amount = self
+                .quote_v4_exact_input_single(&reverse_hop, principal)
+                .await?;
+            let v2_path = [target_token, borrow_asset];
+            let (v2_router, v2_out) = self
+                .best_v2_router_quote(&v2_path, target_amount)
+                .await
+                .ok_or_else(|| AppError::Strategy("No V2 quote for V4 victim pair".into()))?;
+            let v4_min = target_amount.saturating_mul(U256::from(10_000u64 - slippage_bps))
+                / U256::from(10_000u64);
+            let v2_min =
+                v2_out.saturating_mul(U256::from(10_000u64 - slippage_bps)) / U256::from(10_000u64);
+            (
+                universal_router,
+                v2_router,
+                borrow_asset,
+                principal,
+                target_token,
+                target_amount,
+                Self::build_v4_exact_input_single_payload(&reverse_hop, principal, v4_min)?,
+                Bytes::from(self.reserve_cache.build_v2_swap_payload(
+                    v2_path.to_vec(),
+                    target_amount,
+                    v2_min,
+                    executor,
+                    true,
+                    borrow_asset,
+                )),
+                v2_out,
+                true,
+            )
+        };
+
+        let (v4_token, v4_amount) = if v4_is_forward {
+            (forward_token, forward_amount)
+        } else {
+            (reverse_token, reverse_amount)
+        };
+        let (mut v4_approvals, v4_resets) = Self::v4_permit2_approval_callbacks(
+            executor,
+            permit2,
+            universal_router,
+            v4_token,
+            v4_amount,
+        )?;
+        let (v2_router, v2_token, v2_amount) = if v4_is_forward {
+            (reverse_router, reverse_token, reverse_amount)
+        } else {
+            (forward_router, forward_token, forward_amount)
+        };
+        let v2_approve = UnifiedHardenedExecutor::safeApproveCall {
+            token: v2_token,
+            spender: v2_router,
+            amount: v2_amount,
+        }
+        .abi_encode();
+        let v2_reset = UnifiedHardenedExecutor::safeApproveCall {
+            token: v2_token,
+            spender: v2_router,
+            amount: U256::ZERO,
+        }
+        .abi_encode();
+        v4_approvals.push((executor, Bytes::from(v2_approve), U256::ZERO));
+        let mut callbacks = v4_approvals;
+        callbacks.push((forward_router, forward_payload.clone(), U256::ZERO));
+        callbacks.push((reverse_router, reverse_payload.clone(), U256::ZERO));
+        callbacks.push((executor, Bytes::from(v2_reset), U256::ZERO));
+        callbacks.extend(v4_resets);
+
+        let route_plan = RoutePlan::try_new(vec![
+            RouteLeg {
+                venue: if v4_is_forward {
+                    RouteVenue::UniV4
+                } else {
+                    RouteVenue::UniV2
+                },
+                target: forward_router,
+                token_in: borrow_asset,
+                token_out: target_token,
+                amount_in: principal,
+                min_out: reverse_amount,
+                fee: v4_is_forward.then_some(victim_hop.pool_key.fee),
+                params: Some(forward_payload),
+                is_flash_leg: false,
+            },
+            RouteLeg {
+                venue: if v4_is_forward {
+                    RouteVenue::UniV2
+                } else {
+                    RouteVenue::UniV4
+                },
+                target: reverse_router,
+                token_in: target_token,
+                token_out: borrow_asset,
+                amount_in: reverse_amount,
+                min_out: expected_out,
+                fee: (!v4_is_forward).then_some(victim_hop.pool_key.fee),
+                params: Some(reverse_payload),
+                is_flash_leg: false,
+            },
+        ]);
+
+        let (raw, request, hash, premium, overhead_gas) = self
+            .build_flashloan_transaction_with_exclusion(
+                executor,
+                borrow_asset,
+                principal,
+                callbacks,
+                gas_limit_hint.saturating_add(180_000),
+                gas_fees,
+                nonce,
+                Some(FlashloanProvider::UniswapV4),
+            )
+            .await?;
+        tracing::debug!(
+            target: "strategy",
+            victim_router = %format!("{universal_router:#x}"),
+            borrow_asset = %format!("{borrow_asset:#x}"),
+            borrow_input,
+            principal = %principal,
+            expected_out = %expected_out,
+            "Built cross-venue V4/V2 backrun"
+        );
+        Ok(BackrunTx {
+            raw,
+            hash,
+            to: executor,
+            value: U256::ZERO,
+            request,
+            expected_out,
+            expected_out_token: borrow_asset,
+            unwrap_to_native: false,
+            uses_flashloan: true,
+            flashloan_principal: principal,
+            flashloan_premium: premium,
+            flashloan_overhead_gas: overhead_gas,
+            router_kind: RouterKind::V4Like,
+            route_plan,
+        })
+    }
+
     pub(crate) async fn build_backrun_tx(
         &self,
         observed: &ObservedSwap,
@@ -981,6 +1850,23 @@ impl StrategyExecutor {
             .ok_or_else(|| AppError::Strategy("Unable to derive target token".into()))?;
         let exec_router = self.execution_router(observed);
         let has_wrapped = observed.path.contains(&self.wrapped_native);
+
+        // `wallet_balance` is the chain-native balance and is denominated in wei. It cannot be
+        // used as `amountIn` for an arbitrary ERC-20 path. A non-wrapped route is executable only
+        // when an earlier owned leg supplied inventory or an atomic flashloan supplies the route's
+        // settlement token.
+        if !has_wrapped
+            && token_in_override.is_none()
+            && (!use_flashloan
+                || !matches!(
+                    observed.router_kind,
+                    RouterKind::V3Like | RouterKind::V4Like
+                ))
+        {
+            return Err(AppError::Strategy(
+                "Non-wrapped backrun requires explicit input-token inventory".into(),
+            ));
+        }
 
         if wallet_balance.is_zero() {
             return Err(AppError::Strategy(
@@ -1013,6 +1899,12 @@ impl StrategyExecutor {
                             gas_fees.max_fee_per_gas,
                         )?,
                     };
+                    // The caller uses `wallet_balance` as an explicit notional ceiling for
+                    // flashloan retries. Pool sizing can otherwise return the same victim-based
+                    // amount on every retry, making the adaptive downshift loop ineffective.
+                    if use_flashloan {
+                        value = value.min(wallet_balance);
+                    }
                     if use_flashloan && has_wrapped {
                         let flashloan_asset = observed
                             .path
@@ -1184,7 +2076,7 @@ impl StrategyExecutor {
                             gas_fees,
                         )
                         .await;
-                    let (tokens_out, access_list, calldata, gas_limit) = match swap_attempt {
+                    let (mut tokens_out, access_list, calldata, gas_limit) = match swap_attempt {
                         Ok(Some(swap)) => (
                             swap.expected_out,
                             swap.access_list.clone(),
@@ -1205,9 +2097,19 @@ impl StrategyExecutor {
                                 amount_in = %value,
                                 "V2 swap quote/build failed; aborting backrun build"
                             );
-                            return Err(AppError::Strategy("V2 backrun swap quote/build failed".into()));
+                            return Err(AppError::Strategy(
+                                "V2 backrun swap quote/build failed".into(),
+                            ));
                         }
                     };
+                    // For victim sells, the impacted venue is the forward leg (WETH -> token).
+                    // Re-price that leg after the external swap just as victim buys re-price the
+                    // reverse leg below.
+                    if let Some(post_victim_tokens_out) =
+                        self.quote_v2_reverse_after_victim(observed, forward_router, value)
+                    {
+                        tokens_out = post_victim_tokens_out;
+                    }
                     if has_wrapped {
                         let executor = self.executor.unwrap_or(self.signer.address());
                         let slippage_bps = self.effective_slippage_bps();
@@ -1243,12 +2145,18 @@ impl StrategyExecutor {
                             .saturating_mul(U256::from(reverse_input_bps))
                             / U256::from(10_000u64);
                         let reverse_expected_out = self
-                            .quote_v2_path_with_router_fallback(
+                            .quote_v2_reverse_after_victim(
+                                observed,
                                 reverse_router,
-                                &rev_path,
                                 reverse_amount_in,
                             )
-                            .await;
+                            .or(self
+                                .quote_v2_path_with_router_fallback(
+                                    reverse_router,
+                                    &rev_path,
+                                    reverse_amount_in,
+                                )
+                                .await);
                         let reverse_quote_missing = reverse_expected_out.is_none();
                         if reverse_quote_missing {
                             if use_flashloan {
@@ -1314,12 +2222,18 @@ impl StrategyExecutor {
                                 let full_reverse_amount_in = reverse_quote_input_base;
                                 if full_reverse_amount_in > reverse_amount_in
                                     && let Some(full_reverse_quote) = self
-                                        .quote_v2_path_with_router_fallback(
+                                        .quote_v2_reverse_after_victim(
+                                            observed,
                                             reverse_router,
-                                            &rev_path,
                                             full_reverse_amount_in,
                                         )
-                                        .await
+                                        .or(self
+                                            .quote_v2_path_with_router_fallback(
+                                                reverse_router,
+                                                &rev_path,
+                                                full_reverse_amount_in,
+                                            )
+                                            .await)
                                 {
                                     tracing::debug!(
                                         target: "strategy",
@@ -1436,6 +2350,7 @@ impl StrategyExecutor {
                                 expected_out_token: self.wrapped_native,
                                 unwrap_to_native: false,
                                 uses_flashloan: true,
+                                flashloan_principal: value,
                                 flashloan_premium: premium,
                                 flashloan_overhead_gas: overhead_gas,
                                 router_kind: observed.router_kind,
@@ -1464,6 +2379,7 @@ impl StrategyExecutor {
                             expected_out_token: self.wrapped_native,
                             unwrap_to_native: false,
                             uses_flashloan: false,
+                            flashloan_principal: U256::ZERO,
                             flashloan_premium: U256::ZERO,
                             flashloan_overhead_gas: 0,
                             router_kind: observed.router_kind,
@@ -1498,6 +2414,7 @@ impl StrategyExecutor {
                         expected_out_token,
                         unwrap_to_native,
                         uses_flashloan: false,
+                        flashloan_principal: U256::ZERO,
                         flashloan_premium: U256::ZERO,
                         flashloan_overhead_gas: 0,
                         router_kind: observed.router_kind,
@@ -1540,6 +2457,18 @@ impl StrategyExecutor {
                     });
                 }
                 RouterKind::V3Like => {
+                    if token_in_override.is_none() {
+                        return self
+                            .build_v3_v2_cross_venue_backrun(
+                                observed,
+                                gas_fees,
+                                wallet_balance,
+                                gas_limit_hint,
+                                use_flashloan,
+                                nonce,
+                            )
+                            .await;
+                    }
                     let mut value = match self
                         .pool_backrun_value(
                             observed,
@@ -1768,6 +2697,7 @@ impl StrategyExecutor {
                                 expected_out_token: self.wrapped_native,
                                 unwrap_to_native: false,
                                 uses_flashloan: true,
+                                flashloan_principal: value,
                                 flashloan_premium: premium,
                                 flashloan_overhead_gas: overhead_gas,
                                 router_kind: observed.router_kind,
@@ -1796,6 +2726,7 @@ impl StrategyExecutor {
                             expected_out_token: self.wrapped_native,
                             unwrap_to_native: false,
                             uses_flashloan: false,
+                            flashloan_principal: U256::ZERO,
                             flashloan_premium: U256::ZERO,
                             flashloan_overhead_gas: 0,
                             router_kind: observed.router_kind,
@@ -1843,6 +2774,7 @@ impl StrategyExecutor {
                         expected_out_token,
                         unwrap_to_native,
                         uses_flashloan: false,
+                        flashloan_principal: U256::ZERO,
                         flashloan_premium: U256::ZERO,
                         flashloan_overhead_gas: 0,
                         router_kind: observed.router_kind,
@@ -1883,6 +2815,23 @@ impl StrategyExecutor {
                                 )
                             }),
                     });
+                }
+                RouterKind::V4Like => {
+                    if token_in_override.is_none() {
+                        return self
+                            .build_v4_v2_cross_venue_backrun(
+                                observed,
+                                gas_fees,
+                                wallet_balance,
+                                gas_limit_hint,
+                                use_flashloan,
+                                nonce,
+                            )
+                            .await;
+                    }
+                    Err(AppError::Strategy(
+                        "Inventory-funded direct V4 backrun is not configured".into(),
+                    ))
                 }
             }
         } else {
@@ -2030,6 +2979,11 @@ impl StrategyExecutor {
                         StrategyExecutor::build_access_list(exec_router, &observed.path);
                     (U256::ZERO, expected_out, calldata, access_list)
                 }
+                RouterKind::V4Like => {
+                    return Err(AppError::Strategy(
+                        "Direct Uniswap V4 swap execution is not configured".into(),
+                    ));
+                }
             };
 
             let access_list = access_list.clone();
@@ -2062,6 +3016,7 @@ impl StrategyExecutor {
                 expected_out_token,
                 unwrap_to_native,
                 uses_flashloan: use_flashloan,
+                flashloan_principal: U256::ZERO,
                 flashloan_premium: U256::ZERO,
                 flashloan_overhead_gas: 0,
                 router_kind: observed.router_kind,
@@ -2074,11 +3029,13 @@ impl StrategyExecutor {
                     )
                     .await
                     .or_else(|| {
+                        let venue = match observed.router_kind {
+                            RouterKind::V2Like => RouteVenue::UniV2,
+                            RouterKind::V3Like => RouteVenue::UniV3,
+                            RouterKind::V4Like => return None,
+                        };
                         StrategyExecutor::single_leg_route(
-                            match observed.router_kind {
-                                RouterKind::V2Like => RouteVenue::UniV2,
-                                RouterKind::V3Like => RouteVenue::UniV3,
-                            },
+                            venue,
                             exec_router,
                             target_token,
                             expected_out_token,
@@ -2135,6 +3092,10 @@ impl StrategyExecutor {
                     self.quote_uniswap_v3_flashloan(asset, amount, gas_fees.max_fee_per_gas)
                         .await?
                 }
+                FlashloanProvider::UniswapV4 => {
+                    self.quote_uniswap_v4_flashloan(asset, amount, gas_fees.max_fee_per_gas)
+                        .await?
+                }
             };
             let Some((total_cost, _)) = quote else {
                 continue;
@@ -2187,6 +3148,7 @@ impl StrategyExecutor {
                     };
                     Self::uniswap_v3_flash_premium(amount, fee_tier)
                 }
+                FlashloanProvider::UniswapV4 => U256::ZERO,
             };
             let gas_cost = total_cost.saturating_sub(premium);
             match best {
@@ -2205,12 +3167,16 @@ impl StrategyExecutor {
         asset: Address,
         amount: U256,
         gas_fees: &GasFees,
+        excluded_provider: Option<FlashloanProvider>,
     ) -> Result<Option<FlashloanProvider>, AppError> {
         if self.flashloan_providers.is_empty() {
             return Ok(None);
         }
         let mut best: Option<(FlashloanProvider, U256)> = None;
         for provider in &self.flashloan_providers {
+            if Some(*provider) == excluded_provider {
+                continue;
+            }
             let quote = match provider {
                 FlashloanProvider::Balancer => {
                     self.quote_balancer_flashloan(asset, amount, gas_fees.max_fee_per_gas)
@@ -2234,6 +3200,10 @@ impl StrategyExecutor {
                 }
                 FlashloanProvider::UniswapV3 => {
                     self.quote_uniswap_v3_flashloan(asset, amount, gas_fees.max_fee_per_gas)
+                        .await?
+                }
+                FlashloanProvider::UniswapV4 => {
+                    self.quote_uniswap_v4_flashloan(asset, amount, gas_fees.max_fee_per_gas)
                         .await?
                 }
             };
@@ -2514,6 +3484,81 @@ impl StrategyExecutor {
         )))
     }
 
+    async fn quote_uniswap_v4_flashloan(
+        &self,
+        asset: Address,
+        amount: U256,
+        max_fee_per_gas: u128,
+    ) -> Result<Option<(U256, u64)>, AppError> {
+        let Some(pool_manager) = default_uniswap_v4_pool_manager(self.chain_id) else {
+            return Ok(None);
+        };
+        if !self.reserve_cache.curated_v4_supports_token(asset) {
+            tracing::debug!(
+                target: "flashloan",
+                provider = "uniswap_v4",
+                asset = %format!("{asset:#x}"),
+                "No eligible curated V4 pool contains flashloan asset"
+            );
+            return Ok(None);
+        }
+        let Some(executor) = self.executor else {
+            return Ok(None);
+        };
+        let approved = match UnifiedHardenedExecutor::new(executor, self.http_provider.clone())
+            .approvedProviders(pool_manager)
+            .call()
+            .await
+        {
+            Ok(approved) => approved,
+            Err(err) => {
+                tracing::debug!(
+                    target: "flashloan",
+                    provider = "uniswap_v4",
+                    executor = %format!("{executor:#x}"),
+                    pool_manager = %format!("{pool_manager:#x}"),
+                    error = %err,
+                    "Uniswap V4 provider approval probe failed; treating provider as unavailable"
+                );
+                return Ok(None);
+            }
+        };
+        if !approved {
+            tracing::debug!(
+                target: "flashloan",
+                provider = "uniswap_v4",
+                executor = %format!("{executor:#x}"),
+                pool_manager = %format!("{pool_manager:#x}"),
+                "Uniswap V4 PoolManager is not approved by executor"
+            );
+            return Ok(None);
+        }
+        let available = match ERC20::new(asset, self.http_provider.clone())
+            .balanceOf(pool_manager)
+            .call()
+            .await
+        {
+            Ok(balance) => balance,
+            Err(err) => {
+                tracing::debug!(
+                    target: "flashloan",
+                    provider = "uniswap_v4",
+                    pool_manager = %format!("{pool_manager:#x}"),
+                    asset = %format!("{asset:#x}"),
+                    error = %err,
+                    "Uniswap V4 liquidity probe failed; treating provider as unavailable"
+                );
+                return Ok(None);
+            }
+        };
+        if available < amount {
+            return Ok(None);
+        }
+        let gas_cost = U256::from(UNISWAP_V4_FLASHLOAN_OVERHEAD_GAS)
+            .saturating_mul(U256::from(max_fee_per_gas));
+        Ok(Some((gas_cost, UNISWAP_V4_FLASHLOAN_OVERHEAD_GAS)))
+    }
+
     async fn dydx_market_exists(&self, solo: Address, asset: Address) -> Result<bool, AppError> {
         let solo_getters = DydxSoloMarginGetters::new(solo, self.http_provider.clone());
         let market_count = solo_getters
@@ -2719,6 +3764,26 @@ impl StrategyExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cross_venue_borrow_asset_prefers_weth_or_token_input() {
+        let weth = Address::from([0x11; 20]);
+        let token_a = Address::from([0x22; 20]);
+        let token_b = Address::from([0x33; 20]);
+
+        assert_eq!(
+            StrategyExecutor::cross_venue_borrow_asset(weth, token_a, weth),
+            weth
+        );
+        assert_eq!(
+            StrategyExecutor::cross_venue_borrow_asset(token_a, weth, weth),
+            weth
+        );
+        assert_eq!(
+            StrategyExecutor::cross_venue_borrow_asset(token_a, token_b, weth),
+            token_a
+        );
+    }
     use crate::services::strategy::strategy::dummy_executor_for_tests;
 
     #[test]
@@ -2760,6 +3825,38 @@ mod tests {
         assert_eq!(callbacks[3].2, U256::ZERO);
         assert_eq!(callbacks[4].2, U256::ZERO);
         assert_eq!(callbacks[5].2, U256::ZERO);
+    }
+
+    #[test]
+    fn v4_permit2_callbacks_approve_and_revoke_both_allowance_layers() {
+        let executor = Address::repeat_byte(0x11);
+        let permit2 = Address::repeat_byte(0x22);
+        let router = Address::repeat_byte(0x33);
+        let token = Address::repeat_byte(0x44);
+        let amount = U256::from(123_456u64);
+        let (approvals, resets) = StrategyExecutor::v4_permit2_approval_callbacks(
+            executor, permit2, router, token, amount,
+        )
+        .expect("build Permit2 callbacks");
+
+        assert_eq!(approvals.len(), 2);
+        assert_eq!(resets.len(), 2);
+        let token_approve = UnifiedHardenedExecutor::safeApproveCall::abi_decode(&approvals[0].1)
+            .expect("decode token approval");
+        assert_eq!(token_approve.token, token);
+        assert_eq!(token_approve.spender, permit2);
+        assert_eq!(token_approve.amount, amount);
+        let router_approve = Permit2AllowanceTransfer::approveCall::abi_decode(&approvals[1].1)
+            .expect("decode Permit2 approval");
+        assert_eq!(router_approve.token, token);
+        assert_eq!(router_approve.spender, router);
+        assert_eq!(router_approve.amount, amount.to::<U160>());
+        let router_reset = Permit2AllowanceTransfer::approveCall::abi_decode(&resets[0].1)
+            .expect("decode Permit2 reset");
+        assert_eq!(router_reset.amount, U160::ZERO);
+        let token_reset = UnifiedHardenedExecutor::safeApproveCall::abi_decode(&resets[1].1)
+            .expect("decode token reset");
+        assert_eq!(token_reset.amount, U256::ZERO);
     }
 
     #[tokio::test]

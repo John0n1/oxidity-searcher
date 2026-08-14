@@ -42,7 +42,7 @@ max_gas_price_gwei = 100                  # Maximum base fee threshold in Gwei
 ### 2. Flashloans & Strategy Toggles
 ```toml
 flashloan_enabled = true                  # Enable zero-capital flashloan borrowing
-flashloan_provider = "auto,aavev3,balancer" # Preferred flashloan liquidity providers
+flashloan_provider = "auto,uniswapv4,aavev3,balancer" # Preferred flashloan liquidity providers
 sandwich_attacks_enabled = true          # Enable 3-tx sandwich attack engine
 mev_share_enabled = true                 # Enable MEV-Share backrun bundle engine
 allow_non_wrapped_swaps = true           # Allow swaps through native ETH / WETH pools

@@ -1467,7 +1467,7 @@ impl GlobalSettings {
         &self,
     ) -> Vec<crate::services::strategy::strategy::FlashloanProvider> {
         use crate::services::strategy::strategy::FlashloanProvider::{
-            AaveV3, Balancer, Dydx, MakerDao, UniswapV2, UniswapV3,
+            AaveV3, Balancer, Dydx, MakerDao, UniswapV2, UniswapV3, UniswapV4,
         };
         let raw = self.flashloan_provider.to_lowercase();
         let mut parts: Vec<&str> = raw
@@ -1489,13 +1489,14 @@ impl GlobalSettings {
                 "maker" | "makerdao" | "maker_dao" | "mcd" => out.push(MakerDao),
                 "uniswapv2" | "uniswap_v2" | "uni_v2" | "univ2" => out.push(UniswapV2),
                 "uniswapv3" | "uniswap_v3" | "uni_v3" | "univ3" => out.push(UniswapV3),
+                "uniswapv4" | "uniswap_v4" | "uni_v4" | "univ4" => out.push(UniswapV4),
                 _ => {}
             }
         }
         if out.is_empty() && auto {
             // Production auto-selection is deliberately limited to providers with
             // canonical dependencies and maintained integration coverage.
-            out = vec![AaveV3, Balancer];
+            out = vec![UniswapV4, AaveV3, Balancer];
         }
         if out.is_empty() {
             out = vec![Balancer];
@@ -2509,11 +2510,17 @@ mod tests {
 
     #[test]
     fn flashloan_providers_auto_uses_supported_provider_set_only() {
-        use crate::services::strategy::strategy::FlashloanProvider::{AaveV3, Balancer};
+        use crate::services::strategy::strategy::FlashloanProvider::{AaveV3, Balancer, UniswapV4};
 
         let mut settings = base_settings();
         settings.flashloan_provider = "auto,aavev2".to_string();
-        assert_eq!(settings.flashloan_providers(), vec![AaveV3, Balancer]);
+        assert_eq!(
+            settings.flashloan_providers(),
+            vec![UniswapV4, AaveV3, Balancer]
+        );
+
+        settings.flashloan_provider = "univ4".to_string();
+        assert_eq!(settings.flashloan_providers(), vec![UniswapV4]);
     }
 
     #[test]

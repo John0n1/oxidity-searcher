@@ -16,7 +16,7 @@
 use crate::common::error::AppError;
 use crate::data::executor::UnifiedHardenedExecutor;
 use crate::network::provider::HttpProvider;
-use alloy::primitives::{Address, TxKind, U256};
+use alloy::primitives::{Address, TxKind, U256, keccak256};
 use alloy::providers::Provider;
 use alloy::providers::ext::DebugApi;
 use alloy::rpc::types::eth::simulate::{SimBlock, SimCallResult, SimulatePayload};
@@ -38,6 +38,15 @@ pub struct SimulationOutcome {
     pub gas_used: u64,
     pub return_data: Vec<u8>,
     pub reason: Option<String>,
+    pub settled_profits: Vec<SettledProfit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettledProfit {
+    pub emitter: Address,
+    pub token: Address,
+    pub receiver: Address,
+    pub amount: U256,
 }
 
 #[derive(Debug, Default)]
@@ -567,6 +576,7 @@ impl Simulator {
                     gas_used: 0,
                     return_data: msg.clone().into_bytes(),
                     reason: Some(msg),
+                    settled_profits: Vec::new(),
                 });
             }
         };
@@ -587,6 +597,7 @@ impl Simulator {
             gas_used,
             return_data,
             reason,
+            settled_profits: Vec::new(),
         })
     }
 
@@ -812,6 +823,7 @@ fn non_stateful_eth_call_bundle_outcomes(count: usize) -> Vec<SimulationOutcome>
             gas_used: 0,
             return_data: reason.as_bytes().to_vec(),
             reason: Some(reason.clone()),
+            settled_profits: Vec::new(),
         })
         .collect()
 }
@@ -924,6 +936,29 @@ fn sim_call_result_to_outcome(call: &SimCallResult) -> SimulationOutcome {
         gas_used: call.gas_used,
         return_data: call.return_data.to_vec(),
         reason,
+        settled_profits: call
+            .logs
+            .iter()
+            .filter_map(|log| {
+                let topics = log.topics();
+                let signature = keccak256("ProfitSettled(address,uint256,address)");
+                if topics.len() != 3 || topics[0] != signature {
+                    return None;
+                }
+                let token = Address::from_slice(&topics[1].as_slice()[12..]);
+                let receiver = Address::from_slice(&topics[2].as_slice()[12..]);
+                let data = log.data().data.as_ref();
+                if data.len() < 32 {
+                    return None;
+                }
+                Some(SettledProfit {
+                    emitter: log.address(),
+                    token,
+                    receiver,
+                    amount: U256::from_be_slice(&data[..32]),
+                })
+            })
+            .collect(),
     }
 }
 
@@ -946,6 +981,7 @@ fn default_frame_to_outcome(frame: DefaultFrame) -> SimulationOutcome {
         gas_used: frame.gas,
         return_data: frame.return_value.to_vec(),
         reason,
+        settled_profits: Vec::new(),
     }
 }
 
@@ -1004,6 +1040,9 @@ pub fn decode_flashloan_revert(revert_data: &[u8]) -> String {
             UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::OnlyPool(_) => {
                 "🚫 Caller is not configured Aave pool".to_string()
             }
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::OnlyUniswapV4PoolManager(_) => {
+                "🚫 Caller is not the active Uniswap V4 PoolManager".to_string()
+            }
             UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::InvalidPool(_) => {
                 "🚫 Invalid Aave pool address".to_string()
             }
@@ -1012,6 +1051,9 @@ pub fn decode_flashloan_revert(revert_data: &[u8]) -> String {
             }
             UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::InvalidBalancerVault(_) => {
                 "🚫 Invalid Balancer vault address".to_string()
+            }
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::ProviderNotApproved(_) => {
+                "🚫 Flashloan provider not approved by executor".to_string()
             }
             UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::BalancerTokensNotSorted(e) => {
                 format!(
@@ -1031,6 +1073,21 @@ pub fn decode_flashloan_revert(revert_data: &[u8]) -> String {
             UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::AaveCallbackNotReceived(_) => {
                 "🚫 Aave callback not received (bad pool or no-op call)".to_string()
             }
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::UniswapV4LoanNotActive(_) => {
+                "🚫 Uniswap V4 callback without active PoolManager loan".to_string()
+            }
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::UniswapV4LoanContextMismatch(
+                _,
+            ) => "🚫 Uniswap V4 callback context mismatch".to_string(),
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::UniswapV4CallbackNotReceived(
+                _,
+            ) => "🚫 Uniswap V4 callback not received".to_string(),
+            UnifiedHardenedExecutor::UnifiedHardenedExecutorErrors::UniswapV4SettlementMismatch(
+                e,
+            ) => format!(
+                "🚫 Uniswap V4 settlement mismatch: expected {}, actual {}",
+                e.expected, e.actual
+            ),
             _ => "Reverted with known custom error".to_string(),
         };
     }

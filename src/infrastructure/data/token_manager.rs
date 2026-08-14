@@ -8,12 +8,20 @@ use std::path::Path;
 
 use alloy::primitives::Address;
 use alloy::providers::Provider;
+use alloy::sol;
 use dashmap::DashSet;
 use serde::Deserialize;
 
 use crate::common::global_data::parse_global_data_file;
 use crate::domain::error::AppError;
 use crate::network::provider::HttpProvider;
+
+sol! {
+    #[sol(rpc)]
+    contract ERC20Metadata {
+        function decimals() external view returns (uint8);
+    }
+}
 
 /// Minimal token metadata used for decimal-aware profit checks and logging.
 #[derive(Debug, Clone)]
@@ -105,6 +113,10 @@ impl TokenManager {
         self.tokens_by_chain.is_empty()
     }
 
+    pub fn chain_token_count(&self, chain_id: u64) -> usize {
+        self.tokens_by_chain.get(&chain_id).map_or(0, HashMap::len)
+    }
+
     pub async fn validate_chain_addresses(&self, provider: &HttpProvider, chain_id: u64) -> usize {
         let Some(tokens) = self.tokens_by_chain.get(&chain_id) else {
             return 0;
@@ -116,9 +128,13 @@ impl TokenManager {
                 self.invalid_tokens.remove(&(chain_id, *addr));
                 continue;
             }
-            match provider.get_code_at(*addr).await {
+            let metadata = ERC20Metadata::new(*addr, provider.clone());
+            let decimals_call = metadata.decimals();
+            let (code_result, decimals_result) =
+                tokio::join!(provider.get_code_at(*addr), decimals_call.call());
+            match code_result {
                 Ok(code) => {
-                    if code.is_empty() {
+                    if code.is_empty() || decimals_result.ok() != Some(info.decimals) {
                         self.invalid_tokens.insert((chain_id, *addr));
                         invalid += 1;
                     } else {

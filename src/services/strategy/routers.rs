@@ -67,6 +67,46 @@ sol! {
         function exactOutput(ExactOutputParams calldata params) external payable returns (uint256 amountIn);
     }
 
+    /// @notice Uniswap SwapRouter02 uses deadline-less V3 parameter structs.
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
+    contract UniV3Router02 {
+        struct ExactInputSingleParams {
+            address tokenIn;
+            address tokenOut;
+            uint24 fee;
+            address recipient;
+            uint256 amountIn;
+            uint256 amountOutMinimum;
+            uint160 sqrtPriceLimitX96;
+        }
+        struct ExactInputParams {
+            bytes path;
+            address recipient;
+            uint256 amountIn;
+            uint256 amountOutMinimum;
+        }
+        struct ExactOutputSingleParams {
+            address tokenIn;
+            address tokenOut;
+            uint24 fee;
+            address recipient;
+            uint256 amountOut;
+            uint256 amountInMaximum;
+            uint160 sqrtPriceLimitX96;
+        }
+        struct ExactOutputParams {
+            bytes path;
+            address recipient;
+            uint256 amountOut;
+            uint256 amountInMaximum;
+        }
+        function exactInputSingle(ExactInputSingleParams calldata params) external payable returns (uint256 amountOut);
+        function exactInput(ExactInputParams calldata params) external payable returns (uint256 amountOut);
+        function exactOutputSingle(ExactOutputSingleParams calldata params) external payable returns (uint256 amountIn);
+        function exactOutput(ExactOutputParams calldata params) external payable returns (uint256 amountIn);
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     #[sol(rpc)]
     contract UniV3Multicall {
@@ -96,6 +136,62 @@ sol! {
     #[sol(rpc)]
     contract UniversalRouterDeadline {
         function execute(bytes commands, bytes[] inputs, uint256 deadline) external payable;
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
+    contract UniswapV4PoolManager {
+        function unlock(bytes calldata data) external returns (bytes memory result);
+        function take(address currency, address to, uint256 amount) external;
+        function sync(address currency) external;
+        function settle() external payable returns (uint256 paid);
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
+    contract UniswapV4Quoter {
+        struct PoolKey {
+            address currency0;
+            address currency1;
+            uint24 fee;
+            int24 tickSpacing;
+            address hooks;
+        }
+        struct QuoteExactSingleParams {
+            PoolKey poolKey;
+            bool zeroForOne;
+            uint128 exactAmount;
+            bytes hookData;
+        }
+        function quoteExactInputSingle(QuoteExactSingleParams calldata params)
+            external
+            returns (uint256 amountOut, uint256 gasEstimate);
+    }
+
+    contract UniversalRouterV4Payload {
+        struct PoolKey {
+            address currency0;
+            address currency1;
+            uint24 fee;
+            int24 tickSpacing;
+            address hooks;
+        }
+        struct ExactInputSingleParams {
+            PoolKey poolKey;
+            bool zeroForOne;
+            uint128 amountIn;
+            uint128 amountOutMinimum;
+            bytes hookData;
+        }
+        function exactInputSingle(ExactInputSingleParams calldata params) external;
+        function actionPlan(bytes calldata actions, bytes[] calldata params) external;
+        function currencyAmount(address currency, uint256 amount) external;
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc)]
+    contract Permit2AllowanceTransfer {
+        function approve(address token, address spender, uint160 amount, uint48 expiration) external;
     }
 
     #[derive(Debug, PartialEq, Eq)]

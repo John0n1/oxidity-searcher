@@ -59,7 +59,9 @@ mod tests {
 
     #[test]
     fn detects_circuit_breaker_error() {
-        let err = AppError::Strategy("Circuit breaker is latched; operator intervention is required".into());
+        let err = AppError::Strategy(
+            "Circuit breaker is latched; operator intervention is required".into(),
+        );
         assert!(err.is_circuit_breaker());
 
         let other = AppError::Strategy("Some other error".into());

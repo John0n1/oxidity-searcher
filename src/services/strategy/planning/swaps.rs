@@ -7,11 +7,17 @@ use crate::common::constants;
 use crate::common::error::AppError;
 use crate::common::retry::retry_async;
 use crate::network::gas::GasFees;
-use crate::services::strategy::routers::{UniV3Quoter, UniV3Router};
+use crate::services::strategy::decode::ObservedV4Hop;
+use crate::services::strategy::routers::{
+    UniV3Quoter, UniV3Router, UniV3Router02, UniswapV4Quoter, UniversalRouter,
+    UniversalRouterV4Payload,
+};
 use crate::services::strategy::strategy::{StrategyExecutor, V3_QUOTE_CACHE_TTL_MS};
 use crate::services::strategy::time_utils::current_unix;
 use alloy::eips::eip2930::AccessList;
-use alloy::primitives::{Address, B256, U256, keccak256};
+use alloy::primitives::aliases::{I24, U24};
+use alloy::primitives::{Address, B256, Bytes, U256, keccak256};
+use alloy_sol_types::SolCall;
 use std::time::{Duration, Instant};
 
 pub struct V2SwapBuild {
@@ -27,7 +33,129 @@ pub struct V3QuoteCacheEntry {
     pub expires_at: Instant,
 }
 
+pub struct V4SwapBuild {
+    pub expected_out: U256,
+    pub calldata: Bytes,
+}
+
 impl StrategyExecutor {
+    fn v4_quoter_pool_key(hop: &ObservedV4Hop) -> Result<UniswapV4Quoter::PoolKey, AppError> {
+        Ok(UniswapV4Quoter::PoolKey {
+            currency0: hop.pool_key.currency0,
+            currency1: hop.pool_key.currency1,
+            fee: U24::from(hop.pool_key.fee),
+            tickSpacing: I24::try_from(hop.pool_key.tick_spacing)
+                .map_err(|_| AppError::Strategy("V4 tick spacing is outside int24".into()))?,
+            hooks: hop.pool_key.hooks,
+        })
+    }
+
+    pub(crate) async fn quote_v4_exact_input_single(
+        &self,
+        hop: &ObservedV4Hop,
+        amount_in: U256,
+    ) -> Result<U256, AppError> {
+        let exact_amount: u128 = amount_in
+            .try_into()
+            .map_err(|_| AppError::Strategy("V4 quote amount exceeds uint128".into()))?;
+        let quoter_addr = constants::default_uniswap_v4_quoter(self.chain_id)
+            .ok_or_else(|| AppError::Strategy("No V4 quoter configured for chain".into()))?;
+        let quoter = UniswapV4Quoter::new(quoter_addr, self.http_provider.clone());
+        let result = quoter
+            .quoteExactInputSingle(UniswapV4Quoter::QuoteExactSingleParams {
+                poolKey: Self::v4_quoter_pool_key(hop)?,
+                zeroForOne: hop.zero_for_one,
+                exactAmount: exact_amount,
+                hookData: hop.hook_data.clone(),
+            })
+            .call()
+            .await
+            .map_err(|error| AppError::Strategy(format!("V4 exact-input quote failed: {error}")))?;
+        Ok(result.amountOut)
+    }
+
+    pub(crate) fn reverse_v4_hop(hop: &ObservedV4Hop) -> ObservedV4Hop {
+        let mut reversed = hop.clone();
+        reversed.zero_for_one = !reversed.zero_for_one;
+        reversed
+    }
+
+    pub(crate) fn build_v4_exact_input_single_payload(
+        hop: &ObservedV4Hop,
+        amount_in: U256,
+        min_out: U256,
+    ) -> Result<Bytes, AppError> {
+        let amount_in_u128: u128 = amount_in
+            .try_into()
+            .map_err(|_| AppError::Strategy("V4 swap amount exceeds uint128".into()))?;
+        let min_out_u128: u128 = min_out
+            .try_into()
+            .map_err(|_| AppError::Strategy("V4 minimum output exceeds uint128".into()))?;
+        let pool_key = UniversalRouterV4Payload::PoolKey {
+            currency0: hop.pool_key.currency0,
+            currency1: hop.pool_key.currency1,
+            fee: U24::from(hop.pool_key.fee),
+            tickSpacing: I24::try_from(hop.pool_key.tick_spacing)
+                .map_err(|_| AppError::Strategy("V4 tick spacing is outside int24".into()))?,
+            hooks: hop.pool_key.hooks,
+        };
+        let swap = UniversalRouterV4Payload::exactInputSingleCall {
+            params: UniversalRouterV4Payload::ExactInputSingleParams {
+                poolKey: pool_key,
+                zeroForOne: hop.zero_for_one,
+                amountIn: amount_in_u128,
+                amountOutMinimum: min_out_u128,
+                hookData: hop.hook_data.clone(),
+            },
+        }
+        .abi_encode();
+        let input_currency = if hop.zero_for_one {
+            hop.pool_key.currency0
+        } else {
+            hop.pool_key.currency1
+        };
+        let output_currency = if hop.zero_for_one {
+            hop.pool_key.currency1
+        } else {
+            hop.pool_key.currency0
+        };
+        let settle = UniversalRouterV4Payload::currencyAmountCall {
+            currency: input_currency,
+            amount: amount_in,
+        }
+        .abi_encode();
+        let take = UniversalRouterV4Payload::currencyAmountCall {
+            currency: output_currency,
+            amount: min_out,
+        }
+        .abi_encode();
+        let action_plan = UniversalRouterV4Payload::actionPlanCall {
+            actions: Bytes::from(vec![0x06, 0x0c, 0x0f]),
+            params: vec![
+                Bytes::copy_from_slice(&swap[4..]),
+                Bytes::copy_from_slice(&settle[4..]),
+                Bytes::copy_from_slice(&take[4..]),
+            ],
+        }
+        .abi_encode();
+        Ok(Bytes::from(
+            UniversalRouter::executeCall {
+                commands: Bytes::from(vec![0x10]),
+                inputs: vec![Bytes::copy_from_slice(&action_plan[4..])],
+            }
+            .abi_encode(),
+        ))
+    }
+
+    fn is_v3_router02(&self, router: Address) -> bool {
+        constants::default_routers_for_chain(self.chain_id)
+            .into_iter()
+            .any(|(name, address)| {
+                address == router
+                    && (name.contains("v3_router02") || name.contains("v3_swaprouter02"))
+            })
+    }
+
     pub(crate) fn v3_quote_cache_key(path: &[u8], amount_in: U256) -> B256 {
         let mut key_material = Vec::with_capacity(path.len() + 32);
         key_material.extend_from_slice(path);
@@ -101,6 +229,17 @@ impl StrategyExecutor {
         amount_out_min: U256,
         recipient: Address,
     ) -> Vec<u8> {
+        if self.is_v3_router02(router) {
+            return UniV3Router02::new(router, self.http_provider.clone())
+                .exactInput(UniV3Router02::ExactInputParams {
+                    path: path.into(),
+                    recipient,
+                    amountIn: amount_in,
+                    amountOutMinimum: amount_out_min,
+                })
+                .calldata()
+                .to_vec();
+        }
         let deadline =
             current_unix().saturating_add(self.deadline_min_seconds_ahead().clamp(30, 300));
         UniV3Router::new(router, self.http_provider.clone())
@@ -110,6 +249,39 @@ impl StrategyExecutor {
                 deadline: U256::from(deadline),
                 amountIn: amount_in,
                 amountOutMinimum: amount_out_min,
+            })
+            .calldata()
+            .to_vec()
+    }
+
+    pub(crate) fn build_v3_exact_output_payload(
+        &self,
+        router: Address,
+        reversed_path: Vec<u8>,
+        amount_out: U256,
+        amount_in_max: U256,
+        recipient: Address,
+    ) -> Vec<u8> {
+        if self.is_v3_router02(router) {
+            return UniV3Router02::new(router, self.http_provider.clone())
+                .exactOutput(UniV3Router02::ExactOutputParams {
+                    path: reversed_path.into(),
+                    recipient,
+                    amountOut: amount_out,
+                    amountInMaximum: amount_in_max,
+                })
+                .calldata()
+                .to_vec();
+        }
+        let deadline =
+            current_unix().saturating_add(self.deadline_min_seconds_ahead().clamp(30, 300));
+        UniV3Router::new(router, self.http_provider.clone())
+            .exactOutput(UniV3Router::ExactOutputParams {
+                path: reversed_path.into(),
+                recipient,
+                deadline: U256::from(deadline),
+                amountOut: amount_out,
+                amountInMaximum: amount_in_max,
             })
             .calldata()
             .to_vec()
@@ -195,5 +367,57 @@ impl StrategyExecutor {
 }
 
 #[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::strategy::decode::{
+        ObservedV4PoolKey, RouterKind, decode_swap_input_for_chain,
+    };
 
+    #[test]
+    fn builds_canonical_v4_exact_input_action_plan() {
+        let hop = ObservedV4Hop {
+            pool_key: ObservedV4PoolKey {
+                currency0: Address::from([0x11; 20]),
+                currency1: Address::from([0x22; 20]),
+                fee: 3_000,
+                tick_spacing: 60,
+                hooks: Address::ZERO,
+            },
+            zero_for_one: true,
+            hook_data: Bytes::new(),
+        };
+        let payload = StrategyExecutor::build_v4_exact_input_single_payload(
+            &hop,
+            U256::from(10_000u64),
+            U256::from(9_000u64),
+        )
+        .expect("build V4 payload");
+        let execute = UniversalRouter::executeCall::abi_decode(&payload)
+            .expect("decode Universal Router execute");
+        assert_eq!(execute.commands.as_ref(), &[0x10]);
+        assert_eq!(execute.inputs.len(), 1);
+
+        let mut action_calldata = Vec::with_capacity(
+            execute.inputs[0].len() + UniversalRouterV4Payload::actionPlanCall::SELECTOR.len(),
+        );
+        action_calldata.extend_from_slice(&UniversalRouterV4Payload::actionPlanCall::SELECTOR);
+        action_calldata.extend_from_slice(execute.inputs[0].as_ref());
+        let plan = UniversalRouterV4Payload::actionPlanCall::abi_decode(&action_calldata)
+            .expect("decode V4 action plan");
+        assert_eq!(plan.actions.as_ref(), &[0x06, 0x0c, 0x0f]);
+        assert_eq!(plan.params.len(), 3);
+
+        let decoded = decode_swap_input_for_chain(
+            crate::common::constants::CHAIN_ETHEREUM,
+            Address::from([0x33; 20]),
+            &payload,
+            U256::ZERO,
+        )
+        .expect("round-trip generated V4 payload through decoder");
+        assert_eq!(decoded.router_kind, RouterKind::V4Like);
+        assert_eq!(decoded.v4_path, vec![hop]);
+    }
+}
+
+#[cfg(test)]
 crate::coverage_floor_pad_test!(220);

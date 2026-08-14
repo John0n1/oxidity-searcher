@@ -169,6 +169,14 @@ pub fn classify_allowlist_entry(name: &str) -> AllowlistCategory {
         || lower.contains("quoter")
         || lower.contains("approval_proxy")
         || lower.contains("addresses_provider")
+        || lower.contains("address_provider")
+        || lower.contains("pool_manager")
+        || lower.contains("poolmanager")
+        || lower.contains("state_view")
+        || lower.contains("shared_liquidity_registry")
+        || lower.contains("position_manager")
+        || lower.contains("sequencer_inbox")
+        || lower.contains("settlement")
         || lower.contains("seadrop")
         || lower.contains("depository")
         || lower.contains("factory")
@@ -357,6 +365,7 @@ pub enum FlashloanProvider {
     MakerDao,
     UniswapV2,
     UniswapV3,
+    UniswapV4,
 }
 
 #[derive(Default)]
@@ -383,6 +392,10 @@ pub struct StrategyStats {
     pub skip_backrun_build_failed: AtomicU64,
     pub decode_attempts_router: AtomicU64,
     pub decode_success_router: AtomicU64,
+    pub decode_attempts_known_router: AtomicU64,
+    pub decode_success_known_router: AtomicU64,
+    pub decode_attempts_unknown_router: AtomicU64,
+    pub decode_success_unknown_router: AtomicU64,
     pub decode_attempts_wrapper: AtomicU64,
     pub decode_success_wrapper: AtomicU64,
     pub decode_attempts_infra: AtomicU64,
@@ -444,6 +457,26 @@ impl StrategyStats {
         attempts.fetch_add(1, Ordering::Relaxed);
         if success {
             successes.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_known_router_decode(&self, success: bool) {
+        self.record_decode_attempt(AllowlistCategory::Routers, success);
+        self.decode_attempts_known_router
+            .fetch_add(1, Ordering::Relaxed);
+        if success {
+            self.decode_success_known_router
+                .fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_unknown_router_decode(&self, success: bool) {
+        self.record_decode_attempt(AllowlistCategory::Routers, success);
+        self.decode_attempts_unknown_router
+            .fetch_add(1, Ordering::Relaxed);
+        if success {
+            self.decode_success_unknown_router
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -793,6 +826,11 @@ impl StrategyExecutor {
                         return true;
                     }
                 }
+                FlashloanProvider::UniswapV4 => {
+                    if constants::default_uniswap_v4_pool_manager(self.chain_id).is_some() {
+                        return true;
+                    }
+                }
             }
         }
         false
@@ -1078,16 +1116,16 @@ impl StrategyExecutor {
         match self.db.load_nonce_state(self.chain_id).await {
             Ok(Some((block, mut next, touched_raw))) => {
                 let touched = Self::deserialize_pools(&touched_raw);
-                if let Some(rpc_nonce) = on_chain_nonce {
-                    if rpc_nonce != next {
-                        tracing::info!(
-                            target: "bundle_state",
-                            db_next_nonce = next,
-                            rpc_pending_nonce = rpc_nonce,
-                            "Syncing nonce state with authoritative on-chain RPC pending nonce"
-                        );
-                        next = rpc_nonce;
-                    }
+                if let Some(rpc_nonce) = on_chain_nonce
+                    && rpc_nonce != next
+                {
+                    tracing::info!(
+                        target: "bundle_state",
+                        db_next_nonce = next,
+                        rpc_pending_nonce = rpc_nonce,
+                        "Syncing nonce state with authoritative on-chain RPC pending nonce"
+                    );
+                    next = rpc_nonce;
                 }
                 {
                     let mut guard = self.bundle_state.lock().await;
@@ -1248,6 +1286,7 @@ impl StrategyExecutor {
                 crate::services::strategy::decode::RouterKind::V3Like => {
                     self.exec_router_v3.unwrap_or(observed.router)
                 }
+                crate::services::strategy::decode::RouterKind::V4Like => observed.router,
             }
         } else if self.oneinch_routers.contains(&observed.router) {
             // We can decode 1inch intents, but execute against a deterministic
@@ -1297,16 +1336,21 @@ impl StrategyExecutor {
         match kind {
             RouterKind::V2Like => self.exec_router_v2.or_else(|| {
                 chain_defaults
-                    .get("UNISWAP_V2_ROUTER02")
+                    .get("uniswap_v2_router02")
                     .copied()
-                    .or_else(|| chain_defaults.get("UNISWAP_V2_ROUTER").copied())
+                    .or_else(|| chain_defaults.get("uniswap_v2_router").copied())
             }),
             RouterKind::V3Like => self.exec_router_v3.or_else(|| {
                 chain_defaults
-                    .get("UNISWAP_V3_ROUTER")
+                    .get("uniswap_v3_router")
                     .copied()
-                    .or_else(|| chain_defaults.get("UNISWAP_V3_ROUTER02").copied())
+                    .or_else(|| chain_defaults.get("uniswap_v3_router02").copied())
             }),
+            RouterKind::V4Like => chain_defaults
+                .get("uniswap_universal_router_v2_1_1")
+                .copied()
+                .or_else(|| chain_defaults.get("uniswap_universal_router_v2").copied())
+                .or_else(|| chain_defaults.get("uniswap_universal_router").copied()),
         }
     }
 
@@ -1426,6 +1470,7 @@ impl StrategyExecutor {
                 || name.starts_with("kyberswap_")
                 || name.starts_with("zerox_")
                 || name == "dex_router"
+                || name.starts_with("okx_dex_router")
                 || name == "transit_swap_router_v5"
                 || name.starts_with("balancer_")
             {
@@ -2077,6 +2122,30 @@ mod tests {
             classify_allowlist_entry("RELAY_DEPOSITORY"),
             AllowlistCategory::Infra
         );
+        assert_eq!(
+            classify_allowlist_entry("UNISWAP_V4_POOL_MANAGER"),
+            AllowlistCategory::Infra
+        );
+        assert_eq!(
+            classify_allowlist_entry("AQUA_SHARED_LIQUIDITY_REGISTRY"),
+            AllowlistCategory::Infra
+        );
+        assert_eq!(
+            classify_allowlist_entry("UNISWAP_V3_POSITION_MANAGER"),
+            AllowlistCategory::Infra
+        );
+        assert_eq!(
+            classify_allowlist_entry("ARBITRUM_SEQUENCER_INBOX"),
+            AllowlistCategory::Infra
+        );
+        assert_eq!(
+            classify_allowlist_entry("COW_SWAP_SETTLEMENT"),
+            AllowlistCategory::Infra
+        );
+        assert_eq!(
+            classify_allowlist_entry("OKX_DEX_ROUTER_V6"),
+            AllowlistCategory::Routers
+        );
     }
 
     #[test]
@@ -2264,6 +2333,7 @@ mod tests {
             path: vec![weth_mainnet(), Address::from([2u8; 20])],
             v3_fees: Vec::new(),
             v3_path: None,
+            v4_path: Vec::new(),
             amount_in: U256::from(1u64),
             min_out: U256::ZERO,
             recipient: Address::ZERO,
@@ -2447,6 +2517,9 @@ mod tests {
         assert!(exec.has_usable_flashloan_provider());
 
         exec.flashloan_providers = vec![FlashloanProvider::UniswapV3];
+        assert!(exec.has_usable_flashloan_provider());
+
+        exec.flashloan_providers = vec![FlashloanProvider::UniswapV4];
         assert!(exec.has_usable_flashloan_provider());
     }
 

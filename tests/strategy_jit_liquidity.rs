@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ® John Hauger Mitander <john@oxidity.io>
 
-use alloy::primitives::{address, Address, U256};
+use alloy::primitives::{Address, U256, address};
 use oxidity_searcher::services::strategy::ingest::decode::{ObservedSwap, RouterKind};
 
 #[test]
@@ -15,6 +15,7 @@ fn test_jit_liquidity_threshold_filter() {
         path: vec![token_in, token_out],
         v3_fees: vec![3000],
         v3_path: None,
+        v4_path: Vec::new(),
         amount_in: U256::from(100_000_000_000_000_000u64), // 0.1 ETH (too small for JIT)
         min_out: U256::from(300_000_000u64),
         recipient: Address::ZERO,
@@ -26,6 +27,7 @@ fn test_jit_liquidity_threshold_filter() {
         path: vec![token_in, token_out],
         v3_fees: vec![3000],
         v3_path: None,
+        v4_path: Vec::new(),
         amount_in: U256::from(10_000_000_000_000_000_000u64), // 10 ETH (JIT candidate)
         min_out: U256::from(30_000_000_000u64),
         recipient: Address::ZERO,

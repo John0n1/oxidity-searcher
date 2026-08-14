@@ -23,7 +23,7 @@ use crate::services::strategy::routers::{
     BalancerVault, DexRouter, KyberAggregationRouterV2, OneInchAggregationRouter,
     OneInchAggregationRouterV5, ParaSwapAugustusV6, RelayApprovalProxyV3, RelayRouterV3,
     TransitSwapRouterV5, UniV2Router, UniV3Multicall, UniV3MulticallDeadline, UniV3Router,
-    UniversalRouter, UniversalRouterDeadline, ZeroXExchangeProxy,
+    UniV3Router02, UniversalRouter, UniversalRouterDeadline, ZeroXExchangeProxy,
 };
 use alloy::primitives::Address;
 use alloy_sol_types::SolCall;
@@ -324,6 +324,7 @@ impl RouterDiscovery {
                     kind: match classified.kind {
                         RouterKind::V2Like => "v2".to_string(),
                         RouterKind::V3Like => "v3".to_string(),
+                        RouterKind::V4Like => "v4".to_string(),
                     },
                     note: classified.note,
                 })
@@ -485,6 +486,7 @@ impl RouterDiscovery {
                 let kind_str = match classification.kind {
                     RouterKind::V2Like => "v2",
                     RouterKind::V3Like => "v3",
+                    RouterKind::V4Like => "v4",
                 };
                 let _ = self
                     .db
@@ -740,6 +742,7 @@ impl RouterDiscovery {
             let kind_str = match kind {
                 RouterKind::V2Like => "v2",
                 RouterKind::V3Like => "v3",
+                RouterKind::V4Like => "v4",
             };
 
             self.allowlist.insert(router);
@@ -814,6 +817,7 @@ impl RouterDiscovery {
                     v3_hits = v3_hits.saturating_add(*count);
                     v3_ranked.push((selector.clone(), *count));
                 }
+                Some(RouterKind::V4Like) => {}
                 None => {}
             }
         }
@@ -848,6 +852,7 @@ impl RouterDiscovery {
         let kind_name = match kind {
             RouterKind::V2Like => "v2",
             RouterKind::V3Like => "v3",
+            RouterKind::V4Like => "v4",
         };
         let top = kind_ranked
             .iter()
@@ -868,6 +873,9 @@ impl RouterDiscovery {
         match kind {
             RouterKind::V2Like => V2_ROUTER_SELECTORS,
             RouterKind::V3Like => V3_ROUTER_SELECTORS,
+            // Universal Router execute selectors alone cannot prove that a contract
+            // supports V4, so discovery must not auto-classify them as V4 routers.
+            RouterKind::V4Like => &[],
         }
     }
 
@@ -1081,6 +1089,10 @@ const V3_ROUTER_SELECTORS: &[[u8; 4]] = &[
     UniV3Router::exactInputSingleCall::SELECTOR,
     UniV3Router::exactOutputCall::SELECTOR,
     UniV3Router::exactOutputSingleCall::SELECTOR,
+    UniV3Router02::exactInputCall::SELECTOR,
+    UniV3Router02::exactInputSingleCall::SELECTOR,
+    UniV3Router02::exactOutputCall::SELECTOR,
+    UniV3Router02::exactOutputSingleCall::SELECTOR,
     UniV3Multicall::multicallCall::SELECTOR,
     UniV3MulticallDeadline::multicallCall::SELECTOR,
 ];
@@ -1194,9 +1206,16 @@ mod tests {
         let mut bytecode = vec![0x60, 0x00, 0x63];
         bytecode.extend_from_slice(&known);
         bytecode.extend_from_slice(&[0x14, 0x57, 0x5b, 0x00]);
-        assert!(RouterDiscovery::bytecode_contains_selector(&bytecode, known));
-        assert!(!RouterDiscovery::bytecode_contains_selector(&bytecode, unknown));
-        assert_eq!(RouterDiscovery::count_matching_selectors(&bytecode, &[known]), 1);
+        assert!(RouterDiscovery::bytecode_contains_selector(
+            &bytecode, known
+        ));
+        assert!(!RouterDiscovery::bytecode_contains_selector(
+            &bytecode, unknown
+        ));
+        assert_eq!(
+            RouterDiscovery::count_matching_selectors(&bytecode, &[known]),
+            1
+        );
     }
 
     #[test]

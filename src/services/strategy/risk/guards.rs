@@ -734,6 +734,17 @@ impl StrategyExecutor {
                 let rev_bytes = reverse_v3_path(&observed.path, &observed.v3_fees)?;
                 self.quote_v3_path(&rev_bytes, tokens_out).await.ok()
             }
+            RouterKind::V4Like => {
+                let hop = observed.v4_path.first()?;
+                if observed.v4_path.len() != 1 {
+                    return None;
+                }
+                let tokens_out = self.quote_v4_exact_input_single(hop, amount).await.ok()?;
+                let reverse = Self::reverse_v4_hop(hop);
+                self.quote_v4_exact_input_single(&reverse, tokens_out)
+                    .await
+                    .ok()
+            }
         }
     }
 
@@ -867,6 +878,34 @@ mod tests {
         assert!(high_profile.cost_floor_bps >= low_profile.cost_floor_bps);
         assert!(high_profile.min_margin_bps > low_profile.min_margin_bps);
         assert!(high_profile.liquidity_ratio_floor_ppm > low_profile.liquidity_ratio_floor_ppm);
+    }
+
+    #[tokio::test]
+    async fn tuned_net_profit_floor_does_not_recharge_direct_costs_at_one_x() {
+        let exec = dummy_executor_for_tests().await;
+        let ultra_low = GasFees {
+            max_fee_per_gas: 50_000_000,
+            max_priority_fee_per_gas: 8_000_000,
+            next_base_fee_per_gas: 40_000_000,
+            base_fee_per_gas: 35_000_000,
+            p50_priority_fee_per_gas: Some(7_000_000),
+            p90_priority_fee_per_gas: Some(9_000_000),
+            gas_used_ratio: Some(0.42),
+            suggested_max_fee_per_gas: Some(55_000_000),
+        };
+        assert_eq!(exec.adaptive_cost_floor_bps(&ultra_low), 10_000);
+
+        let wallet = U256::from(1_000_000_000_000_000_000u128);
+        let without_costs =
+            exec.tuned_profit_floor_with_costs(wallet, U256::ZERO, U256::ZERO, &ultra_low);
+        let with_costs = exec.tuned_profit_floor_with_costs(
+            wallet,
+            U256::from(2_000_000_000_000_000u128),
+            U256::from(1_000_000_000_000_000u128),
+            &ultra_low,
+        );
+
+        assert_eq!(with_costs, without_costs);
     }
 
     #[tokio::test]

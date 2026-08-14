@@ -1,0 +1,244 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "Ethereum Router Coverage Review",
+    "description": "Static address coverage, effective decoder coverage, and priority improvements for the Oxidity searcher.",
+    "generatedAt": "2026-08-10T14:19:12Z",
+    "charts": [
+      {
+        "id": "decoded_coverage_path",
+        "title": "Decodable calls by address-registration path",
+        "subtitle": "Ethereum mainnet blocks 25,724,135–25,725,134; 3,545 calls decoded",
+        "type": "bar",
+        "dataset": "coverage_path",
+        "sourceId": "replay_results",
+        "valueFormat": "number",
+        "encodings": {
+          "x": {
+            "field": "coverage_path",
+            "type": "nominal",
+            "label": "Coverage path"
+          },
+          "y": {
+            "field": "decoded_calls",
+            "type": "quantitative",
+            "label": "Decoded calls"
+          },
+          "tooltip": [
+            {
+              "field": "share_of_decodable",
+              "type": "quantitative",
+              "label": "Share of decoded",
+              "format": "percent"
+            },
+            {
+              "field": "candidate_calls",
+              "type": "quantitative",
+              "label": "Candidate calls"
+            },
+            {
+              "field": "interpretation",
+              "type": "nominal",
+              "label": "Interpretation"
+            }
+          ]
+        }
+      }
+    ],
+    "sources": [
+      {
+        "id": "replay_results",
+        "label": "Matched historical replay runs",
+        "path": "reports/router-coverage-2026-08-10/replay-results.json"
+      },
+      {
+        "id": "router_discovery_db",
+        "label": "Router discovery SQLite snapshot",
+        "path": "oxidity_searcher.db"
+      },
+      {
+        "id": "router_registry",
+        "label": "Runtime address registry",
+        "path": "data/global_data.json"
+      },
+      {
+        "id": "router_decoder",
+        "label": "Router decoder implementation",
+        "path": "src/services/strategy/ingest/decode.rs"
+      },
+      {
+        "id": "router_runtime",
+        "label": "Router ingestion and discovery runtime",
+        "path": "src/services/strategy/ingest/handlers.rs"
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "body": "# Ethereum Router Coverage Review"
+      },
+      {
+        "id": "technical_summary",
+        "type": "markdown",
+        "body": "## Technical summary\n\n**The static router registry is materially stale, but the live engine is not blindly losing all of that traffic.** In the matched 1,000-block replay, 1,611 of 3,545 decodable calls (45.4%) went to addresses outside the configured registry. The enabled unknown-address decoder recovered those calls and routed them through canonical execution routers.\n\n**The most important uncovered surface is Uniswap V4 swap intent, not the PoolManager flash-loan integration.** The decoder handles Universal Router V2/V3 swap commands but not `V4_SWAP`; it also masks command bytes with `0x3f` while current upstream code uses `0x7f`. The latest mainnet Universal Router V2.1.1 address is absent from the registry.\n\n**Do not enable automatic allowlisting.** Keep discovery enabled, unknown decoding enabled, and auto-allow disabled. Add only verified addresses and supported calldata formats."
+      },
+      {
+        "id": "coverage_finding",
+        "type": "markdown",
+        "sourceId": "replay_results",
+        "body": "## The fallback currently supplies almost half of effective address coverage\n\nThe configured-address replay decoded **1,934** calls. Replaying the identical block range while attempting every destination decoded **3,545**, an incremental **1,611 calls** from unconfigured addresses. This makes the static registry responsible for 54.6% of decodable activity and the fallback responsible for 45.4%.\n\nThis is evidence that address freshness can improve. It is not evidence that 45.4% of swaps were skipped: the live handler attempts selector-based decoding before it emits `unknown_router`."
+      },
+      {
+        "id": "coverage_chart",
+        "type": "chart",
+        "chartId": "decoded_coverage_path"
+      },
+      {
+        "id": "unknown_metric",
+        "type": "markdown",
+        "sourceId": "router_discovery_db",
+        "body": "## The 26.48% unknown-router counter is dominated by classification noise\n\nThe persisted discovery table contains **36 pending addresses and 9,650 flushed observations**. The review tool classified only one of the top 25 addresses as a supported V2-like router: OKX DEX Router 6 at `0x28b1…a183` with 200 historical observations. Higher-volume entries include a poisoner contract, smart-account proxies, an Arbitrum sequencer inbox, Relay Depository, 1inch Aqua shared-liquidity infrastructure, and Uniswap V3's NFT position manager.\n\nTherefore `unknown_router / skipped` measures undecodable destinations, not missed swap recall. Discovery counts are cumulative and flushed in batches, whereas the displayed strategy summary is a process-lifetime counter; the two windows do not reconcile exactly."
+      },
+      {
+        "id": "scope_definitions",
+        "type": "markdown",
+        "sourceId": "router_registry",
+        "body": "## Registry breadth is broad by name but narrower in useful decoding\n\nEthereum has **37 registry entries**: 23 names classified as routers, 13 as infrastructure, and one wrapper. One Universal Router address is duplicated under two names, leaving 22 unique addresses classified as routers.\n\nA registry entry only controls address categorization. It does not create a decoder. Custom allowlisted contracts whose calldata is not implemented still become `decode` skips, so nominal router count overstates effective protocol coverage."
+      },
+      {
+        "id": "methodology",
+        "type": "markdown",
+        "sourceId": "replay_results",
+        "body": "## Matched replays isolate the address-list effect\n\nTwo release-binary historical replays covered Ethereum blocks **25,724,135 through 25,725,134**. The first attempted only the 37 configured registry addresses; the second used the same decoder against all candidate destinations. Trace simulation was disabled, so this comparison measures calldata recognition rather than profitability or execution success.\n\nThe all-address candidate decode rate of 1.90% is not a swap-recall KPI because its denominator includes general contract calls. The defensible comparison is the composition of the 3,545 calls that the current decoder recognized."
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "body": "## What this review cannot establish\n\nThe replay does not know the true number of swaps whose calldata formats are completely unsupported, so it cannot calculate absolute swap recall. The discovery database is cumulative, batch-flushed, and lacks per-selector current-window counts. Proxy identities can also change with implementation upgrades. These limits make blind address expansion unsafe and make selector-level metrics the necessary next measurement."
+      },
+      {
+        "id": "recommendations",
+        "type": "markdown",
+        "body": "## Recommended changes, in priority order\n\n1. **Implement Universal Router `V4_SWAP` decoding** for exact-in/out single- and multi-hop actions, normalize native currency to WETH, and add focused decode tests. Correct the command mask from `0x3f` to upstream-compatible `0x7f`.\n2. **Add current verified deployments**: Uniswap Universal Router V2.1.1 (`0x4C82…2cCA`) and OKX DEX Router 6 (`0x28b1…a183`). The existing OKX calldata decoder already recognizes the latter. Keep prior deployments while they still have code and traffic.\n3. **Classify known non-swap destinations as infrastructure/noise**, beginning with Relay Depository, the Aqua core registry, Uniswap V3 NonfungiblePositionManager, and confirmed smart-account/rollup system contracts. Aqua's separately deployed SwapVM router (`0x11111133…c0de`) should be evaluated as a router when its calldata and traffic are supported. Prefer name plus code-hash or verified implementation checks for proxies.\n4. **Split metrics into one terminal outcome plus diagnostic tags**: known decoded, unknown decoded, unknown undecodable, infrastructure, token call, unsupported selector, build failure, and simulation failure. Report unique destination count and selector concentration per interval.\n5. **Audit allowlisted-but-unsupported custom routers.** Either implement their live selectors or mark them monitor-only; merely allowlisting BananaGun, CoW Settlement, Maestro, MetaMask, OpenOcean, or XY does not guarantee swap decoding.\n6. **Retain the production safety posture**: `allow_unknown_router_decode=true`, discovery enabled, and `router_discovery_auto_allow=false`. Review and approve only verified, repeatedly observed, code-present deployments."
+      },
+      {
+        "id": "further_questions",
+        "type": "markdown",
+        "body": "## The next measurement should answer selector-level recall\n\nAfter the V4 and address updates, rerun the same matched replay and add a per-destination/per-selector breakdown. The key acceptance checks are: fallback share falls materially below 45.4%, V4 Universal Router calls decode into correct pool paths, unsupported-selector volume is concentrated in known non-swap contracts, and the build/simulation funnel—not router recognition—becomes the dominant constraint."
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-10T14:19:12Z",
+    "status": "ready",
+    "datasets": {
+      "coverage_path": [
+        {
+          "coverage_path": "Configured address",
+          "decoded_calls": 1934,
+          "share_of_decodable": 0.5455571227,
+          "candidate_calls": 8716,
+          "blocks": 1000,
+          "chain_id": 1,
+          "interpretation": "Decoded after static address filtering"
+        },
+        {
+          "coverage_path": "Unconfigured fallback",
+          "decoded_calls": 1611,
+          "share_of_decodable": 0.4544428773,
+          "candidate_calls": 177553,
+          "blocks": 1000,
+          "chain_id": 1,
+          "interpretation": "Decoded only when unknown destinations were attempted"
+        }
+      ]
+    }
+  },
+  "sources": [
+    {
+      "id": "replay_results",
+      "query": {
+        "engine": "duckdb",
+        "language": "sql",
+        "sql": "WITH replay AS (SELECT * FROM read_json_auto('reports/router-coverage-2026-08-10/replay-results.json')) SELECT 'Configured address' AS coverage_path, configured_address_decoded AS decoded_calls, configured_share_of_decodable AS share_of_decodable, configured_address_candidates AS candidate_calls, blocks, chain_id, 'Decoded after static address filtering' AS interpretation FROM replay UNION ALL SELECT 'Unconfigured fallback', unconfigured_address_decoded, unconfigured_share_of_decodable, all_address_candidates - configured_address_candidates, blocks, chain_id, 'Decoded only when unknown destinations were attempted' FROM replay;",
+        "description": "Transforms the two matched historical replay summaries into the chart dataset; the saved JSON records the exact replay commands and caveats.",
+        "tables_used": [
+          "Ethereum mainnet blocks 25724135-25725134"
+        ],
+        "filters": [
+          "chain_id = 1",
+          "same inclusive 1,000-block range in both runs",
+          "trace simulation disabled"
+        ],
+        "metric_definitions": {
+          "configured_share_of_decodable": "configured_address_decoded / all_address_decoded",
+          "unconfigured_share_of_decodable": "(all_address_decoded - configured_address_decoded) / all_address_decoded"
+        },
+        "executed_at": "2026-08-10T14:16:52Z"
+      }
+    },
+    {
+      "id": "router_discovery_db",
+      "query": {
+        "engine": "sqlite",
+        "language": "sql",
+        "sql": "SELECT address, seen_count, first_seen, last_seen, last_source, last_reason, status, router_kind FROM router_discovery WHERE chain_id = 1 ORDER BY seen_count DESC LIMIT 25;",
+        "description": "Ranks persisted unresolved router-discovery destinations on Ethereum.",
+        "tables_used": [
+          "router_discovery"
+        ],
+        "filters": [
+          "chain_id = 1",
+          "top 25 by persisted seen_count"
+        ],
+        "executed_at": "2026-08-10T14:14:47Z"
+      }
+    },
+    {
+      "id": "router_registry",
+      "query": {
+        "engine": "jq",
+        "language": "shell",
+        "sql": "jq '.address_registry.chains[\"1\"].routers' data/global_data.json",
+        "description": "Reads the configured Ethereum address registry and applies the runtime name classifier.",
+        "tables_used": [
+          "data/global_data.json.address_registry.chains.1.routers"
+        ],
+        "filters": [
+          "chain_id = 1"
+        ],
+        "executed_at": "2026-08-10T14:15:00Z"
+      }
+    },
+    {
+      "id": "router_decoder",
+      "query": {
+        "engine": "rust-source-review",
+        "language": "rust",
+        "sql": "Inspect decode_universal_router and decode_swap_input_inner in src/services/strategy/ingest/decode.rs",
+        "description": "Static review of implemented selectors and Universal Router commands.",
+        "tables_used": [
+          "src/services/strategy/ingest/decode.rs"
+        ],
+        "executed_at": "2026-08-10T14:18:00Z"
+      }
+    },
+    {
+      "id": "router_runtime",
+      "query": {
+        "engine": "rust-source-review",
+        "language": "rust",
+        "sql": "Inspect decode_observed_swap_for_router_call and strategy summary aggregation in src/services/strategy/ingest/handlers.rs",
+        "description": "Static review of unknown-address fallback and skip-counter semantics.",
+        "tables_used": [
+          "src/services/strategy/ingest/handlers.rs"
+        ],
+        "executed_at": "2026-08-10T14:18:00Z"
+      }
+    }
+  ]
+}

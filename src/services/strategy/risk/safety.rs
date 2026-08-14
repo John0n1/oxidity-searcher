@@ -87,7 +87,10 @@ impl SafetyGuard {
     pub fn check(&self) -> Result<(), AppError> {
         if self.latched.load(Ordering::Acquire) {
             let expired = {
-                let latched_at = self.latched_at.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let latched_at = self
+                    .latched_at
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 match *latched_at {
                     Some(start) => start.elapsed() >= self.cooldown,
                     None => true,
@@ -96,7 +99,10 @@ impl SafetyGuard {
             if expired {
                 self.latched.store(false, Ordering::Release);
                 self.consecutive_failures.store(0, Ordering::Relaxed);
-                *self.latched_at.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+                *self
+                    .latched_at
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
                 tracing::warn!(
                     cooldown_secs = self.cooldown.as_secs(),
                     "Safety guard auto-cleared; normal execution has resumed."
@@ -132,7 +138,10 @@ impl SafetyGuard {
         let count = self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
         if count + 1 >= self.max_failures {
             self.latched.store(true, Ordering::Release);
-            *self.latched_at.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
+            *self
+                .latched_at
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
             tracing::error!(
                 cooldown_secs = self.cooldown.as_secs(),
                 "SAFETY GUARD: Circuit Breaker Tripped!"
@@ -168,7 +177,10 @@ impl SafetyGuard {
             && daily.realized_loss_wei >= self.max_daily_loss_wei;
         if gas_exceeded || loss_exceeded {
             self.latched.store(true, Ordering::Release);
-            *self.latched_at.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
+            *self
+                .latched_at
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
             tracing::error!(
                 gas_spent_wei = %daily.gas_spent_wei,
                 realized_loss_wei = %daily.realized_loss_wei,
@@ -184,7 +196,10 @@ impl SafetyGuard {
     pub fn manual_reset(&self) {
         self.consecutive_failures.store(0, Ordering::Relaxed);
         self.latched.store(false, Ordering::Release);
-        *self.latched_at.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        *self
+            .latched_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         tracing::warn!("Safety Guard: circuit breaker manually reset.");
     }
 }

@@ -130,9 +130,10 @@ impl StrategyExecutor {
             return;
         }
 
-        // Access list derivation is fee-agnostic; strip fee fields in the probe request so
-        // Client does not reject low-fee envelopes (`miner premium is negative`).
+        // Access list derivation is fee/nonce-agnostic; strip those fields in the probe request so
+        // the client does not reject a future leased nonce or a low-fee envelope.
         let mut probe_req = req.clone();
+        probe_req.nonce = None;
         probe_req.gas_price = None;
         probe_req.max_fee_per_gas = None;
         probe_req.max_priority_fee_per_gas = None;

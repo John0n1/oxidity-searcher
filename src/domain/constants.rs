@@ -303,9 +303,11 @@ pub fn default_uniswap_v3_router(chain_id: u64) -> Option<Address> {
 pub fn default_uniswap_universal_router(chain_id: u64) -> Option<Address> {
     let routers = ADDRESS_REGISTRY_DEFAULTS.routers_by_chain.get(&chain_id)?;
     routers
-        .get("uniswap_universal_router")
+        .get("uniswap_universal_router_v2_1_1")
         .copied()
+        .or_else(|| routers.get("uniswap_universal_router_v2_2").copied())
         .or_else(|| routers.get("uniswap_universal_router_v2").copied())
+        .or_else(|| routers.get("uniswap_universal_router").copied())
 }
 
 pub fn default_uniswap_universal_routers(chain_id: u64) -> Vec<Address> {
@@ -352,8 +354,31 @@ pub fn default_uniswap_v2_factory(chain_id: u64) -> Option<Address> {
     default_address_from_router_keys(chain_id, &["uniswap_v2_factory"])
 }
 
+pub fn default_sushiswap_v2_factory(chain_id: u64) -> Option<Address> {
+    default_address_from_router_keys(chain_id, &["sushiswap_v2_factory"])
+}
+
 pub fn default_uniswap_v3_factory(chain_id: u64) -> Option<Address> {
     default_address_from_router_keys(chain_id, &["uniswap_v3_factory"])
+}
+
+pub fn default_uniswap_v4_pool_manager(chain_id: u64) -> Option<Address> {
+    default_address_from_router_keys(
+        chain_id,
+        &["uniswap_v4_pool_manager", "uniswap_v4_poolmanager"],
+    )
+}
+
+pub fn default_uniswap_v4_state_view(chain_id: u64) -> Option<Address> {
+    default_address_from_router_keys(chain_id, &["uniswap_v4_state_view"])
+}
+
+pub fn default_uniswap_v4_quoter(chain_id: u64) -> Option<Address> {
+    default_address_from_router_keys(chain_id, &["uniswap_v4_quoter"])
+}
+
+pub fn default_uniswap_permit2(chain_id: u64) -> Option<Address> {
+    default_address_from_router_keys(chain_id, &["uniswap_permit2", "permit2"])
 }
 
 pub fn default_oneinch_routers(chain_id: u64) -> Vec<Address> {
@@ -493,6 +518,18 @@ mod tests {
             Some(Address::from_str("0xf62c03e08ada871a0beb309762e260a7a6a880e6").unwrap())
         );
         assert!(default_uniswap_v3_router(CHAIN_SEPOLIA).is_some());
+        assert_eq!(
+            default_uniswap_v4_pool_manager(CHAIN_SEPOLIA),
+            Some(Address::from_str("0xe03a1074c86cfedd5c142c4f04f1a1536e203543").unwrap())
+        );
+    }
+
+    #[test]
+    fn mainnet_prefers_current_universal_router() {
+        assert_eq!(
+            default_uniswap_universal_router(CHAIN_ETHEREUM),
+            Some(Address::from_str("0x4c82d1fbfe28c977cbb58d8c7ff8fcf9f70a2cca").unwrap())
+        );
     }
 
     #[test]

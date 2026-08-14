@@ -144,6 +144,27 @@ interface IUniswapV3FlashCallback {
     function uniswapV3FlashCallback(uint256 fee0, uint256 fee1, bytes calldata data) external;
 }
 
+/// @notice Minimal ABI-compatible subset of the Uniswap V4 PoolManager.
+/// @dev Uniswap V4's Currency user-defined value type has `address` as its ABI underlying type.
+interface IUniswapV4PoolManager {
+    /// @notice Unlocks the manager and calls `unlockCallback` on the caller.
+    function unlock(bytes calldata data) external returns (bytes memory);
+
+    /// @notice Checkpoints the manager's ERC20 balance before repayment.
+    function sync(address currency) external;
+
+    /// @notice Transfers currency out and records a negative caller delta.
+    function take(address currency, address to, uint256 amount) external;
+
+    /// @notice Settles the caller's outstanding currency delta.
+    function settle() external payable returns (uint256 paid);
+}
+
+interface IUniswapV4UnlockCallback {
+    /// @notice Callback invoked by the Uniswap V4 PoolManager during `unlock`.
+    function unlockCallback(bytes calldata data) external returns (bytes memory);
+}
+
 /// @title UnifiedHardenedExecutor
 /// @notice Owner-controlled executor for direct bundles and multi-provider flash loans.
 /// @dev Uses low-level token calls to tolerate non-standard ERC20 behavior.
@@ -153,7 +174,8 @@ contract UnifiedHardenedExecutor is
     IDydxCallee,
     IERC3156FlashBorrower,
     IUniswapV2Callee,
-    IUniswapV3FlashCallback
+    IUniswapV3FlashCallback,
+    IUniswapV4UnlockCallback
 {
     uint8 private constant DYDX_ACTION_DEPOSIT = 0;
     uint8 private constant DYDX_ACTION_WITHDRAW = 1;
@@ -191,6 +213,9 @@ contract UnifiedHardenedExecutor is
     address private activeUniswapV3Pool;
     bytes32 private uniswapV3LoanContextHash;
     uint256 private uniswapV3PreLoanBalance;
+    address private activeUniswapV4PoolManager;
+    bytes32 private uniswapV4LoanContextHash;
+    uint256 private uniswapV4PreLoanBalance;
 
     mapping(address => bool) public approvedProviders;
 
@@ -210,6 +235,7 @@ contract UnifiedHardenedExecutor is
     event MakerFlashLenderStateUpdated(address indexed previousLender, address indexed newLender);
     event UniswapV2PairStateUpdated(address indexed previousPair, address indexed newPair);
     event UniswapV3PoolStateUpdated(address indexed previousPool, address indexed newPool);
+    event UniswapV4PoolManagerStateUpdated(address indexed previousManager, address indexed newManager);
     event ProviderApprovalUpdated(address indexed provider, bool approved);
 
     error OnlyOwner();
@@ -260,6 +286,11 @@ contract UnifiedHardenedExecutor is
     error UniswapV3LoanNotActive();
     error UniswapV3LoanContextMismatch();
     error UniswapV3CallbackNotReceived();
+    error OnlyUniswapV4PoolManager();
+    error UniswapV4LoanNotActive();
+    error UniswapV4LoanContextMismatch();
+    error UniswapV4CallbackNotReceived();
+    error UniswapV4SettlementMismatch(uint256 expected, uint256 actual);
     error ProviderNotApproved();
 
     /// @notice Deploys the executor.
@@ -568,6 +599,37 @@ contract UnifiedHardenedExecutor is
         }
     }
 
+    /// @notice Starts a Uniswap V4 flash-accounting loan for one ERC20 currency.
+    /// @dev Uses PoolManager `unlock` + `take` + `sync`/`settle`. Native currency is intentionally
+    ///      unsupported by this entrypoint; use WETH so principal and profit accounting remain explicit.
+    /// @param poolManager Approved canonical Uniswap V4 PoolManager.
+    /// @param asset ERC20 currency borrowed from the PoolManager.
+    /// @param amount Amount borrowed. Uniswap V4 `take` flash liquidity has no separate loan premium.
+    /// @param params ABI-encoded payload containing `(targets, values, payloads)`.
+    function executeUniswapV4FlashLoan(address poolManager, address asset, uint256 amount, bytes calldata params)
+        external
+        onlyOwner
+        whenNotPaused
+        nonReentrantInitiation
+    {
+        _requireApprovedProvider(poolManager);
+        if (poolManager == address(0) || poolManager.code.length == 0) revert InvalidPool();
+        if (asset == address(0) || asset.code.length == 0) revert InvalidAsset();
+        if (amount == 0) revert ZeroAssets();
+
+        address previousManager = activeUniswapV4PoolManager;
+        activeUniswapV4PoolManager = poolManager;
+        uniswapV4PreLoanBalance = IERC20(asset).balanceOf(address(this));
+        uniswapV4LoanContextHash = keccak256(abi.encode(poolManager, asset, amount, params));
+        emit UniswapV4PoolManagerStateUpdated(previousManager, poolManager);
+
+        IUniswapV4PoolManager(poolManager).unlock(abi.encode(asset, amount, params));
+
+        if (activeUniswapV4PoolManager != address(0) || uniswapV4LoanContextHash != bytes32(0)) {
+            revert UniswapV4CallbackNotReceived();
+        }
+    }
+
     /// @notice Balancer flash loan callback that executes payload calls and repays principal plus fees.
     /// @dev Reverts unless the caller and callback context match the active flash loan session.
     /// @param tokens Borrowed token list.
@@ -623,7 +685,9 @@ contract UnifiedHardenedExecutor is
     {
         if (msg.sender != activeAavePool) revert OnlyPool();
         if (initiator != address(this)) revert OnlyOwner();
-        if (aaveLoanContextHash != keccak256(abi.encode(msg.sender, asset, amount, params))) revert AaveLoanContextMismatch();
+        if (aaveLoanContextHash != keccak256(abi.encode(msg.sender, asset, amount, params))) {
+            revert AaveLoanContextMismatch();
+        }
 
         address previousPool = activeAavePool;
         activeAavePool = address(0);
@@ -841,6 +905,52 @@ contract UnifiedHardenedExecutor is
 
         _settleProfit(asset, bal - requiredBalance);
         _safeTransfer(asset, msg.sender, amountOwing);
+    }
+
+    /// @notice Uniswap V4 PoolManager unlock callback used for free flash-accounting liquidity.
+    /// @dev The callback takes the requested ERC20, executes the owner-authenticated payload, repays
+    ///      exactly the principal through `sync`/transfer/`settle`, and distributes only the surplus.
+    /// @param data ABI-encoded `(asset, amount, params)` bound to the active session context.
+    /// @return Empty bytes on successful execution and settlement.
+    function unlockCallback(bytes calldata data) external override returns (bytes memory) {
+        address poolManager = activeUniswapV4PoolManager;
+        if (poolManager == address(0)) revert UniswapV4LoanNotActive();
+        if (msg.sender != poolManager) revert OnlyUniswapV4PoolManager();
+
+        (address asset, uint256 amount, bytes memory params) = abi.decode(data, (address, uint256, bytes));
+        bytes32 callbackContext = keccak256(abi.encode(msg.sender, asset, amount, params));
+        if (callbackContext != uniswapV4LoanContextHash) revert UniswapV4LoanContextMismatch();
+
+        address previousManager = activeUniswapV4PoolManager;
+        activeUniswapV4PoolManager = address(0);
+        uniswapV4LoanContextHash = bytes32(0);
+        uint256 preLoanBalance = uniswapV4PreLoanBalance;
+        uniswapV4PreLoanBalance = 0;
+        emit UniswapV4PoolManagerStateUpdated(previousManager, address(0));
+
+        IUniswapV4PoolManager manager = IUniswapV4PoolManager(msg.sender);
+        manager.take(asset, address(this), amount);
+
+        uint256 callbackBalance = IERC20(asset).balanceOf(address(this));
+        if (callbackBalance < preLoanBalance + amount) revert PrincipalNotReceived();
+
+        uint256 preExistingBalance = callbackBalance - amount;
+        _executePayloadFromMemory(params);
+
+        uint256 balanceAfterExecution = IERC20(asset).balanceOf(address(this));
+        uint256 requiredBalance = preExistingBalance + amount;
+        if (balanceAfterExecution < requiredBalance) {
+            revert InsufficientFundsForRepayment(asset, requiredBalance, balanceAfterExecution);
+        }
+        uint256 profit = balanceAfterExecution - requiredBalance;
+
+        manager.sync(asset);
+        _safeTransfer(asset, msg.sender, amount);
+        uint256 paid = manager.settle();
+        if (paid != amount) revert UniswapV4SettlementMismatch(amount, paid);
+
+        _settleProfit(asset, profit);
+        return bytes("");
     }
 
     /// @notice Updates the configured profit receiver.
